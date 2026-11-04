@@ -107,7 +107,8 @@ Auto/                         # repo root
 │   │   ├── EditPlaceholderView.swift # empty Video Edit / Photo Edit tabs
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
 │   │   ├── CardRow.swift     #   per-card header, phase content and actions, per-camera day chips; static StatusDot
-│   │   ├── NewShootView.swift#   sheet: shoot name, cameras, live folder preview (Theme tokens)
+│   │   ├── DayChip.swift     #   recording-day chip, shared by CardRow and the New Shoot sheet
+│   │   ├── NewShootView.swift#   sheet: shoot name, cameras and recording days, live folder preview (Theme tokens)
 │   │   └── SettingsView.swift#   Settings tab; "Soon" rows persist values nothing reads yet
 │   ├── Core/                 # pure, testable engines, no SwiftUI
 │   │   ├── VolumeWatcher.swift     #   NSWorkspace mount notifications, refresh off main
@@ -119,7 +120,8 @@ Auto/                         # repo root
 │   │   ├── BackupVerifier.swift    #   checksum-compares card files with drive candidates
 │   │   ├── CopyEngine.swift        #   verified copy with cancel
 │   │   ├── ShootDays.swift         #   recording days per camera (ShootDays.byCamera)
-│   │   └── ShootPlanner.swift      #   shoot folder naming, planned folder rows, copy jobs, CardPhase, StatusAggregator
+│   │   ├── ShootSelection.swift    #   (camera, day) include-set for a shoot; unselected files stay on the card
+│   │   └── ShootPlanner.swift      #   shoot folder naming, planned folder rows, copy jobs, destination checks (checkDestination/createDirectories), CardPhase, StatusAggregator
 │   ├── Integrations/         # (planned, Phase 3) Resolve / transcoder adapters behind protocols
 │   └── Assets.xcassets
 ├── AutoTests/                # Swift Testing target (hosted in Auto.app)
@@ -171,10 +173,11 @@ sequenceDiagram
         Model->>UI: Status = backed (green)
     else files missing
         Model->>UI: Status = unbacked, offer New Shoot
-        User->>UI: Enter shoot name, pick cameras
-        UI->>Model: createShoot(name, cameras)
-        Model->>Model: ShootPlanner builds copy jobs
-        Model->>Copy: run(jobs)
+        User->>UI: Enter shoot name, pick cameras and recording days
+        UI->>Model: createShoot(name, cameras, selection)
+        Model->>Model: ShootPlanner.createDirectories, checking each component first
+        Model->>Model: plan of selected files only (selection.filter)
+        Model->>Copy: run(jobs), each destination re-checked
         loop each file
             Copy->>Copy: stream to unique O_EXCL partial, hash while reading
             Copy->>Copy: F_FULLFSYNC, re-read uncached, compare hashes
@@ -182,8 +185,9 @@ sequenceDiagram
             Copy-->>Model: progress
         end
         Copy-->>Model: outcome (copied keys, failures)
+        Model->>Model: prune copied files from card.missing
         Model->>Verify: re-verify card files
-        Model->>UI: Status = backed, or error with reason
+        Model->>UI: Status = backed, or Not backed up (unselected files remain missing)
     end
 ```
 
@@ -218,6 +222,7 @@ The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet
    - For manual runs, launch with `-AutoFixtureCard <path>` (UserDefaults launch argument) to treat a folder as a mounted card. The window also opens at launch, since no mount event fires for it.
 5. **Integration fallbacks:** *(Phase 3, planned)* If Resolve isn't running or scripting is unavailable, the Resolve step reports "skipped: Resolve unavailable" and the ingest still counts as a success. Pipeline steps are independent and re-runnable.
 6. **Cancellation:** Copy and verification runs are cancellable. A failed or cancelled copy removes its partial file, so nothing half-written is left under a final name.
+7. **Destination checks:** Before any folder is created and again before each copy, the destination must resolve (symlinks resolved through the nearest existing ancestor) to inside the work folder, must not be on a card, and must not have a file where a folder should be (`ShootPlanner.checkDestination` / `createDirectories`). Path containment is lexical. Dangling symlinks are rejected, and the work folder itself is never created: if it is missing (drive unplugged), New Shoot and Copy stop with an error.
 
 ---
 

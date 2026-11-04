@@ -59,6 +59,15 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - [ ] Detect a work folder that is itself on a camera card
 - [x] New Shoot preview shows sanitized camera folder names
 - [ ] AppModel test harness (fake VolumeWatcher) to cover card lifecycle wiring
+- [x] New Shoot: choose cameras and recording days. Each camera has a checkbox and its days (from the card's not-yet-backed-up files), all checked by default; only checked (camera, day) pairs are copied. Files with no camera show under "Other files" (`ShootSelection`, include-set, injected calendar)
+- [x] Partial shoots: unselected files stay "Not backed up"; copied files are pruned from `card.missing` before re-verify, so a second New Shoot lists only leftovers
+- [x] Destination safety: folders created one component at a time (`ShootPlanner.createDirectories` with `checkDestination`); symlinks resolved via the nearest existing ancestor; rejects card destinations, paths outside the work folder and files where folders should be. `AppModel.copy` re-checks every destination before starting
+- [x] Path containment is lexical, fixing the `/tmp` vs `/private/tmp` mismatch that broke the shoot preview
+- [x] Camera folder suffixes skip taken names; `Camera.defaultFolderName` fallback; case-insensitive folder merge
+- [x] `DayChip` shared by CardRow and the New Shoot sheet; `Format.count` gives "1 file" / "N files"
+- [ ] Keep camera A/B suffixes consistent across cards (e.g. reuse the folder mapping already in the shoot)
+- [ ] Move `shootPreview`/`createDirectories` file checks off the main actor (debounce preview)
+- [ ] Harden `CopyEngine` against symlink swaps between check and write (`O_NOFOLLOW`/`openat`)
 
 ## Phase 3: Editing pipeline
 
@@ -109,3 +118,5 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 | 2026-11-03 | Settings is a tab in the main window, not a separate window | One window, sidebar navigation; Cmd-comma selects the tab |
 | 2026-11-03 | Backed status requires checksum verification, not name+size | Same-name/same-size RAWs from different bodies could falsely show as backed |
 | 2026-11-03 | Shoots are `<work folder>/<name>`, no client or date folders | Developer files shoots by name only; `Video`/`Photo` per camera |
+| 2026-11-03 | New Shoot copies only the checked (camera, day) pairs; unselected files stay on the card as "Not backed up" | Explicit include-set: pairs that appear in a later scan are not auto-included, so nothing is copied that the user did not check |
+| 2026-11-03 | Destination checks run before every folder creation and before every copy; path containment is lexical, symlinks resolved only at the nearest existing ancestor | Symlinks must not let a copy escape the work folder or land on a card; resolving the whole path made `/tmp` vs `/private/tmp` mismatch and broke the preview |
