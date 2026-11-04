@@ -91,6 +91,12 @@ final class AppModel {
         }
     }
 
+    /// Whether the main window is showing (not closed or minimized). Membership hashing only runs while
+    /// it is: the window object outlives a close, so the browser's onDisappear can't be relied on.
+    var mainWindowVisible = true {
+        didSet { if mainWindowVisible != oldValue { refreshBrowserMembership() } }
+    }
+
     var browsingCard: Card? {
         browsingCardID.flatMap { id in cards.first { $0.id == id } }
     }
@@ -110,6 +116,9 @@ final class AppModel {
             }
             return CardBrowser.ShootRef(id: item.id, name: item.record.name, folder: folder)
         }
+        // A `.failed` shoot (its coverage check couldn't run) still gets a group through the lexical
+        // `card.backups` fallback in `CardBrowser.group`: that copy was checksum-verified by the card
+        // verifier, so hiding it would mislead. Only checked memberships can add *more* shoots.
         // Only complete, verified results, and only for the card being browsed.
         var memberships: [UUID: Set<URL>] = [:]
         if card.id == browsingCardID {
@@ -193,6 +202,12 @@ final class AppModel {
     @ObservationIgnored private var membershipTask: Task<Void, Never>?
     @ObservationIgnored private var membershipGeneration = 0
     @ObservationIgnored private var membershipInputs: MembershipInputs?
+    /// Cards whose recompute (stat-triage Task) is in flight: the verdict isn't settled yet even though
+    /// `verifier` is nil.
+    #if DEBUG
+    @ObservationIgnored fileprivate var _testMembershipRunner: MembershipRunner?
+    #endif
+    @ObservationIgnored private var recomputePending: Set<Card.ID> = []
     /// The card whose browser is on screen (nil: none). Membership only runs while it is the browsed card.
     @ObservationIgnored private var browserOnScreen: Card.ID?
     /// Card id -> shoot a pending add-footage plan copies into.
@@ -302,6 +317,7 @@ final class AppModel {
             card.engine?.cancel(); card.verifier?.cancel()
             cancelCoverage { $0.cardID == card.id }
             addTargets[card.id] = nil
+            recomputePending.remove(card.id)
         }
         if let shown = shootSheetCard, gone.contains(where: { $0 === shown }) {
             shootSheetCard = nil
@@ -399,6 +415,7 @@ final class AppModel {
         backupShootFolders = Set(shootFolders.map(\.path))
         let cardVolumes = cards.map(\.volume)
         let workVolume = driveReady ? workingVolume : nil
+        recomputePending.insert(card.id)
         // Never leave a stale green up while re-checking (in the header or the card browser).
         if card.phase == .backed { card.phase = .scanning; card.backups = [:] }
         Task {
@@ -409,7 +426,9 @@ final class AppModel {
             // Triage stats every candidate on disk, so it runs off the main actor.
             let triage = await BackupVerifier.triageOffMain(files: card.files, candidates: candidates, cache: verifications)
             // Superseded by a copy, a new plan, a rescan or a newer recompute.
-            guard card.recomputeGeneration == generation, card.engine == nil, card.phase != .copying else { return }
+            guard card.recomputeGeneration == generation else { return }
+            recomputePending.remove(card.id)
+            guard card.engine == nil, card.phase != .copying else { return }
             settle(card, triage: triage, candidates: candidates, driveReady: driveReady)
         }
     }
@@ -485,11 +504,19 @@ final class AppModel {
         card.verifier?.cancel()
         card.verifier = nil
         card.recomputeGeneration += 1
+        recomputePending.remove(card.id)
+    }
+
+    /// Every path that stops the verifier (and its triage) and then settles the card itself, instead of
+    /// letting `finishRecompute` run, must end here so the browser's membership leaves `.checking`.
+    private func cardSettledAfterStop(_ card: Card) {
+        if card.id == browsingCardID { refreshBrowserMembership() }
     }
 
     private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {
-        // Every exit: the verdict (and so the browser's membership inputs) may have changed.
-        defer { if card.id == browsingCardID { refreshBrowserMembership(force: true) } }
+        // Every exit: the card may have settled. A plain refresh restarts the run only when its inputs
+        // (files, verdict, session copies, shoots) changed or the run was stopped.
+        defer { if card.id == browsingCardID { refreshBrowserMembership() } }
         card.missing = BackupVerifier.missing(files: card.files, results: results)
         card.backups = results.compactMapValues { if case .verified(let copy) = $0 { copy } else { nil } }
         guard let phase = CardPhase.afterVerify(fileCount: card.files.count, missingCount: card.missing.count,
@@ -550,6 +577,7 @@ final class AppModel {
         card.plan = ShootPlanner.flatPlan(missing: card.missing, into: dir)
         addTargets[card.id] = nil
         card.phase = .ready
+        cardSettledAfterStop(card)
     }
 
     /// Every connected card volume plus `card`'s own (it may be stale), deduplicated.
@@ -596,6 +624,7 @@ final class AppModel {
         stopVerifier(card)
         if isOnCard(plan.destinationRoot) {
             card.phase = .failed(CardDestinationError().localizedDescription)
+            cardSettledAfterStop(card)
             return
         }
         do {
@@ -606,11 +635,13 @@ final class AppModel {
             }
         } catch {
             card.phase = .failed(error.localizedDescription)
+            cardSettledAfterStop(card)
             return
         }
         let values = try? plan.destinationRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         if let free = values?.volumeAvailableCapacityForImportantUsage, free < plan.bytes {
             card.phase = .failed("Not enough space: needs \(Format.bytes(plan.bytes)), \(Format.bytes(free)) free.")
+            cardSettledAfterStop(card)
             return
         }
 
@@ -723,6 +754,9 @@ extension AppModel {
         let cardID: Card.ID
         let files: [MediaFile]
         let targets: [ShootMembership.Target]
+        let backups: [URL: URL]
+        let missing: Set<URL>
+        let sessionCopies: [URL]
     }
 
     /// The browser for `cardID` is on screen.
@@ -760,7 +794,7 @@ extension AppModel {
 
     /// The card is about to change under the browser: drop the running check and show "checking".
     private func invalidateBrowserMembership(for card: Card) {
-        guard card.id == browsingCardID, browserOnScreen == card.id else { return }
+        guard mainWindowVisible, card.id == browsingCardID, browserOnScreen == card.id else { return }
         stopMembership()
         markMembershipChecking(onlineMembershipTargets())
     }
@@ -768,7 +802,7 @@ extension AppModel {
     /// Starts, restarts or clears the browser's per-shoot membership check for the browsed card.
     /// Read-only; results are stored only when complete and still current.
     func refreshBrowserMembership(force: Bool = false) {
-        guard let card = browsingCard, browserOnScreen == card.id else {
+        guard mainWindowVisible, let card = browsingCard, browserOnScreen == card.id else {
             stopMembership()
             if !browserMembership.isEmpty { browserMembership = [:] }
             return
@@ -783,7 +817,8 @@ extension AppModel {
         let targets = onlineMembershipTargets()
         let settled: Bool
         switch card.phase {
-        case .needsBackup, .ready, .backed, .failed: settled = card.engine == nil && card.verifier == nil
+        case .needsBackup, .ready, .backed, .failed:
+            settled = card.engine == nil && card.verifier == nil && !recomputePending.contains(card.id)
         default: settled = false
         }
         guard settled else {
@@ -791,7 +826,8 @@ extension AppModel {
             markMembershipChecking(targets)
             return
         }
-        let inputs = MembershipInputs(cardID: card.id, files: card.files, targets: targets)
+        let inputs = MembershipInputs(cardID: card.id, files: card.files, targets: targets, backups: card.backups,
+                                      missing: Set(card.missing.map(\.url)), sessionCopies: sessionCopies.map(\.destination))
         if !force, membershipInputs == inputs {
             let finished = targets.allSatisfy { target in
                 switch browserMembership[target.id] {
@@ -813,21 +849,39 @@ extension AppModel {
         let copies = sessionCopies
         let cache = verifications
         let volumes = cardVolumes()
+        #if DEBUG
+        let runner = _testMembershipRunner
+        #endif
         membershipTask = Task {
+            #if DEBUG
+            if let runner {
+                await runner(files, targets) { [self] id, outcome in deliverMembership(id, outcome, generation: generation, cardID: cardID) }
+                if generation == membershipGeneration { membershipTask = nil }
+                return
+            }
+            #endif
             await ShootMembership.run(files: files, targets: targets, sessionCopies: copies, cache: cache,
                                       cardVolumes: volumes) { [self] id, outcome in
-                // Superseded, or the user moved to another card: never store a stale result.
-                guard generation == membershipGeneration, browsingCardID == cardID else { return }
-                switch outcome {
-                case .verified(let urls, let copies): browserMembership[id] = .done(urls, copies: copies)
-                case .failed(let reason): browserMembership[id] = .failed(reason)
-                }
+                deliverMembership(id, outcome, generation: generation, cardID: cardID)
             }
             if generation == membershipGeneration { membershipTask = nil }
         }
     }
 
+    /// Superseded, or the user moved to another card: never store a stale result.
+    private func deliverMembership(_ id: UUID, _ outcome: ShootMembership.Outcome, generation: Int, cardID: Card.ID) {
+        guard generation == membershipGeneration, browsingCardID == cardID else { return }
+        switch outcome {
+        case .verified(let urls, let copies): browserMembership[id] = .done(urls, copies: copies)
+        case .failed(let reason): browserMembership[id] = .failed(reason)
+        }
+    }
+
     #if DEBUG
+    /// Test seam: replaces `ShootMembership.run`, so a test can deliver a result after supersession.
+    typealias MembershipRunner = @Sendable ([MediaFile], [ShootMembership.Target],
+                                            @escaping @MainActor @Sendable (UUID, ShootMembership.Outcome) -> Void) async -> Void
+    func _testSetMembershipRunner(_ runner: MembershipRunner?) { _testMembershipRunner = runner }
     func _testBrowserMembershipIdle() async { await membershipTask?.value }
     #endif
 
@@ -1163,6 +1217,7 @@ extension AppModel {
         card.plan = ShootPlanner.plan(jobs: jobs, shoot: folder, workRoot: folder)
         addTargets[cardID] = shootID
         card.phase = .ready
+        cardSettledAfterStop(card)
         shootSheet = nil
         shootSheetCard = nil
     }

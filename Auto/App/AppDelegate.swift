@@ -111,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         mainWindow?.makeKeyAndOrderFront(nil)
+        model.mainWindowVisible = true
     }
 
     /// Settings is a tab in the main window. Owned here (not SwiftUI's `openSettings`), which is unreliable
@@ -140,5 +141,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow, closing === mainWindow else { return }
         NSApp.setActivationPolicy(.accessory)
+        // The window object survives a close, so SwiftUI's onDisappear may never fire: stop background work.
+        model.mainWindowVisible = false
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        guard notification.object as? NSWindow === mainWindow else { return }
+        model.mainWindowVisible = false
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        guard notification.object as? NSWindow === mainWindow else { return }
+        model.mainWindowVisible = true
     }
 }
