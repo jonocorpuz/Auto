@@ -155,21 +155,6 @@ nonisolated enum ShootPlanner {
         }
     }
 
-    /// First path component of any destination that exists but isn't a folder (preview warning).
-    static func problem(for dirs: [URL]) -> PathError? {
-        for dir in dirs {
-            var current = URL(fileURLWithPath: "/")
-            for part in lexicalComponents(dir).dropFirst() {
-                current.appendPathComponent(part)
-                var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: current.path, isDirectory: &isDir) {
-                    if !isDir.boolValue { return .notAFolder(part) }
-                } else { break }
-            }
-        }
-        return nil
-    }
-
     /// Shoot folder: root/<name>. Throws if the name isn't usable or the result would escape `root`.
     static func shootURL(root: URL, name: String) throws -> URL {
         guard let folder = safeComponent(name) else { throw PathError.invalidName }
@@ -184,29 +169,6 @@ nonisolated enum ShootPlanner {
         var result: [URL] = []
         for job in jobs where seen.insert(job.destDir.path).inserted { result.append(job.destDir) }
         return result.sorted { $0.path < $1.path }
-    }
-
-    /// Folder tree rows for the preview: shoot, then Video and Photo sections with their camera folders.
-    static func folders(for jobs: [CopyJob], shoot: URL, root: URL) -> [PlannedFolder] {
-        func parts(_ url: URL, relativeTo base: URL) -> [String]? { relativeComponents(url, to: base) }
-        guard let shootParts = parts(shoot, relativeTo: root) else { return [] }
-        var rows = [PlannedFolder(components: shootParts, fileCount: 0, isPhoto: false)]
-        for section in [videoFolder, photoFolder] {
-            var order: [[String]] = []
-            var counts: [[String]: Int] = [:]
-            for job in jobs {
-                guard let rel = parts(job.destDir, relativeTo: shoot), rel.first == section else { continue }
-                if counts[rel] == nil { order.append(rel) }
-                counts[rel, default: 0] += 1
-            }
-            guard !order.isEmpty else { continue }
-            let isPhoto = section == photoFolder
-            rows.append(PlannedFolder(components: shootParts + [section], fileCount: counts[[section]] ?? 0, isPhoto: isPhoto))
-            for rel in order where rel != [section] {
-                rows.append(PlannedFolder(components: shootParts + rel, fileCount: counts[rel] ?? 0, isPhoto: isPhoto))
-            }
-        }
-        return rows
     }
 
     /// Video/Photo/<camera folder> per missing file. Cameras with an empty folder name use their model;
@@ -242,25 +204,6 @@ nonisolated enum ShootPlanner {
         CopyPlan(jobs: missing.map { CopyJob(file: $0, destDir: dir) }, destinationLabel: dir.lastPathComponent, destinationRoot: dir, workRoot: dir)
     }
 
-}
-
-/// What the New Shoot sheet shows: planned folders, counts of the selected files and any blocking problem.
-nonisolated struct ShootPreview: Sendable, Equatable {
-    var folders: [PlannedFolder]
-    var videoCount: Int
-    var photoCount: Int
-    var problem: String?
-}
-
-/// One row of the planned folder tree shown before copying.
-nonisolated struct PlannedFolder: Sendable, Equatable, Identifiable {
-    var components: [String]
-    var fileCount: Int
-    var isPhoto: Bool
-    var exists = false
-    var id: String { components.joined(separator: "/") }
-    var name: String { components.last ?? "" }
-    var depth: Int { components.count - 1 }
 }
 
 /// Aggregate status across cards.
