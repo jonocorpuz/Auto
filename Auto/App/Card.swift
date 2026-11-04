@@ -28,6 +28,8 @@ final class Card: Identifiable {
     var ejectError: String?
     @ObservationIgnored var engine: CopyEngine?
     @ObservationIgnored var verifier: BackupVerifier?
+    /// Bumped whenever pending verify work for this card is superseded.
+    @ObservationIgnored var recomputeGeneration = 0
 
     init(volume: URL, name: String, identity: String? = nil) {
         self.volume = volume

@@ -221,8 +221,19 @@ final class AppModel {
         // Session copy destinations count wherever they are (work drive or a chosen folder),
         // but only through the cache entry for that exact card file, or a fresh checksum.
         let candidates = BackupVerifier.addingCandidates(sessionCopies, to: driveReady ? index : [:])
-        let triage = BackupVerifier.triage(files: card.files, candidates: candidates, cache: verifications)
+        let generation = card.recomputeGeneration
+        // Never leave a stale green up while re-checking.
+        if card.phase == .backed { card.phase = .scanning }
+        Task {
+            // Triage stats every candidate on disk, so it runs off the main actor.
+            let triage = await BackupVerifier.triageOffMain(files: card.files, candidates: candidates, cache: verifications)
+            // Superseded by a copy, a new plan, a rescan or a newer recompute.
+            guard card.recomputeGeneration == generation, card.engine == nil, card.phase != .copying else { return }
+            settle(card, triage: triage, candidates: candidates, driveReady: driveReady)
+        }
+    }
 
+    private func settle(_ card: Card, triage: (settled: [URL: VerifyResult], toVerify: [MediaFile]), candidates: [String: [URL]], driveReady: Bool) {
         let allVerified = triage.toVerify.isEmpty && card.files.allSatisfy { triage.settled[$0.url]?.isVerified == true }
         if indexing && driveReady && !allVerified {
             card.phase = .scanning
@@ -255,9 +266,11 @@ final class AppModel {
         }
     }
 
+    /// Cancels any verify, and any triage still in flight, for this card.
     private func stopVerifier(_ card: Card) {
         card.verifier?.cancel()
         card.verifier = nil
+        card.recomputeGeneration += 1
     }
 
     private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {

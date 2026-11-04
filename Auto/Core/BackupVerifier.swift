@@ -99,6 +99,15 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
         return (settled, toVerify)
     }
 
+    /// `triage` without blocking the caller: the cache lookup stats every candidate on disk.
+    @concurrent static func triageOffMain(
+        files: [MediaFile],
+        candidates: [String: [URL]],
+        cache: VerificationCache?
+    ) async -> (settled: [URL: VerifyResult], toVerify: [MediaFile]) {
+        triage(files: files, candidates: candidates, cache: cache)
+    }
+
     /// Hashes each card file once, then candidates in order until one matches. Runs off the main
     /// thread; progress arrives on the main actor and nothing is delivered after this returns.
     func run(
