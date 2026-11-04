@@ -203,12 +203,20 @@ nonisolated enum ShootPlanner {
     static func jobs(missing: [MediaFile], shoot: URL, cameras: [Camera], fallback: String) -> [CopyJob] {
         var folderFor: [String: String] = [:]
         for camera in cameras {
-            folderFor[camera.id] = safeComponent(camera.folderName) ?? safeComponent(camera.model) ?? "Camera"
+            folderFor[camera.id] = safeComponent(camera.folderName)
+                ?? safeComponent(camera.defaultFolderName)
+                ?? safeComponent(camera.model)
+                ?? "Camera"
         }
         let fallbackFolder = safeComponent(fallback) ?? "Card"
+        // Names differing only by case are one folder on APFS: keep the first spelling seen per section.
+        var spelling: [String: String] = [:]
         return missing.map { file in
             let section = file.kind == .photo ? photoFolder : videoFolder
-            let dir = shoot.appendingPathComponent(section).appendingPathComponent(folderFor[file.cameraID] ?? fallbackFolder)
+            let raw = folderFor[file.cameraID] ?? fallbackFolder
+            let name = spelling[section + "/" + raw.lowercased(), default: raw]
+            spelling[section + "/" + raw.lowercased()] = name
+            let dir = shoot.appendingPathComponent(section).appendingPathComponent(name)
             return CopyJob(file: file, destDir: dir)
         }
     }
@@ -223,6 +231,14 @@ nonisolated enum ShootPlanner {
         CopyPlan(jobs: missing.map { CopyJob(file: $0, destDir: dir) }, destinationLabel: dir.lastPathComponent, destinationRoot: dir)
     }
 
+}
+
+/// What the New Shoot sheet shows: planned folders, counts of the selected files and any blocking problem.
+nonisolated struct ShootPreview: Sendable, Equatable {
+    var folders: [PlannedFolder]
+    var videoCount: Int
+    var photoCount: Int
+    var problem: String?
 }
 
 /// One row of the planned folder tree shown before copying.

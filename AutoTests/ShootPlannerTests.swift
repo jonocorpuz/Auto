@@ -47,6 +47,27 @@ struct ShootPlannerTests {
         #expect(jobs.map(\.destDir.path) == ["/w/C/s/Video/..-..-evil", "/w/C/s/Video/Card"])
     }
 
+    @Test func jobsFallBackToDefaultFolderName() {
+        var cam = Camera(id: "a", model: "FX3", serial: nil, folderName: "FX3 B")
+        cam.folderName = ""
+        let jobs = ShootPlanner.jobs(missing: [file("1.MP4", kind: .video, camera: "a")],
+                                     shoot: URL(fileURLWithPath: "/w/s"), cameras: [cam], fallback: "CARD")
+        #expect(jobs.map(\.destDir.path) == ["/w/s/Video/FX3 B"])
+    }
+
+    @Test func foldersMergeCaseVariants() {
+        let cams = [Camera(id: "a", model: "FX3", serial: nil, folderName: "FX3"),
+                    Camera(id: "b", model: "FX3", serial: nil, folderName: "fx3")]
+        let shoot = URL(fileURLWithPath: "/w/s"), root = URL(fileURLWithPath: "/w")
+        let jobs = ShootPlanner.jobs(missing: [file("1.MP4", kind: .video, camera: "a"), file("2.MP4", kind: .video, camera: "b"),
+                                               file("3.JPG", kind: .photo, camera: "b")],
+                                     shoot: shoot, cameras: cams, fallback: "CARD")
+        #expect(ShootPlanner.directories(for: jobs).map(\.path) == ["/w/s/Photo/fx3", "/w/s/Video/FX3"])
+        let rows = ShootPlanner.folders(for: jobs, shoot: shoot, root: root)
+        #expect(rows.filter { $0.components.last == "FX3" }.map(\.fileCount) == [2])
+        #expect(!rows.contains { $0.components.last == "fx3" && !$0.isPhoto })
+    }
+
     @Test func jobsSplitVideoAndPhotoPerCamera() {
         let cams = [Camera(id: "a", model: "FX3", serial: nil, folderName: "A-cam"),
                     Camera(id: "b", model: "A7", serial: nil, folderName: " ")]
