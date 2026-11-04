@@ -12,3 +12,11 @@ enum CoverageState: Equatable {
     case done(ShootCoverage)
     case failed(String)
 }
+
+/// Per-shoot result of the card browser's membership check for the browsed card.
+/// `done` only ever carries a complete, checksum-verified result.
+enum BrowserMembershipState: Equatable {
+    case checking
+    case done(Set<URL>, copies: [URL: URL])
+    case failed(String)
+}

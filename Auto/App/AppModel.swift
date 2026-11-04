@@ -44,6 +44,9 @@ final class AppModel {
     private(set) var indexing = false
     /// Per (shoot, card) coverage checks for the Add Footage sheet.
     private(set) var coverage: [CoverageKey: CoverageState] = [:]
+    /// Which shoots hold a verified copy of the browsed card's files. Browsed card only; separate from
+    /// `coverage` (which Add Footage awaits).
+    private(set) var browserMembership: [UUID: BrowserMembershipState] = [:]
     /// Calendar used to split recordings into days (scan and New Shoot selection).
     let calendar = Calendar.current
 
@@ -84,6 +87,7 @@ final class AppModel {
             fileThumbnails.removeAll()
             missingThumbnails.removeAll()
             browserCache = nil
+            refreshBrowserMembership()
         }
     }
 
@@ -96,17 +100,28 @@ final class AppModel {
     func browserGroups(for card: Card) -> [CardBrowser.Group] {
         // Every registered shoot, online or not: a copy in a shoot that just went offline still belongs
         // to it until the re-verify drops it, rather than falling into "Backed Up Elsewhere".
-        let refs = shoots.map { item -> CardBrowser.ShootRef in
+        // A missing or mismatched shoot's folder is no longer that shoot: it isn't a group.
+        let refs = shoots.compactMap { item -> CardBrowser.ShootRef? in
             let folder: URL
-            if case .online(let shoot)? = item.availability { folder = shoot.folder }
-            else { folder = URL(fileURLWithPath: item.record.path, isDirectory: true) }
+            switch item.availability {
+            case .online(let shoot)?: folder = shoot.folder
+            case .missing?, .mismatch?: return nil
+            case .offline?, nil: folder = URL(fileURLWithPath: item.record.path, isDirectory: true)
+            }
             return CardBrowser.ShootRef(id: item.id, name: item.record.name, folder: folder)
         }
+        // Only complete, verified results, and only for the card being browsed.
+        var memberships: [UUID: Set<URL>] = [:]
+        if card.id == browsingCardID {
+            for (id, state) in browserMembership {
+                if case .done(let urls, _) = state { memberships[id] = urls }
+            }
+        }
         let key = BrowserKey(cardID: card.id, files: card.files, backups: card.backups,
-                             missing: Set(card.missing.map(\.url)), shoots: refs)
+                             missing: Set(card.missing.map(\.url)), shoots: refs, memberships: memberships)
         if let browserCache, browserCache.key == key { return browserCache.groups }
         let groups = CardBrowser.group(files: card.files, backups: card.backups, missing: key.missing,
-                                       shoots: refs, memberships: [:])
+                                       shoots: refs, memberships: memberships)
         browserCache = (key, groups)
         return groups
     }
@@ -117,6 +132,17 @@ final class AppModel {
         let backups: [URL: URL]
         let missing: Set<URL>
         let shoots: [CardBrowser.ShootRef]
+        let memberships: [UUID: Set<URL>]
+    }
+
+    /// Verified copies to reveal for `files`: inside a shoot group, that shoot's own copies (when its
+    /// check is done); otherwise the card's backup verdict.
+    func browserBackupCopies(_ files: [MediaFile], in kind: CardBrowser.GroupKind?) -> [URL] {
+        if case .shoot(let id)? = kind, case .done(_, let copies)? = browserMembership[id] {
+            return files.compactMap { copies[$0.url] }
+        }
+        guard let card = browsingCard else { return [] }
+        return files.compactMap { card.backups[$0.url] }
     }
 
     /// Light/dark preference, applied app-wide.
@@ -164,6 +190,11 @@ final class AppModel {
     @ObservationIgnored private var coverageTasks: [CoverageKey: Task<Void, Never>] = [:]
     @ObservationIgnored private var coverageGenerations: [CoverageKey: Int] = [:]
     @ObservationIgnored private var coverageCounter = 0
+    @ObservationIgnored private var membershipTask: Task<Void, Never>?
+    @ObservationIgnored private var membershipGeneration = 0
+    @ObservationIgnored private var membershipInputs: MembershipInputs?
+    /// The card whose browser is on screen (nil: none). Membership only runs while it is the browsed card.
+    @ObservationIgnored private var browserOnScreen: Card.ID?
     /// Card id -> shoot a pending add-footage plan copies into.
     @ObservationIgnored private var addTargets: [Card.ID: UUID] = [:]
     /// Online shoot folders the current backup verification considered (to detect changes).
@@ -278,6 +309,7 @@ final class AppModel {
         }
         if case .add(_, let cardID?) = shootSheet, gone.contains(where: { $0.id == cardID }) { shootSheet = nil }
         cards.removeAll { card in gone.contains { $0 === card } }
+        if let browsing = browsingCardID, !cards.contains(where: { $0.id == browsing }) { browsingCardID = nil }
 
         var added = false
         for (url, identity) in identified where !cards.contains(where: { $0.identity == identity }) {
@@ -300,6 +332,7 @@ final class AppModel {
         card.backups = [:]
         // The file list is about to change: any coverage computed from it is stale.
         cancelCoverage { $0.cardID == card.id }
+        invalidateBrowserMembership(for: card)
         Task {
             let result = await CardScanner.scan(card.volume, volumeName: card.name)
             card.files = result.files
@@ -345,6 +378,7 @@ final class AppModel {
     private func recompute(_ card: Card) {
         if case .copying = card.phase { return }
         stopVerifier(card)
+        invalidateBrowserMembership(for: card)
 
         // No media, or a scan error: never verify, never backed.
         if let phase = CardPhase.afterScan(fileCount: card.files.count, error: card.scanError) {
@@ -352,6 +386,7 @@ final class AppModel {
             card.backups = [:]
             card.plan = nil
             card.phase = phase
+            refreshBrowserMembership()
             return
         }
 
@@ -453,6 +488,8 @@ final class AppModel {
     }
 
     private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {
+        // Every exit: the verdict (and so the browser's membership inputs) may have changed.
+        defer { if card.id == browsingCardID { refreshBrowserMembership(force: true) } }
         card.missing = BackupVerifier.missing(files: card.files, results: results)
         card.backups = results.compactMapValues { if case .verified(let copy) = $0 { copy } else { nil } }
         guard let phase = CardPhase.afterVerify(fileCount: card.files.count, missingCount: card.missing.count,
@@ -579,6 +616,7 @@ final class AppModel {
 
         let engine = CopyEngine()
         card.engine = engine
+        invalidateBrowserMembership(for: card)
         card.progress = CopyProgress(filesTotal: plan.jobs.count, bytesTotal: plan.bytes)
         card.phase = .copying
         let addShootID = addTargets[card.id]
@@ -593,6 +631,7 @@ final class AppModel {
                 guard card.engine === engine else { return }
                 card.engine = nil
                 card.phase = .failed(error.localizedDescription)
+                refreshBrowserMembership(force: true)
                 return
             }
             guard card.engine === engine else { return }
@@ -623,6 +662,8 @@ final class AppModel {
                 return false
             }
             for item in landed { checkCoverage(shootID: item.id, cardID: card.id) }
+            // Another card's copy landing in a shoot changes the browsed card's membership too.
+            if !landed.isEmpty, card.id != browsingCardID { refreshBrowserMembership(force: true) }
             if !landed.isEmpty { await refreshShoots() }
             if !outcome.cancelled { openMainWindow() }
         }
@@ -676,6 +717,120 @@ final class AppModel {
 }
 
 extension AppModel {
+    // MARK: Browser membership
+
+    fileprivate struct MembershipInputs: Equatable {
+        let cardID: Card.ID
+        let files: [MediaFile]
+        let targets: [ShootMembership.Target]
+    }
+
+    /// The browser for `cardID` is on screen.
+    func browserAppeared(_ cardID: Card.ID) {
+        browserOnScreen = cardID
+        refreshBrowserMembership()
+    }
+
+    /// Clears only when `cardID` is still the one on screen (a swapped-in browser may have appeared first).
+    func browserDisappeared(_ cardID: Card.ID) {
+        guard browserOnScreen == cardID else { return }
+        browserOnScreen = nil
+        refreshBrowserMembership()
+    }
+
+    private func onlineMembershipTargets() -> [ShootMembership.Target] {
+        shoots.compactMap { item in
+            if case .online(let shoot)? = item.availability {
+                return ShootMembership.Target(id: item.id, folder: shoot.folder.standardizedFileURL)
+            }
+            return nil
+        }
+    }
+
+    private func stopMembership() {
+        membershipTask?.cancel()
+        membershipTask = nil
+        membershipGeneration += 1
+        membershipInputs = nil
+    }
+
+    private func markMembershipChecking(_ targets: [ShootMembership.Target]) {
+        browserMembership = Dictionary(targets.map { ($0.id, BrowserMembershipState.checking) }) { $1 }
+    }
+
+    /// The card is about to change under the browser: drop the running check and show "checking".
+    private func invalidateBrowserMembership(for card: Card) {
+        guard card.id == browsingCardID, browserOnScreen == card.id else { return }
+        stopMembership()
+        markMembershipChecking(onlineMembershipTargets())
+    }
+
+    /// Starts, restarts or clears the browser's per-shoot membership check for the browsed card.
+    /// Read-only; results are stored only when complete and still current.
+    func refreshBrowserMembership(force: Bool = false) {
+        guard let card = browsingCard, browserOnScreen == card.id else {
+            stopMembership()
+            if !browserMembership.isEmpty { browserMembership = [:] }
+            return
+        }
+        switch card.phase {
+        case .empty, .unreadable:
+            stopMembership()
+            if !browserMembership.isEmpty { browserMembership = [:] }
+            return
+        default: break
+        }
+        let targets = onlineMembershipTargets()
+        let settled: Bool
+        switch card.phase {
+        case .needsBackup, .ready, .backed, .failed: settled = card.engine == nil && card.verifier == nil
+        default: settled = false
+        }
+        guard settled else {
+            stopMembership()
+            markMembershipChecking(targets)
+            return
+        }
+        let inputs = MembershipInputs(cardID: card.id, files: card.files, targets: targets)
+        if !force, membershipInputs == inputs {
+            let finished = targets.allSatisfy { target in
+                switch browserMembership[target.id] {
+                case .done?, .failed?: true
+                default: false
+                }
+            }
+            if membershipTask != nil || finished { return }
+        }
+
+        membershipTask?.cancel()
+        membershipGeneration += 1
+        let generation = membershipGeneration
+        membershipInputs = inputs
+        markMembershipChecking(targets)
+        guard !targets.isEmpty else { membershipTask = nil; return }
+        let cardID = card.id
+        let files = card.files
+        let copies = sessionCopies
+        let cache = verifications
+        let volumes = cardVolumes()
+        membershipTask = Task {
+            await ShootMembership.run(files: files, targets: targets, sessionCopies: copies, cache: cache,
+                                      cardVolumes: volumes) { [self] id, outcome in
+                // Superseded, or the user moved to another card: never store a stale result.
+                guard generation == membershipGeneration, browsingCardID == cardID else { return }
+                switch outcome {
+                case .verified(let urls, let copies): browserMembership[id] = .done(urls, copies: copies)
+                case .failed(let reason): browserMembership[id] = .failed(reason)
+                }
+            }
+            if generation == membershipGeneration { membershipTask = nil }
+        }
+    }
+
+    #if DEBUG
+    func _testBrowserMembershipIdle() async { await membershipTask?.value }
+    #endif
+
     // MARK: Shoot registry
 
     private func cardVolumes() -> [URL] { cards.map(\.volume) }
@@ -740,6 +895,7 @@ extension AppModel {
         if Set(onlineShootFolders().map(\.path)) != backupShootFolders {
             cards.forEach { recompute($0) }
         }
+        refreshBrowserMembership()
 
         let online: [(UUID, URL)] = shoots.compactMap { item in
             if case .online(let shoot)? = item.availability { return (item.id, shoot.folder) }
