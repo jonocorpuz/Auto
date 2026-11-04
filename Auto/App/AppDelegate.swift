@@ -18,7 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         observeStatus()
         model.openMainWindow = { [weak self] in self?.openMainWindow() }
         model.start()
-        if model.workRoot == nil { openMainWindow() }
+        // Dev convenience: a fixture card also opens the window at launch, since no mount event fires for it.
+        if model.workRoot == nil || VolumeWatcher.fixtureCard(from: .standard) != nil { openMainWindow() }
     }
 
     /// Launching the app again (Finder, Spotlight, `open`) brings the window forward.
