@@ -65,8 +65,22 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - [x] Path containment is lexical, fixing the `/tmp` vs `/private/tmp` mismatch that broke the shoot preview
 - [x] Camera folder suffixes skip taken names; `Camera.defaultFolderName` fallback; case-insensitive folder merge
 - [x] `DayChip` shared by CardRow and the New Shoot sheet; `Format.count` gives "1 file" / "N files"
+- [x] Shoots are first-class: a shoot is a name, one recording date and a user-chosen location (`<parent>/<name>/{Video,Photo}/<camera>/`); other days are added manually
+- [x] `Shoot` + `ShootSidecar`: `.auto-shoot.json` in each shoot folder, versioned (v1: id, name, day `yyyy-MM-dd`, createdAt)
+- [x] `ShootFolders`: classifies a name or folder (free, existing shoot, plain folder, not a folder, unreadable, invalid name); creates shoots with an exclusive mkdir (the parent is never created) and an exclusive sidecar write (`O_EXCL` temp, `F_FULLFSYNC`, `renameatx_np` `RENAME_EXCL`, card check). Plain folders are adopted only through "Use this folder"
+- [x] `ShootRegistry` / `ShootStore`: known shoots in `~/Library/Application Support/Auto/shoots.json`; a corrupt file is kept as `shoots.json.corrupt-<ts>`; saves are serialized (`ShootRegistrySaver`); availability is online / offline / missing / mismatch; discovery looks one level under the work folder; card folders count as missing
+- [x] `ShootCoverage` / `ShootCoverageChecker`: per (shoot, card), checksum-verified, cancellable and off main; only looks inside the shoot folder and never counts card files; an unreadable shoot folder is a failure, not zero
+- [x] `ShootSummary` (counts + representative file); `ThumbnailProvider` with `QLThumbnailProvider` (QuickLook) and a fake for tests
+- [x] `AppModel` shoots: load, create, adopt, locate, forget (forget removes the registry entry only, never files), coverage per (shoot, card), `addFootage` (fresh coverage awaited, plans only files not in the shoot, works for backed cards too)
+- [x] Verified copies in any online registered shoot count toward a card's backed-up status; roots containing cards are excluded and volume identity de-duplicates
+- [x] Sidebar "Ingest" renamed "New Shoot"; Media "Recent shoots" replaced by a "Shoots" grid (thumbnail, counts, offline/missing dimmed, Locate…, Remove from Auto)
+- [x] `NewShootView` create mode (name, date, location, collision line + "Use this folder"); `AddFootageSheet` (card picker, date auto-selection, completeness banner, "Add N files"); CardRow "Add to Shoot" menu with date-matched shoots first
+- [x] Card-first shoot flow removed (`createShoot(card:…)`, `shootPreview`, `ingestCandidate`); shoot-first flow is the only one
+- [ ] Shoot flows are untested on the card-lifecycle paths: card removal clearing coverage, `addFootage` before coverage finishes, copy completion re-running coverage, recompute with a card inside a shoot, `mkdir` EEXIST race. Needs a card-source injection seam instead of `#if DEBUG _testInsert`
+- [ ] Verify the Shoots grid and New Shoot / Add Footage sheets visually (launch the app, check the window); not yet done
+- [ ] Per-root `DriveIndex` caching across recomputes
 - [ ] Keep camera A/B suffixes consistent across cards (e.g. reuse the folder mapping already in the shoot)
-- [ ] Move `shootPreview`/`createDirectories` file checks off the main actor (debounce preview)
+- [ ] Move `shootPreview`/`createDirectories` file checks off the main actor (debounce preview); `shootPreview` is gone, so re-check the same checks in `ShootFolders` and `addFootage`
 - [ ] Harden `CopyEngine` against symlink swaps between check and write (`O_NOFOLLOW`/`openat`)
 
 ## Phase 3: Editing pipeline
@@ -82,7 +96,7 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 
 - [x] Main window redesign: sidebar tabs (Media, Video Edit, Photo Edit, Settings), Ingest button, account row, floating content panel
 - [x] Light/dark/system appearance (Settings tab + account menu)
-- [ ] Media tab: real "Recent shoots" grid from the work folder (placeholder tiles now)
+- [x] Media tab: "Shoots" grid from the shoot registry (thumbnails, counts, availability); placeholder tiles gone
 - [ ] Video Edit / Photo Edit tabs (empty placeholders now)
 - [ ] Wire up "Soon" settings: eject after backup, sound, proxy codec/resolution, Resolve project + frame rate, RAW+JPEG grouping, DNG
 - [ ] User accounts (sidebar shows the local macOS user for now)
@@ -102,6 +116,8 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - xxHash for faster verification on large cards
 - Proxy generation in Resolve instead of AVFoundation
 - Investigate one-off Media Library (Apple Music) TCC prompt seen on a fresh build; likely stale TCC grant after re-signing
+- Show in Finder for shoots (cards already have it)
+- Edit a shoot's name or date (v1: fixed at creation)
 
 ## Key Decisions
 
@@ -120,3 +136,10 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 | 2026-11-03 | Shoots are `<work folder>/<name>`, no client or date folders | Developer files shoots by name only; `Video`/`Photo` per camera |
 | 2026-11-03 | New Shoot copies only the checked (camera, day) pairs; unselected files stay on the card as "Not backed up" | Explicit include-set: pairs that appear in a later scan are not auto-included, so nothing is copied that the user did not check |
 | 2026-11-03 | Destination checks run before every folder creation and before every copy; path containment is lexical, symlinks resolved only at the nearest existing ancestor | Symlinks must not let a copy escape the work folder or land on a card; resolving the whole path made `/tmp` vs `/private/tmp` mismatch and broke the preview |
+| 2026-11-03 | Shoots are first-class: name + one recording date + user-chosen location, folder `<parent>/<name>/{Video,Photo}/<camera>/`. Supersedes the fixed `<work folder>/<name>` layout above | Developer picks where each shoot lives; the date is what ties footage to a shoot |
+| 2026-11-03 | Other recording days are added to a shoot manually (Add Footage), not automatically | One date per shoot keeps the shoot's identity clear; a second day is an explicit action |
+| 2026-11-03 | A shoot is "complete" when every card file from the shoot's date has a checksum-verified copy in the shoot folder | Name or size matches, or files from other days, must not make a shoot look done |
+| 2026-11-03 | Verified copies in any online registered shoot count toward a card's backed-up status ("any shoot counts"); roots containing cards are excluded | Footage can live in several shoots; a copy only counts once checksum-verified |
+| 2026-11-03 | Existing plain folders are used only through an explicit "Use this folder" | Auto must not take over a user's folder silently |
+| 2026-11-03 | Shoot identity lives in `.auto-shoot.json` in the folder; the registry in Application Support is a list of known shoots. A corrupt registry is kept as `shoots.json.corrupt-<ts>`, never overwritten. Forget removes the registry entry only | The shoot survives relocation and rescans; no silent loss of the list or any file |
+| 2026-11-03 | Shoot name and date are not editable in v1 | Keeps v1 small; editing is in the Backlog |
