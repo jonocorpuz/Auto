@@ -124,6 +124,7 @@ Auto/                         # repo root
 │   │   ├── EditPlaceholderView.swift # empty Video Edit / Photo Edit tabs
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
 │   │   ├── CardRow.swift     #   per-card header, phase content and actions, Add to Shoot menu, per-camera day chips; static StatusDot
+│   │   ├── CardBrowserView.swift # read-only Finder-style card browser (icons/list, locations sidebar); opened by clicking a card
 │   │   ├── DayChip.swift     #   recording-day chip, shared by CardRow and the New Shoot sheet
 │   │   ├── NewShootView.swift#   sheet: create mode (name, date, location) or add-footage mode
 │   │   ├── AddFootageSheet.swift #   add a card's footage to a shoot: card picker, completeness banner, Add N files
@@ -146,6 +147,7 @@ Auto/                         # repo root
 │   │   ├── ShootFolders.swift      #   classify names/folders, create shoots (exclusive mkdir, sidecar write), adopt
 │   │   ├── ShootRegistry.swift     #   registry records, ShootStore (load/save/quarantine), availability, discovery
 │   │   ├── ShootCoverage.swift     #   checksum coverage of a card's day inside a shoot folder (cancellable, off main)
+│   │   ├── CardBrowser.swift #   groups card files: Not Backed Up / per shoot (deepest folder wins) / Backed Up Elsewhere
 │   │   ├── ShootSummary.swift      #   shoot counts + representative file
 │   │   └── MainThreadProbe.swift   #   records whether instrumented engines ran on main (tests assert it)
 │   ├── Integrations/         # adapters behind protocols; faked in tests
