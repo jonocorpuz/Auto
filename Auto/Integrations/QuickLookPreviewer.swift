@@ -43,6 +43,8 @@ final class QuickLookPreviewer: NSObject, QLPreviewPanelDataSource, QLPreviewPan
             panel.currentPreviewItemIndex = items.index
         }
         if panel.isVisible {
+            // Visible but not ours (e.g. another controller released it): ask the responder chain again.
+            if !isControlling { panel.updateController() }
             panel.orderFront(nil)
         } else {
             panel.makeKeyAndOrderFront(nil)
