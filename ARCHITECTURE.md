@@ -15,14 +15,16 @@ Auto is a single-process macOS menu bar app (`LSUIElement`, no Dock icon). It cl
 ```mermaid
 flowchart TD
     subgraph UILayer ["UI (Auto/UI)"]
-        Main["MainView\nmain window"]
+        Main["MainView\nsidebar + content panel"]
+        Sidebar["Sidebar\ntabs, Ingest, account"]
+        Media["MediaView\ncards, shoots, drives"]
         CardRow["CardRow\nper-card phase + actions"]
         NewShoot["NewShootView\nshoot sheet"]
         Settings["SettingsView"]
     end
 
     subgraph AppLayer ["App (Auto/App)"]
-        Delegate["AppDelegate\nNSStatusItem, main + settings windows"]
+        Delegate["AppDelegate\nNSStatusItem, main window"]
         Entry["AutoApp\n@main, placeholder Settings scene"]
         Model["AppModel\n@Observable state + orchestration"]
         CardModel["Card\none connected card"]
@@ -94,14 +96,19 @@ Auto/                         # repo root
 ├── Auto/                     # App target sources
 │   ├── App/                  # Entry point + shared state (thin)
 │   │   ├── AutoApp.swift     #   @main; placeholder Settings scene (Cmd-comma goes to AppDelegate)
-│   │   ├── AppDelegate.swift #   NSStatusItem (left click: window, right click: menu); main + settings windows
+│   │   ├── AppDelegate.swift #   NSStatusItem (left click: window, right click: menu); main window (Settings is a tab)
+│   │   ├── AppTab.swift      #   sidebar tabs + light/dark AppearanceMode
 │   │   ├── AppModel.swift    #   @Observable state; orchestrates Core
 │   │   └── Card.swift        #   one connected card: volume, files, cameras, phase, copy plan
 │   ├── UI/                   # SwiftUI views only, no I/O
-│   │   ├── MainView.swift    #   cards, working drive, other drives
+│   │   ├── MainView.swift    #   sidebar + floating content panel, switches on AppModel.selectedTab
+│   │   ├── Sidebar.swift     #   logo, tabs, Ingest button, account row (appearance menu)
+│   │   ├── MediaView.swift   #   Media tab: stats, cards, recent shoots (placeholder), drives
+│   │   ├── EditPlaceholderView.swift # empty Video Edit / Photo Edit tabs
+│   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
 │   │   ├── CardRow.swift     #   per-card header, phase content and actions; static StatusDot
 │   │   ├── NewShootView.swift#   sheet: client, shoot name, date, camera folders, live preview
-│   │   └── SettingsView.swift
+│   │   └── SettingsView.swift#   Settings tab; "Soon" rows persist values nothing reads yet
 │   ├── Core/                 # pure, testable engines, no SwiftUI
 │   │   ├── VolumeWatcher.swift     #   NSWorkspace mount notifications, refresh off main
 │   │   ├── VolumeClassifier.swift  #   card vs work/backup drive vs ignored volume
@@ -187,7 +194,7 @@ The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet
 
 | Concern | Choice | Rationale |
 | :--- | :--- | :--- |
-| UI | SwiftUI windows hosted by an AppKit `AppDelegate` with an `NSStatusItem` | The status item opens a real window instead of a dropdown. `MenuBarExtra` was dropped; SwiftUI's `openSettings` is unreliable from an accessory-app menu, so AppDelegate owns the Settings window. |
+| UI | SwiftUI windows hosted by an AppKit `AppDelegate` with an `NSStatusItem` | The status item opens a real window instead of a dropdown. `MenuBarExtra` was dropped; SwiftUI's `openSettings` is unreliable from an accessory-app menu, so AppDelegate routes Cmd-comma to the Settings tab of the main window. |
 | State | `@Observable` `AppModel`, injected with `.environment` | Modern Observation; less boilerplate than Backed's `ObservableObject`/Combine. |
 | Concurrency | Swift concurrency; default `MainActor` isolation, heavy work `nonisolated` | Keeps UI correct by default while copying runs off-main. |
 | Volume detection | `NSWorkspace` mount/unmount notifications; `FileManager.mountedVolumeURLs` on refresh, off the main actor | Auto-detect cards on insert; generation guard drops stale refreshes. |

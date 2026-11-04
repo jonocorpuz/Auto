@@ -65,6 +65,13 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 
 ## Phase 4: Polish & release
 
+- [x] Main window redesign: sidebar tabs (Media, Video Edit, Photo Edit, Settings), Ingest button, account row, floating content panel
+- [x] Light/dark/system appearance (Settings tab + account menu)
+- [ ] Media tab: real "Recent shoots" grid from the work folder (placeholder tiles now)
+- [ ] Video Edit / Photo Edit tabs (empty placeholders now)
+- [ ] Wire up "Soon" settings: eject after backup, sound, proxy codec/resolution, Resolve project + frame rate, RAW+JPEG grouping, DNG
+- [ ] User accounts (sidebar shows the local macOS user for now)
+
 - [ ] Notifications on completion / failure
 - [ ] Ingest history + resumable index
 - [ ] Optional second backup destination
@@ -93,4 +100,5 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 | 2026-11-03 | Micro-commits, no AI co-author, never auto-push | Developer preference |
 | 2026-11-03 | No menu bar dropdown: the status item opens the main window | Developer wants the app to live in the menu bar but open as a real window |
 | 2026-11-03 | Drop Backed's animated `OrbView` | Developer found it cheesy; status is shown with a static tinted dot |
+| 2026-11-03 | Settings is a tab in the main window, not a separate window | One window, sidebar navigation; Cmd-comma selects the tab |
 | 2026-11-03 | Backed status requires checksum verification, not name+size | Same-name/same-size RAWs from different bodies could falsely show as backed |
