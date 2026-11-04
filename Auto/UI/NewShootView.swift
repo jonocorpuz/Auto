@@ -1,58 +1,30 @@
 import SwiftUI
 
-/// Sheet for creating a shoot folder for a card: client, name, date, per-camera folders and a live preview.
+/// Sheet for creating a shoot folder for a card: a name, per-camera folders and a live preview.
 struct NewShootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let card: Card
 
-    @State private var client = ""
     @State private var shootName = ""
-    @State private var date = Date()
     @State private var cameras: [Camera] = []
-    @State private var clients: [String] = []
     @State private var error: String?
-    @FocusState private var focus: Field?
+    @FocusState private var nameFocused: Bool
 
-    private enum Field { case client, shoot }
-
-    private var trimmedClient: String { client.trimmingCharacters(in: .whitespaces) }
-    private var suggestions: [String] { ShootPlanner.suggestions(for: client, in: clients) }
-    private var existingClient: String? { clients.first { $0.caseInsensitiveCompare(trimmedClient) == .orderedSame } }
-    private var sections: (video: Bool, photo: Bool) { ShootPlanner.sections(for: card.missing) }
-
-    private func count(_ camera: Camera, photos: Bool) -> Int {
-        card.missing.filter { $0.cameraID == camera.id && ($0.kind == .photo) == photos }.count
-    }
+    private var isValid: Bool { model.isValidShootName(shootName) }
+    private var folders: [PlannedFolder] { model.shootFolders(card: card, name: shootName, cameras: cameras) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("New Shoot").font(.title3.weight(.semibold))
-                Text("Creates the folders on \(model.workRootBreadcrumb)")
+                Text("New Shoot").font(.system(size: 20, weight: .semibold))
+                Text("Creates folders in \(model.workRootBreadcrumb)")
                     .font(.callout).foregroundStyle(.secondary)
             }
 
-            HStack(alignment: .top, spacing: 16) {
-                clientField
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Shoot name").font(.callout.weight(.medium))
-                    TextField("e.g. Brand film", text: $shootName)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focus, equals: .shoot)
-                    HStack(spacing: 6) {
-                        DatePicker("Date", selection: $date, displayedComponents: .date)
-                            .datePickerStyle(.stepperField)
-                        if card.shootDate != nil {
-                            Text("from the card").font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            camerasSection
-            preview
+            nameCard
+            if !card.cameras.isEmpty { camerasSection }
+            foldersSection
 
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
@@ -60,127 +32,142 @@ struct NewShootView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Create") { create() }
-                    .buttonStyle(.borderedProminent)
+                Button("Cancel") { model.editingShoot = nil }
+                    .buttonStyle(.bordered)
+                    .keyboardShortcut(.cancelAction)
+                Button("Create Shoot") { create() }
+                    .buttonStyle(PrimaryPillButtonStyle())
+                    .frame(width: 160)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!model.isValidClientName(client))
+                    .disabled(!isValid)
             }
         }
-        .padding(20)
-        .frame(width: 520)
+        .padding(24)
+        .frame(width: 480)
+        .background(Theme.panel)
         .onAppear {
-            clients = model.existingClients()
-            date = card.shootDate ?? Date()
             cameras = card.cameras
-            focus = .client
+            nameFocused = true
         }
     }
 
-    private var clientField: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Client").font(.callout.weight(.medium))
-            TextField("Start typing a name", text: $client)
-                .textFieldStyle(.roundedBorder)
-                .focused($focus, equals: .client)
-                .onSubmit {
-                    if let first = suggestions.first { client = first }
-                    focus = .shoot
-                }
-            if focus == .client && !suggestions.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(suggestions, id: \.self) { name in
-                        Button {
-                            client = name
-                            focus = .shoot
-                        } label: {
-                            Text(name)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-            } else {
-                Text(clientCaption).font(.caption).foregroundStyle(.secondary)
+    // MARK: Name
+
+    private var nameCard: some View {
+        SurfaceCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Shoot name").font(.system(size: 13, weight: .medium))
+                TextField("Shoot name", text: $shootName, prompt: Text("e.g. Brand film"))
+                    .labelsHidden()
+                    .textFieldStyle(.plain)
+                    .inputStyle(focused: nameFocused)
+                    .focused($nameFocused)
+                    .onSubmit { if isValid { create() } }
+                Text(nameCaption).font(.caption).foregroundStyle(.secondary)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var clientCaption: String {
-        if trimmedClient.isEmpty { return "Finds existing clients as you type" }
-        if !model.isValidClientName(client) { return "Not a usable folder name" }
-        if let existing = existingClient { return "Adds to existing \(existing) folder" }
-        return "Creates a new client folder"
+    private var nameCaption: String {
+        if shootName.trimmingCharacters(in: .whitespaces).isEmpty { return "The shoot folder is named after this." }
+        guard isValid else { return "Not a usable folder name." }
+        if let shoot = folders.first, shoot.exists {
+            return "Adds to the existing “\(shoot.name)” folder. Nothing in it is overwritten."
+        }
+        return "Creates a new folder."
     }
+
+    // MARK: Cameras
 
     private var camerasSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(cameras.count == 1 ? "Camera on this card" : "Cameras on this card").font(.callout.weight(.medium))
-            ForEach($cameras) { $cam in
-                HStack(spacing: 8) {
-                    Image(systemName: "video").foregroundStyle(.secondary)
-                    Text(cam.label)
-                    Image(systemName: "arrow.right").foregroundStyle(.secondary).font(.caption)
-                    TextField("Folder", text: $cam.folderName)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 120)
-                    Text("\(card.missing.filter { $0.cameraID == cam.id }.count) files")
-                        .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "Cameras") {
+                Text("\(card.missing.count) files").font(.caption).foregroundStyle(.secondary)
+            }
+            SurfaceCard(padding: 12) {
+                VStack(spacing: 0) {
+                    ForEach(Array($cameras.enumerated()), id: \.element.id) { index, $cam in
+                        if index > 0 {
+                            Rectangle().fill(Theme.border).frame(height: 1).padding(.vertical, 10)
+                        }
+                        HStack(spacing: 12) {
+                            Image(systemName: "video")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 28, height: 28)
+                                .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: 8))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(cam.model).lineLimit(1)
+                                Text("\(fileCount(cam)) files").font(.caption).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            TextField("Folder", text: $cam.folderName)
+                                .labelsHidden()
+                                .textFieldStyle(.plain)
+                                .inputStyle(focused: false)
+                                .frame(width: 160)
+                        }
+                    }
                 }
             }
         }
     }
 
-    private var preview: some View {
-        let shootName = model.shootFolderName(date: date, name: self.shootName)
-        let shootExists = existingClient != nil && model.shootFolderExists(client: trimmedClient, date: date, name: self.shootName)
-        return VStack(alignment: .leading, spacing: 3) {
-            folderRow(trimmedClient.isEmpty ? "Client" : trimmedClient, depth: 0, exists: existingClient != nil)
-            folderRow(shootName, depth: 1, exists: shootExists, bold: true)
-            if sections.video {
-                folderRow("Footage", depth: 2, exists: shootExists)
-                ForEach(cameras.filter { count($0, photos: false) > 0 }) { cam in
-                    folderRow(cam.folderName.isEmpty ? cam.model : cam.folderName, depth: 3, exists: false, note: "\(count(cam, photos: false)) files")
-                }
-            }
-            if sections.photo {
-                folderRow("Photo", depth: 2, exists: shootExists)
-                ForEach(cameras.filter { count($0, photos: true) > 0 }) { cam in
-                    folderRow(cam.folderName.isEmpty ? cam.model : cam.folderName, depth: 3, exists: false, note: "\(count(cam, photos: true)) photos")
-                }
-            }
-            folderRow("Project", depth: 2, exists: shootExists)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+    private func fileCount(_ camera: Camera) -> Int {
+        card.missing.filter { $0.cameraID == camera.id }.count
     }
 
-    private func folderRow(_ name: String, depth: Int, exists: Bool, bold: Bool = false, note: String? = nil) -> some View {
-        HStack(spacing: 6) {
+    // MARK: Folders
+
+    private var foldersSection: some View {
+        let rows = folders
+        return VStack(alignment: .leading, spacing: 8) {
+            SectionHeader("Folders")
+            SurfaceCard {
+                if rows.isEmpty {
+                    Text("Enter a shoot name to preview the folders.").foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(rows) { folderRow($0) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func folderRow(_ folder: PlannedFolder) -> some View {
+        HStack(spacing: 8) {
             Image(systemName: "folder.fill")
-                .foregroundStyle(exists ? Color.secondary : Color.accentColor)
-            Text(name).fontWeight(bold ? .semibold : .regular)
-            Text(exists ? "already there" : "new")
+                .foregroundStyle(folder.exists ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.accent))
+            Text(folder.name).fontWeight(folder.depth == 0 ? .semibold : .regular)
+            Text(folder.exists ? "already there" : "new")
                 .font(.caption)
-                .foregroundStyle(exists ? Color.secondary : Color.accentColor)
+                .foregroundStyle(folder.exists ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.accent))
+                .padding(.horizontal, 8).padding(.vertical, 2)
+                .background(Capsule().fill(folder.exists ? Theme.surfaceMuted : Theme.accent.opacity(0.12)))
             Spacer()
-            if let note { Text(note).font(.caption).foregroundStyle(.secondary) }
+            if folder.fileCount > 0 {
+                Text("\(folder.fileCount) \(folder.isPhoto ? "photos" : "files")")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
-        .padding(.leading, CGFloat(depth) * 16)
+        .padding(.leading, CGFloat(folder.depth) * 18)
     }
 
     private func create() {
         do {
-            try model.createShoot(card: card, client: existingClient ?? trimmedClient, shootName: shootName, date: date, cameras: cameras)
+            try model.createShoot(card: card, name: shootName, cameras: cameras)
         } catch {
             self.error = error.localizedDescription
         }
+    }
+}
+
+private extension View {
+    /// Rounded text input look used inside cards.
+    func inputStyle(focused: Bool) -> some View {
+        padding(.horizontal, 12).padding(.vertical, 9)
+            .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: Theme.rowRadius))
+            .overlay(RoundedRectangle(cornerRadius: Theme.rowRadius).strokeBorder(focused ? Theme.accent : Theme.border))
+            .frame(maxWidth: .infinity)
     }
 }
