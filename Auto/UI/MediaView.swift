@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Media tab: connected cards, recent shoots and drives.
+/// Media tab: connected cards, shoots and drives.
 struct MediaView: View {
     @Environment(AppModel.self) private var model
 
@@ -71,15 +71,39 @@ struct MediaView: View {
         }
     }
 
-    // MARK: Shoots (placeholder)
+    // MARK: Shoots
 
     private var shootsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SectionHeader(title: "Recent shoots") {
-                Text("Coming soon").font(.caption).foregroundStyle(.tertiary)
+            SectionHeader(title: "Shoots") {
+                Button { model.newShoot() } label: {
+                    Label("New Shoot", systemImage: "plus").font(.caption.weight(.medium))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(Theme.accent)
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
-                ForEach(0..<3, id: \.self) { _ in ShootPlaceholderTile() }
+            if model.shoots.isEmpty {
+                SurfaceCard(padding: 32) {
+                    VStack(spacing: 8) {
+                        Image(systemName: "film.stack")
+                            .font(.system(size: 28, weight: .light))
+                            .foregroundStyle(.tertiary)
+                        Text("No shoots yet").font(.system(size: 14, weight: .semibold))
+                        Text("Create a shoot to back up a card into a dated folder.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("New Shoot") { model.newShoot() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.accent)
+                            .padding(.top, 4)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 12)], spacing: 12) {
+                    ForEach(model.shoots) { item in ShootTile(item: item) }
+                }
             }
         }
     }
@@ -143,22 +167,5 @@ private struct StatTile: View {
                     .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: 8))
             }
         }
-    }
-}
-
-/// Stand-in tile until shoots are listed from the work folder.
-private struct ShootPlaceholderTile: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Theme.surfaceMuted)
-                .aspectRatio(16 / 9, contentMode: .fit)
-                .overlay(Image(systemName: "film.stack").font(.title2).foregroundStyle(.quaternary))
-            RoundedRectangle(cornerRadius: 3).fill(Theme.surfaceMuted).frame(width: 110, height: 9)
-            RoundedRectangle(cornerRadius: 3).fill(Theme.surfaceMuted).frame(width: 70, height: 7)
-        }
-        .padding(10)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
-        .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.border))
     }
 }
