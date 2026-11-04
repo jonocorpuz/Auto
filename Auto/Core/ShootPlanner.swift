@@ -26,14 +26,18 @@ nonisolated struct CopyPlan: Sendable {
 /// Pure helpers for naming shoot folders and turning missing files into copy jobs.
 nonisolated enum ShootPlanner {
     static let defaultDateFormat = "dd.MM.yy"
+    static let videoFolder = "Video"
+    static let photoFolder = "Photo"
 
     enum PathError: LocalizedError, Equatable {
         case invalidClient
+        case invalidName
         case outsideWorkFolder
 
         var errorDescription: String? {
             switch self {
             case .invalidClient: "Enter a client name that works as a folder name."
+            case .invalidName: "Enter a shoot name that works as a folder name."
             case .outsideWorkFolder: "That shoot folder would land outside your work folder."
             }
         }
@@ -81,7 +85,51 @@ nonisolated enum ShootPlanner {
         return shoot
     }
 
-    /// Footage/Photo/<camera folder> per missing file. Cameras with an empty folder name use their model;
+    /// Shoot folder: root/<name>. Throws if the name isn't usable or the result would escape `root`.
+    static func shootURL(root: URL, name: String) throws -> URL {
+        guard let folder = safeComponent(name) else { throw PathError.invalidName }
+        let shoot = root.appendingPathComponent(folder, isDirectory: true)
+        guard isInside(shoot, root: root) else { throw PathError.outsideWorkFolder }
+        return shoot
+    }
+
+    /// Unique destination directories of the jobs, sorted by path.
+    static func directories(for jobs: [CopyJob]) -> [URL] {
+        var seen = Set<String>()
+        var result: [URL] = []
+        for job in jobs where seen.insert(job.destDir.path).inserted { result.append(job.destDir) }
+        return result.sorted { $0.path < $1.path }
+    }
+
+    /// Folder tree rows for the preview: shoot, then Video and Photo sections with their camera folders.
+    static func folders(for jobs: [CopyJob], shoot: URL, root: URL) -> [PlannedFolder] {
+        func parts(_ url: URL, relativeTo base: URL) -> [String]? {
+            let b = base.standardizedFileURL.pathComponents
+            let c = url.standardizedFileURL.pathComponents
+            guard c.count >= b.count, Array(c.prefix(b.count)) == b else { return nil }
+            return Array(c.dropFirst(b.count))
+        }
+        guard let shootParts = parts(shoot, relativeTo: root) else { return [] }
+        var rows = [PlannedFolder(components: shootParts, fileCount: 0, isPhoto: false)]
+        for section in [videoFolder, photoFolder] {
+            var order: [[String]] = []
+            var counts: [[String]: Int] = [:]
+            for job in jobs {
+                guard let rel = parts(job.destDir, relativeTo: shoot), rel.first == section else { continue }
+                if counts[rel] == nil { order.append(rel) }
+                counts[rel, default: 0] += 1
+            }
+            guard !order.isEmpty else { continue }
+            let isPhoto = section == photoFolder
+            rows.append(PlannedFolder(components: shootParts + [section], fileCount: counts[[section]] ?? 0, isPhoto: isPhoto))
+            for rel in order where rel != [section] {
+                rows.append(PlannedFolder(components: shootParts + rel, fileCount: counts[rel] ?? 0, isPhoto: isPhoto))
+            }
+        }
+        return rows
+    }
+
+    /// Video/Photo/<camera folder> per missing file. Cameras with an empty folder name use their model;
     /// files from unknown cameras go to `fallback`.
     static func jobs(missing: [MediaFile], shoot: URL, cameras: [Camera], fallback: String) -> [CopyJob] {
         var folderFor: [String: String] = [:]
@@ -90,7 +138,7 @@ nonisolated enum ShootPlanner {
         }
         let fallbackFolder = safeComponent(fallback) ?? "Card"
         return missing.map { file in
-            let section = file.kind == .photo ? "Photo" : "Footage"
+            let section = file.kind == .photo ? photoFolder : videoFolder
             let dir = shoot.appendingPathComponent(section).appendingPathComponent(folderFor[file.cameraID] ?? fallbackFolder)
             return CopyJob(file: file, destDir: dir)
         }
@@ -119,6 +167,17 @@ nonisolated enum ShootPlanner {
         if matches.count == 1, matches[0].caseInsensitiveCompare(trimmed) == .orderedSame { return [] }
         return Array(matches.prefix(limit))
     }
+}
+
+/// One row of the planned folder tree shown before copying.
+nonisolated struct PlannedFolder: Sendable, Equatable, Identifiable {
+    var components: [String]
+    var fileCount: Int
+    var isPhoto: Bool
+    var exists = false
+    var id: String { components.joined(separator: "/") }
+    var name: String { components.last ?? "" }
+    var depth: Int { components.count - 1 }
 }
 
 /// Aggregate status across cards.
