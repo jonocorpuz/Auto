@@ -48,6 +48,11 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - [x] Backup status is checksum-verified (`BackupVerifier`): green only when every card file matches a drive copy by hash
 - [x] Copy hardening: unique `O_EXCL` partials, `renamex_np` `RENAME_EXCL`, `F_FULLFSYNC` + uncached read-back
 - [ ] Manual end-to-end test with a real card + real work drive (copy, eject, auto-open on mount)
+- [x] Safety review fixes: verified copies keyed by card-file identity, refuse card destinations, empty/unreadable phases, path sanitizing, card identity by volume UUID, scans/indexing off main
+- [ ] Move remaining main-thread disk touches out of views (`workingVolume`, `existingClients`, `shootFolderExists`)
+- [ ] Detect a work folder that is itself on a camera card
+- [ ] New Shoot preview should show sanitized camera folder names
+- [ ] AppModel test harness (fake VolumeWatcher) to cover card lifecycle wiring
 
 ## Phase 3: Editing pipeline
 
