@@ -21,6 +21,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if model.workRoot == nil { openMainWindow() }
     }
 
+    /// Launching the app again (Finder, Spotlight, `open`) brings the window forward.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openMainWindow()
+        return false
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     // MARK: Status item
