@@ -3,12 +3,12 @@ import Foundation
 @testable import Auto
 
 struct VolumeClassifierTests {
-    static func vol(_ name: String, internal i: Bool = false, removable: Bool = false, local: Bool = true,
+    nonisolated static func vol(_ name: String, internal i: Bool = false, removable: Bool = false, local: Bool = true,
                     root: Bool = false, image: Bool = false, layout: Bool = false, path: String? = nil) -> VolumeDescriptor {
         VolumeDescriptor(url: URL(fileURLWithPath: path ?? "/Volumes/\(name)"), name: name, isInternal: i,
                          isRemovable: removable, isLocal: local, isRootFileSystem: root, isDiskImage: image, hasCardLayout: layout)
     }
-    static let working = URL(fileURLWithPath: "/Volumes/Work")
+    nonisolated static let working = URL(fileURLWithPath: "/Volumes/Work")
 
     @Test("card/drive/excluded", arguments: [
         (vol("SD", removable: true, layout: true), "card"),
