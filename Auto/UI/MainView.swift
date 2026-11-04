@@ -3,7 +3,6 @@ import SwiftUI
 /// The app's main window: connected cards, the working drive and any other drives.
 struct MainView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         @Bindable var model = model
@@ -28,7 +27,7 @@ struct MainView: View {
                     .foregroundStyle(.secondary)
                     .help(root.path)
             }
-            Button("Settings…", systemImage: "gearshape", action: showSettings)
+            Button("Settings…", systemImage: "gearshape") { model.openSettings() }
         }
         .padding()
     }
@@ -79,11 +78,6 @@ struct MainView: View {
                 }
             }
         }
-    }
-
-    private func showSettings() {
-        NSApp.activate()
-        openSettings()
     }
 }
 

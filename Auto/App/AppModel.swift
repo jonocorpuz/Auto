@@ -69,6 +69,7 @@ final class AppModel {
 
     /// Provided by AppDelegate.
     @ObservationIgnored var openMainWindow: () -> Void = {}
+    @ObservationIgnored var openSettings: () -> Void = {}
 
     @ObservationIgnored private var index = Set<String>()
     @ObservationIgnored private var copiedThisSession = Set<String>()
