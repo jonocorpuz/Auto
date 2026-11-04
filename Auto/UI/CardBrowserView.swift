@@ -57,9 +57,14 @@ struct CardBrowserView: View {
         } message: {
             Text(actionError ?? "")
         }
-        .onKeyPress(.escape) {
-            if selection.isEmpty { model.browsingCardID = nil } else { selection = [] }
-            return .handled
+        // Esc clears the selection, then goes back. A hidden button's shortcut works without focus.
+        .background {
+            Button("") {
+                if selection.isEmpty { model.browsingCardID = nil } else { selection = [] }
+            }
+            .keyboardShortcut(.cancelAction)
+            .opacity(0)
+            .accessibilityHidden(true)
         }
     }
 
@@ -89,13 +94,13 @@ struct CardBrowserView: View {
             Spacer()
 
             let chosen = selectedFiles(groups)
-            Button { quickLook(chosen, all: groups) } label: {
+            Button { quickLook(chosen, toggle: true) } label: {
                 Image(systemName: "eye")
             }
             .buttonStyle(.borderless)
             .help("Quick Look (Space)")
             .keyboardShortcut(.space, modifiers: [])
-            .disabled(chosen.isEmpty && card.files.isEmpty)
+            .disabled(chosen.isEmpty)
 
             Button { model.revealInFinder(chosen.isEmpty ? [card.volume] : chosen.map(\.url)) } label: {
                 Image(systemName: "folder")
@@ -177,7 +182,7 @@ struct CardBrowserView: View {
                                 .onTapGesture { select(file, extend: NSEvent.modifierFlags.contains(.command)) }
                                 .simultaneousGesture(TapGesture(count: 2).onEnded {
                                     selection = [file.id]
-                                    quickLook([file], all: groups)
+                                    quickLook([file])
                                 })
                                 .contextMenu { fileMenu(targets(for: file, in: groups), groups: groups) }
                         }
@@ -227,7 +232,7 @@ struct CardBrowserView: View {
             let files = orderedFiles(groups).filter { ids.contains($0.id) }
             if !files.isEmpty { fileMenu(files, groups: groups) }
         } primaryAction: { ids in
-            quickLook(orderedFiles(groups).filter { ids.contains($0.id) }, all: groups)
+            quickLook(orderedFiles(groups).filter { ids.contains($0.id) })
         }
     }
 
@@ -247,14 +252,14 @@ struct CardBrowserView: View {
         selection.contains(file.id) ? selectedFiles(groups) : [file]
     }
 
-    /// With a selection, previews it; with none, previews everything shown.
-    private func quickLook(_ files: [MediaFile], all groups: [CardBrowser.Group]) {
-        let list = files.isEmpty ? orderedFiles(groups) : files
-        model.quickLook(list.map(\.url))
+    /// Previews `files`; does nothing with no files, like Finder. Only Space toggles the panel closed.
+    private func quickLook(_ files: [MediaFile], toggle: Bool = false) {
+        guard !files.isEmpty else { return }
+        model.quickLook(files.map(\.url), toggle: toggle)
     }
 
     @ViewBuilder private func fileMenu(_ files: [MediaFile], groups: [CardBrowser.Group]) -> some View {
-        Button("Quick Look") { quickLook(files, all: groups) }
+        Button("Quick Look") { quickLook(files) }
         Button("Show in Finder") { model.revealInFinder(files.map(\.url)) }
         let copies = files.compactMap { card.backups[$0.url] }
         if !copies.isEmpty {
@@ -271,7 +276,7 @@ struct CardBrowserView: View {
     }
 
     private var canAdd: Bool {
-        guard !adding else { return false }
+        guard !adding, card.plan == nil else { return false }
         switch card.phase {
         case .scanning, .copying, .empty, .unreadable: return false
         default: return card.engine == nil
@@ -326,7 +331,9 @@ struct CardBrowserView: View {
         let bytes = groups.reduce(Int64(0)) { $0 + $1.bytes }
         var text = "\(Format.count(count, "item", "items")) · \(Format.bytes(bytes))"
         if !selection.isEmpty { text = "\(selection.count) of " + text + " selected" }
-        if card.phase == .copying {
+        if card.phase == .scanning || card.phase == .verifying {
+            text += " — Checking backup…"
+        } else if card.phase == .copying {
             let p = card.progress
             text += " — Copying \(min(p.filesDone + 1, p.filesTotal)) of \(p.filesTotal)…"
         }
@@ -457,8 +464,8 @@ private struct FileIcon: View {
         .frame(width: size + 16)
         .contentShape(Rectangle())
         .help("\(file.name) · \(Format.bytes(file.size)) · \(file.date.formatted(date: .abbreviated, time: .shortened))")
-        .task(id: file.url) {
-            image = await model.fileThumbnail(for: file.url)
+        .task(id: file.identity) {
+            image = await model.fileThumbnail(for: file)
         }
     }
 }
