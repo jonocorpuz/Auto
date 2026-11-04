@@ -9,7 +9,7 @@ struct MediaView: View {
             ContentUnavailableView {
                 Label("Where do shoots go?", systemImage: "folder.badge.questionmark")
             } description: {
-                Text("Pick your client work folder on your working drive.")
+                Text("Pick the folder your shoots live in on your working drive.")
             } actions: {
                 Button("Choose Work Folder…") { model.setWorkRoot() }
                     .buttonStyle(.borderedProminent)
