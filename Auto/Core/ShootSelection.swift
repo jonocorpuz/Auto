@@ -23,6 +23,18 @@ nonisolated struct ShootSelection: Sendable, Equatable {
         for f in missing { included.insert(pair(f)) }
     }
 
+    /// Only the pairs (every camera) whose day is `onlyDay`'s day; all other days stay unchecked.
+    init(files: [MediaFile], cameras: [Camera], calendar: Calendar, onlyDay: Date) {
+        self.calendar = calendar
+        self.knownCameraIDs = Set(cameras.map(\.id))
+        self.included = []
+        let day = calendar.startOfDay(for: onlyDay)
+        for f in files {
+            let p = pair(f)
+            if p.day == day { included.insert(p) }
+        }
+    }
+
     func groupID(_ f: MediaFile) -> String {
         knownCameraIDs.contains(f.cameraID) ? f.cameraID : Self.otherID
     }

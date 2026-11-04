@@ -3,24 +3,24 @@ import Testing
 @testable import Auto
 
 struct ShootSelectionTests {
-    private func cal(_ seconds: Int = 0) -> Calendar {
+    func cal(_ seconds: Int = 0) -> Calendar {
         var c = Calendar(identifier: .gregorian)
         c.timeZone = TimeZone(secondsFromGMT: seconds)!
         return c
     }
 
-    private func date(_ day: Int, hour: Int = 12, calendar: Calendar) -> Date {
+    func date(_ day: Int, hour: Int = 12, calendar: Calendar) -> Date {
         calendar.date(from: DateComponents(year: 2026, month: 3, day: day, hour: hour))!
     }
 
-    private func file(_ name: String, camera: String, _ d: Date) -> MediaFile {
+    func file(_ name: String, camera: String, _ d: Date) -> MediaFile {
         MediaFile(url: URL(fileURLWithPath: "/card/\(name)"), size: 10, date: d, kind: .video, cameraID: camera)
     }
 
-    private let cams = [Camera(id: "A", model: "A", serial: nil, folderName: "A"),
+    let cams = [Camera(id: "A", model: "A", serial: nil, folderName: "A"),
                         Camera(id: "B", model: "B", serial: nil, folderName: "B")]
 
-    private func sample(_ c: Calendar) -> [MediaFile] {
+    func sample(_ c: Calendar) -> [MediaFile] {
         [file("a22", camera: "A", date(22, calendar: c)), file("a29", camera: "A", date(29, calendar: c)),
          file("b22", camera: "B", date(22, calendar: c)), file("b29", camera: "B", date(29, calendar: c))]
     }
@@ -94,5 +94,29 @@ struct ShootSelectionTests {
         let c = cal(), files = sample(c)
         let sel = ShootSelection(missing: Array(files.prefix(1)), cameras: cams, calendar: c)
         #expect(sel.filter(files).map(\.name) == ["a22"])
+    }
+}
+
+extension ShootSelectionTests {
+    @Test func onlyDaySelectsMatchingDaysAcrossCameras() {
+        let c = cal(), files = sample(c)
+        let sel = ShootSelection(files: files, cameras: cams, calendar: c, onlyDay: date(22, hour: 5, calendar: c))
+        #expect(sel.filter(files).map(\.name) == ["a22", "b22"])
+        let days = ShootSelection.days(missing: files, cameras: cams, calendar: c)
+        #expect(days["A"]?.count == 2)
+    }
+
+    @Test func onlyDayWithNoMatchSelectsNothing() {
+        let c = cal(), files = sample(c)
+        let sel = ShootSelection(files: files, cameras: cams, calendar: c, onlyDay: date(25, calendar: c))
+        #expect(sel.isEmpty)
+    }
+
+    @Test func onlyDayRespectsInjectedTimeZone() {
+        let utc = cal(0), plus10 = cal(10 * 3600)
+        let f = file("f", camera: "A", date(22, hour: 20, calendar: utc))  // 23rd in +10
+        let day22 = date(22, hour: 12, calendar: utc)
+        #expect(ShootSelection(files: [f], cameras: cams, calendar: utc, onlyDay: day22).filter([f]) == [f])
+        #expect(ShootSelection(files: [f], cameras: cams, calendar: plus10, onlyDay: day22).isEmpty)
     }
 }
