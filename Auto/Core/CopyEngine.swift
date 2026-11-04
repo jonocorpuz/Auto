@@ -38,6 +38,10 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         lock.lock(); _cancelled = true; lock.unlock()
     }
 
+    /// Test hooks, called synchronously on the copy thread. Set before `run`.
+    var onChunkWritten: (@Sendable (Int64) -> Void)?
+    var onVerifyChunk: (@Sendable (Int64) -> Void)?
+
     private static let chunk = 8 << 20
 
     func run(_ jobs: [CopyJob], onProgress: @escaping @MainActor @Sendable (CopyProgress) -> Void) async -> CopyOutcome {
@@ -137,6 +141,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
                 try writer.write(contentsOf: data)
                 written += Int64(data.count)
                 onBytes(written)
+                onChunkWritten?(written)
             }
             // Force data to the platter, not just the cache; fall back if unsupported.
             if fcntl(fd, F_FULLFSYNC) == -1 { try writer.synchronize() }

@@ -118,11 +118,21 @@ struct CopyEngineTests {
     @Test func cancelMidCopyRemovesPartialFile() async throws {
         let f = try fixture(); defer { f.cleanup() }
         // Several chunks (8 MB each) so cancellation lands mid-file.
-        let file = try makeFile(in: f.src, "Big.MP4", bytes: 64 << 20)
+        let file = try makeFile(in: f.src, "Big.MP4", bytes: 24 << 20)
         let engine = CopyEngine()
-        let outcome = await engine.run([CopyJob(file: file, destDir: f.dst)]) { progress in
-            if progress.bytesDone > 0 { engine.cancel() }
-        }
+        engine.onChunkWritten = { [unowned engine] _ in engine.cancel() } // after the first chunk
+        let outcome = await engine.run([CopyJob(file: file, destDir: f.dst)]) { _ in }
+        #expect(outcome.cancelled)
+        #expect(outcome.copiedKeys.isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: f.dst.path).isEmpty)
+    }
+
+    @Test func cancelDuringVerificationLeavesNothing() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "Big.MP4", bytes: 24 << 20)
+        let engine = CopyEngine()
+        engine.onVerifyChunk = { [unowned engine] _ in engine.cancel() }
+        let outcome = await engine.run([CopyJob(file: file, destDir: f.dst)]) { _ in }
         #expect(outcome.cancelled)
         #expect(outcome.copiedKeys.isEmpty)
         #expect(try FileManager.default.contentsOfDirectory(atPath: f.dst.path).isEmpty)
