@@ -71,7 +71,7 @@ final class AppModel {
     @ObservationIgnored var openMainWindow: () -> Void = {}
     @ObservationIgnored var openSettings: () -> Void = {}
 
-    @ObservationIgnored private var index = Set<String>()
+    @ObservationIgnored private var index: [String: [URL]] = [:]
     @ObservationIgnored private var copiedThisSession = Set<String>()
     @ObservationIgnored private var indexGeneration = 0
     @ObservationIgnored private lazy var watcher = VolumeWatcher(workingVolume: { [weak self] in self?.workingVolume })
@@ -167,7 +167,7 @@ final class AppModel {
         indexGeneration += 1
         let generation = indexGeneration
         guard let volume = workingVolume else {
-            index = []
+            index = [:]
             indexing = false
             cards.forEach { recompute($0) }
             return
@@ -188,7 +188,7 @@ final class AppModel {
             card.phase = .scanning
             return
         }
-        card.missing = card.files.filter { !index.contains($0.key) && !copiedThisSession.contains($0.key) }
+        card.missing = card.files.filter { index[$0.key] == nil && !copiedThisSession.contains($0.key) }
         if card.missing.isEmpty {
             card.phase = .backed
             card.plan = nil
@@ -293,8 +293,7 @@ final class AppModel {
             let outcome = await engine.run(plan.jobs) { progress in card.progress = progress }
             card.engine = nil
             copiedThisSession.formUnion(outcome.copiedKeys)
-            index.formUnion(outcome.copiedKeys)
-
+            
             let done = Set(outcome.copiedKeys)
             card.plan?.jobs.removeAll { done.contains($0.file.key) }
             if card.plan?.jobs.isEmpty == true { card.plan = nil }
