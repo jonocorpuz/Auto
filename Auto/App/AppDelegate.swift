@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         updateIcon()
         observeStatus()
+        model.openMainWindow = { [weak self] in self?.openMainWindow() }
+        model.start()
         if model.workRoot == nil { openMainWindow() }
     }
 

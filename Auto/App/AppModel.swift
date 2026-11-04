@@ -289,7 +289,7 @@ final class AppModel {
         card.phase = .copying
 
         Task {
-            let outcome = await engine.run(plan.jobs) { [weak card] progress in card?.progress = progress }
+            let outcome = await engine.run(plan.jobs) { progress in card.progress = progress }
             card.engine = nil
             copiedThisSession.formUnion(outcome.copiedKeys)
             index.formUnion(outcome.copiedKeys)
