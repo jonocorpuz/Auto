@@ -56,5 +56,9 @@ struct ShootPlannerTests {
         #expect(S.aggregate([.ready, .backed]) == .unbacked)
         #expect(S.aggregate([.needsBackup, .failed("x")]) == .error)
         #expect(S.aggregate([.failed("x"), .copying]) == .copying)
+        // Verifying is neutral: never green, but it doesn't hide a card that needs action.
+        #expect(S.aggregate([.verifying]) == .idle)
+        #expect(S.aggregate([.backed, .verifying]) == .idle)
+        #expect(S.aggregate([.needsBackup, .verifying]) == .unbacked)
     }
 }

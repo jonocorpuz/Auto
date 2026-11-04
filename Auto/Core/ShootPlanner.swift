@@ -1,7 +1,7 @@
 import Foundation
 
 nonisolated enum CardPhase: Equatable, Sendable {
-    case scanning, needsBackup, ready, copying, backed, failed(String)
+    case scanning, verifying, needsBackup, ready, copying, backed, failed(String)
 }
 
 nonisolated struct CopyPlan: Sendable {
@@ -75,13 +75,15 @@ nonisolated enum ShootPlanner {
 nonisolated enum StatusAggregator {
     enum Result: Equatable, Sendable { case idle, unbacked, copying, backed, error }
 
-    /// Priority: copying > error > unbacked > backed > idle.
+    /// Priority: copying > error > unbacked > (anything still verifying: idle) > backed > idle.
     /// A failed card is reported as `error` because the user has to act on it; it still means unbacked data,
     /// which `error` outranks so the failure isn't masked by another card needing backup.
     static func aggregate(_ phases: [CardPhase]) -> Result {
         if phases.contains(.copying) { return .copying }
         if phases.contains(where: { if case .failed = $0 { true } else { false } }) { return .error }
         if phases.contains(where: { $0 == .needsBackup || $0 == .ready }) { return .unbacked }
+        // Never show green while a card's files are still being checksum-checked.
+        if phases.contains(.verifying) { return .idle }
         if phases.contains(.backed) { return .backed }
         return .idle
     }
