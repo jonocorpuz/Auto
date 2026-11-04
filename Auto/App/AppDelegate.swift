@@ -1,4 +1,5 @@
 import AppKit
+import Quartz
 import SwiftUI
 
 /// Owns the status item and the main window. Left-click opens the app; right-click shows a small menu.
@@ -117,6 +118,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func openSettings() {
         model.selectedTab = .settings
         openMainWindow()
+    }
+
+    // MARK: Quick Look panel control
+    // QLPreviewPanel walks the responder chain of the key window (views, window, window delegate) and
+    // then the application delegate, asking each for control. We are both the main window's delegate
+    // and the application delegate, so whichever way it walks, it finds us.
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
+        QuickLookPreviewer.shared.acceptsControl()
+    }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        QuickLookPreviewer.shared.beginControl(of: panel)
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        QuickLookPreviewer.shared.endControl(of: panel)
     }
 
     func windowWillClose(_ notification: Notification) {
