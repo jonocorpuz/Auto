@@ -37,6 +37,8 @@ final class AppModel {
     /// The card whose New Shoot sheet is showing.
     var editingShoot: Card?
     private(set) var indexing = false
+    /// Calendar used to split recordings into days (scan and New Shoot selection).
+    let calendar = Calendar.current
 
     /// Aggregate status across cards (see `StatusAggregator`).
     var status: Status {
@@ -209,7 +211,7 @@ final class AppModel {
             card.files = result.files
             card.cameras = result.cameras
             card.shootDate = result.shootDate
-            card.shootDays = ShootDays.byCamera(result.files, calendar: .current)
+            card.shootDays = ShootDays.byCamera(result.files, calendar: calendar)
             card.scanError = result.error
             recompute(card)
         }
@@ -316,16 +318,10 @@ final class AppModel {
 
     private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {
         card.missing = BackupVerifier.missing(files: card.files, results: results)
-        if card.missing.isEmpty && !card.files.isEmpty {
-            card.phase = .backed
-            card.plan = nil
-        } else if card.plan != nil {
-            card.phase = .ready
-        } else if case .failed = card.phase {
-            return
-        } else {
-            card.phase = .needsBackup
-        }
+        guard let phase = CardPhase.afterVerify(fileCount: card.files.count, missingCount: card.missing.count,
+                                                hasPlan: card.plan != nil, current: card.phase) else { return }
+        if phase == .backed { card.plan = nil }
+        card.phase = phase
     }
 
     // MARK: Shoots
@@ -335,40 +331,68 @@ final class AppModel {
         ShootPlanner.safeComponent(name) != nil
     }
 
-    /// Preview rows for the folders a shoot would create. Empty without a work folder or a usable name.
-    func shootFolders(card: Card, name: String, cameras: [Camera]) -> [PlannedFolder] {
-        guard let root = workRoot, let shoot = try? ShootPlanner.shootURL(root: root, name: name) else { return [] }
-        let jobs = ShootPlanner.jobs(missing: card.missing, shoot: shoot, cameras: cameras, fallback: card.name)
-        let fm = FileManager.default
-        return ShootPlanner.folders(for: jobs, shoot: shoot, root: root).map { row in
-            var row = row
-            let url = row.components.reduce(root) { $0.appendingPathComponent($1, isDirectory: true) }
-            var isDir: ObjCBool = false
-            row.exists = fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
-            return row
+    /// Preview of what a shoot would create for the selected files. Folders stay empty without a
+    /// work folder or a usable name; the counts always reflect the selection.
+    func shootPreview(card: Card, name: String, cameras: [Camera], selection: ShootSelection) -> ShootPreview {
+        let selected = selection.filter(card.missing)
+        let photos = selected.filter { $0.kind == .photo }.count
+        var preview = ShootPreview(folders: [], videoCount: selected.count - photos, photoCount: photos, problem: nil)
+        guard let root = workRoot else { return preview }
+        do {
+            let shoot = try ShootPlanner.shootURL(root: root, name: name)
+            let jobs = ShootPlanner.jobs(missing: selected, shoot: shoot, cameras: cameras, fallback: card.name)
+            let fm = FileManager.default
+            preview.folders = ShootPlanner.folders(for: jobs, shoot: shoot, root: root).map { row in
+                var row = row
+                let url = row.components.reduce(root) { $0.appendingPathComponent($1, isDirectory: true) }
+                var isDir: ObjCBool = false
+                row.exists = fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+                return row
+            }
+            preview.problem = ShootPlanner.problem(for: [shoot] + ShootPlanner.directories(for: jobs))?.errorDescription
+        } catch ShootPlanner.PathError.invalidName {
+            // Not an error to show while the user is still typing a name.
+        } catch {
+            preview.problem = error.localizedDescription
+        }
+        return preview
+    }
+
+    private struct PhaseError: LocalizedError {
+        var errorDescription: String? { "This card can't start a new shoot right now." }
+    }
+
+    private func canPlan(_ card: Card) -> Bool {
+        switch card.phase {
+        case .needsBackup, .ready, .failed: true
+        default: false
         }
     }
 
-    func createShoot(card: Card, name: String, cameras: [Camera]) throws {
+    func createShoot(card: Card, name: String, cameras: [Camera], selection: ShootSelection) throws {
         guard let root = workRoot else { return }
         let shoot = try ShootPlanner.shootURL(root: root, name: name)
         // Copies onto a card never count as a backup (e.g. the work folder was set on a card).
         if isOnCard(shoot) { throw CardDestinationError() }
         guard card.engine == nil else { return }
-        stopVerifier(card)
-        let jobs = ShootPlanner.jobs(missing: card.missing, shoot: shoot, cameras: cameras, fallback: card.name)
+        guard canPlan(card) else { throw PhaseError() }
+        let jobs = ShootPlanner.jobs(missing: selection.filter(card.missing), shoot: shoot, cameras: cameras, fallback: card.name)
+        guard !jobs.isEmpty else { throw EmptySelectionError() }
         guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: shoot) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
 
-        let fm = FileManager.default
-        for dir in ShootPlanner.directories(for: jobs) {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
+        try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobs), root: root, cardVolumes: cards.map(\.volume))
+        stopVerifier(card)
         card.plan = ShootPlanner.plan(jobs: jobs, shoot: shoot)
         card.phase = .ready
         editingShoot = nil
     }
 
+    private struct EmptySelectionError: LocalizedError {
+        var errorDescription: String? { "Select at least one file to copy." }
+    }
+
     func chooseFolder(for card: Card) {
+        guard canPlan(card) else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -430,6 +454,15 @@ final class AppModel {
             card.phase = .failed(CardDestinationError().localizedDescription)
             return
         }
+        do {
+            let volumes = cards.map(\.volume)
+            for dir in ShootPlanner.directories(for: plan.jobs) {
+                try ShootPlanner.checkDestination(dir, root: plan.destinationRoot, cardVolumes: volumes)
+            }
+        } catch {
+            card.phase = .failed(error.localizedDescription)
+            return
+        }
         let values = try? plan.destinationRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         if let free = values?.volumeAvailableCapacityForImportantUsage, free < plan.bytes {
             card.phase = .failed("Not enough space: needs \(Format.bytes(plan.bytes)), \(Format.bytes(free)) free.")
@@ -449,6 +482,8 @@ final class AppModel {
 
             let done = Set(outcome.copied.map(\.file.url))
             card.plan?.jobs.removeAll { done.contains($0.file.url) }
+            // Just-copied files must not be selectable again while they re-verify.
+            card.missing.removeAll { done.contains($0.url) }
             if card.plan?.jobs.isEmpty == true { card.plan = nil }
             card.backedTo = plan.destinationRoot.path.hasPrefix(workingVolume?.path ?? "\u{0}") ? workingDriveName : plan.destinationLabel
 
@@ -500,6 +535,10 @@ final class AppModel {
 }
 
 enum Format {
+    nonisolated static func count(_ n: Int, _ singular: String, _ plural: String) -> String {
+        "\(n) \(n == 1 ? singular : plural)"
+    }
+
     nonisolated static func bytes(_ count: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
     }

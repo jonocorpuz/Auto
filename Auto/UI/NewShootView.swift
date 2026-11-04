@@ -9,10 +9,14 @@ struct NewShootView: View {
     @State private var shootName = ""
     @State private var cameras: [Camera] = []
     @State private var error: String?
+    @State private var selection: ShootSelection?
     @FocusState private var nameFocused: Bool
 
+    private var currentSelection: ShootSelection {
+        selection ?? ShootSelection(missing: card.missing, cameras: card.cameras, calendar: model.calendar)
+    }
     private var isValid: Bool { model.isValidShootName(shootName) }
-    private var folders: [PlannedFolder] { model.shootFolders(card: card, name: shootName, cameras: cameras) }
+    private var folders: [PlannedFolder] { model.shootPreview(card: card, name: shootName, cameras: cameras, selection: currentSelection).folders }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -155,7 +159,7 @@ struct NewShootView: View {
 
     private func create() {
         do {
-            try model.createShoot(card: card, name: shootName, cameras: cameras)
+            try model.createShoot(card: card, name: shootName, cameras: cameras, selection: currentSelection)
         } catch {
             self.error = error.localizedDescription
         }
