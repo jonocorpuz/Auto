@@ -371,6 +371,7 @@ final class AppModel {
 
     func createShoot(card: Card, name: String, cameras: [Camera], selection: ShootSelection) throws {
         guard let root = workRoot else { return }
+        guard workingVolume != nil else { throw ShootPlanner.PathError.workFolderMissing }
         let shoot = try ShootPlanner.shootURL(root: root, name: name)
         // Copies onto a card never count as a backup (e.g. the work folder was set on a card).
         if isOnCard(shoot) { throw CardDestinationError() }
@@ -380,9 +381,9 @@ final class AppModel {
         guard !jobs.isEmpty else { throw EmptySelectionError() }
         guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: shoot) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
 
-        try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobs), root: root, cardVolumes: cards.map(\.volume))
+        try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobs), root: root, cardVolumes: volumes(including: card))
         stopVerifier(card)
-        card.plan = ShootPlanner.plan(jobs: jobs, shoot: shoot)
+        card.plan = ShootPlanner.plan(jobs: jobs, shoot: shoot, workRoot: root)
         card.phase = .ready
         editingShoot = nil
     }
@@ -413,6 +414,12 @@ final class AppModel {
         stopVerifier(card)
         card.plan = ShootPlanner.flatPlan(missing: card.missing, into: dir)
         card.phase = .ready
+    }
+
+    /// Every connected card volume plus `card`'s own (it may be stale), deduplicated.
+    private func volumes(including card: Card) -> [URL] {
+        var seen = Set<String>()
+        return (cards.map(\.volume) + [card.volume]).filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
 
     /// Whether `url` is on any connected card (the source card included).
@@ -455,9 +462,10 @@ final class AppModel {
             return
         }
         do {
-            let volumes = cards.map(\.volume)
+            let volumes = volumes(including: card)
+            let root = plan.workRoot ?? plan.destinationRoot
             for dir in ShootPlanner.directories(for: plan.jobs) {
-                try ShootPlanner.checkDestination(dir, root: plan.destinationRoot, cardVolumes: volumes)
+                try ShootPlanner.checkDestination(dir, root: root, cardVolumes: volumes)
             }
         } catch {
             card.phase = .failed(error.localizedDescription)

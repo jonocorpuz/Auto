@@ -30,6 +30,8 @@ nonisolated struct CopyPlan: Sendable {
     var jobs: [CopyJob]
     var destinationLabel: String
     var destinationRoot: URL
+    /// The work folder every destination must stay inside (falls back to `destinationRoot`).
+    var workRoot: URL?
     var bytes: Int64 { jobs.reduce(0) { $0 + $1.file.size } }
 }
 
@@ -43,6 +45,7 @@ nonisolated enum ShootPlanner {
         case outsideWorkFolder
         case notAFolder(String)
         case onCard
+        case workFolderMissing
 
         var errorDescription: String? {
             switch self {
@@ -50,6 +53,7 @@ nonisolated enum ShootPlanner {
             case .outsideWorkFolder: "That shoot folder would land outside your work folder."
             case .notAFolder(let name): "\u{201C}\(name)\u{201D} already exists as a file, so Auto can't make a folder there."
             case .onCard: CardDestinationError().localizedDescription
+            case .workFolderMissing: "Your work folder isn't available. Connect the drive or choose it again in Settings."
             }
         }
     }
@@ -121,8 +125,11 @@ nonisolated enum ShootPlanner {
         for part in relativeComponents(dir, to: root) ?? [] {
             current.appendPathComponent(part, isDirectory: true)
             var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: current.path, isDirectory: &isDir), !isDir.boolValue {
-                throw PathError.notAFolder(part)
+            if FileManager.default.fileExists(atPath: current.path, isDirectory: &isDir) {
+                if !isDir.boolValue { throw PathError.notAFolder(part) }
+            } else if (try? FileManager.default.destinationOfSymbolicLink(atPath: current.path)) != nil {
+                // Dangling symlink: its target can't be vouched for, so never write through it.
+                throw PathError.outsideWorkFolder
             }
         }
     }
@@ -132,7 +139,11 @@ nonisolated enum ShootPlanner {
     static func createDirectories(_ dirs: [URL], root: URL, cardVolumes: [URL]) throws {
         let fm = FileManager.default
         try checkDestination(root, root: root, cardVolumes: cardVolumes)
-        if !exists(root) { try fm.createDirectory(at: root, withIntermediateDirectories: true) }
+        // Never create the root: a missing drive must not grow a tree on the wrong disk.
+        var rootIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: root.path, isDirectory: &rootIsDir), rootIsDir.boolValue else {
+            throw PathError.workFolderMissing
+        }
         for dir in dirs {
             guard let rel = relativeComponents(dir, to: root) else { throw PathError.outsideWorkFolder }
             var current = root
@@ -221,14 +232,14 @@ nonisolated enum ShootPlanner {
         }
     }
 
-    static func plan(jobs: [CopyJob], shoot: URL) -> CopyPlan {
+    static func plan(jobs: [CopyJob], shoot: URL, workRoot: URL? = nil) -> CopyPlan {
         let labels = Set(jobs.map { $0.destDir.lastPathComponent }).sorted()
-        return CopyPlan(jobs: jobs, destinationLabel: labels.joined(separator: ", "), destinationRoot: shoot)
+        return CopyPlan(jobs: jobs, destinationLabel: labels.joined(separator: ", "), destinationRoot: shoot, workRoot: workRoot)
     }
 
     /// Everything into one chosen folder.
     static func flatPlan(missing: [MediaFile], into dir: URL) -> CopyPlan {
-        CopyPlan(jobs: missing.map { CopyJob(file: $0, destDir: dir) }, destinationLabel: dir.lastPathComponent, destinationRoot: dir)
+        CopyPlan(jobs: missing.map { CopyJob(file: $0, destDir: dir) }, destinationLabel: dir.lastPathComponent, destinationRoot: dir, workRoot: dir)
     }
 
 }

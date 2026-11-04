@@ -25,7 +25,7 @@ struct PartialShootTests {
         }
         let selected = Array(files.prefix(2))
         let dest = base.appendingPathComponent("shoot/Video/Cam")
-        try ShootPlanner.createDirectories([dest], root: base.appendingPathComponent("shoot"), cardVolumes: [])
+        try ShootPlanner.createDirectories([dest], root: base, cardVolumes: [])
         let outcome = await CopyEngine().run(selected.map { CopyJob(file: $0, destDir: dest) }) { _ in }
         #expect(outcome.copied.count == 2)
 
