@@ -72,6 +72,7 @@ final class AppModel {
     @ObservationIgnored var openSettings: () -> Void = {}
 
     @ObservationIgnored private var index: [String: [URL]] = [:]
+    @ObservationIgnored private let verifications = VerificationCache()
     @ObservationIgnored private var copiedThisSession = Set<String>()
     @ObservationIgnored private var indexGeneration = 0
     @ObservationIgnored private lazy var watcher = VolumeWatcher(workingVolume: { [weak self] in self?.workingVolume })
@@ -136,7 +137,7 @@ final class AppModel {
         drives = found2
 
         let gone = cards.filter { card in !found.contains(card.volume) }
-        for card in gone { card.engine?.cancel() }
+        for card in gone { card.engine?.cancel(); card.verifier?.cancel() }
         if let editing = editingShoot, gone.contains(where: { $0 === editing }) { editingShoot = nil }
         cards.removeAll { card in gone.contains { $0 === card } }
 
@@ -182,13 +183,53 @@ final class AppModel {
         }
     }
 
+    /// A card is backed up only when every file is checksum-verified against a copy on the work drive.
+    /// Name+size hits are just candidates; `BackupVerifier` hashes them off the main actor.
     private func recompute(_ card: Card) {
         if case .copying = card.phase { return }
-        if indexing && workingVolume != nil && card.files.contains(where: { !copiedThisSession.contains($0.key) }) {
+        card.verifier?.cancel()
+        card.verifier = nil
+
+        let driveReady = workingVolume != nil
+        if indexing && driveReady && card.files.contains(where: { !copiedThisSession.contains($0.key) }) {
             card.phase = .scanning
             return
         }
-        card.missing = card.files.filter { index[$0.key] == nil && !copiedThisSession.contains($0.key) }
+
+        let triage = BackupVerifier.triage(
+            files: card.files,
+            candidates: driveReady ? index : [:],
+            alreadyVerified: copiedThisSession,
+            cache: verifications)
+
+        if triage.toVerify.isEmpty {
+            finishRecompute(card, results: triage.settled)
+            return
+        }
+        if case .failed = card.phase {
+            // Keep the failure on screen; unverified files simply stay on the to-copy list.
+            finishRecompute(card, results: triage.settled)
+            return
+        }
+
+        let verifier = BackupVerifier()
+        card.verifier = verifier
+        card.verifyProgress = CopyProgress(filesTotal: triage.toVerify.count, bytesTotal: triage.toVerify.reduce(0) { $0 + $1.size })
+        card.phase = .verifying
+        let candidates = index
+        Task {
+            let outcome = await verifier.run(triage.toVerify, candidates: candidates, cache: verifications) { progress in
+                card.verifyProgress = progress
+            }
+            // Superseded by a newer recompute, or the card went away.
+            guard !outcome.cancelled, card.verifier === verifier else { return }
+            card.verifier = nil
+            finishRecompute(card, results: triage.settled.merging(outcome.results) { $1 })
+        }
+    }
+
+    private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {
+        card.missing = BackupVerifier.missing(files: card.files, results: results)
         if card.missing.isEmpty {
             card.phase = .backed
             card.plan = nil
