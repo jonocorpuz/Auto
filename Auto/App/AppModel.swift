@@ -74,7 +74,24 @@ final class AppModel {
     }
 
     /// Sidebar selection in the main window.
-    var selectedTab: AppTab = .media
+    var selectedTab: AppTab = .media {
+        didSet { if selectedTab != .media { browsingCardID = nil } }
+    }
+    /// Card open in the Media tab's file browser; nil shows the overview.
+    var browsingCardID: Card.ID?
+
+    var browsingCard: Card? {
+        browsingCardID.flatMap { id in cards.first { $0.id == id } }
+    }
+
+    /// The browsed card's files grouped into "Not Backed Up", then by the shoot holding their copy.
+    func browserGroups(for card: Card) -> [CardBrowser.Group] {
+        let refs = shoots.compactMap { item -> CardBrowser.ShootRef? in
+            guard case .online(let shoot)? = item.availability else { return nil }
+            return CardBrowser.ShootRef(id: item.id, name: item.record.name, folder: shoot.folder)
+        }
+        return CardBrowser.group(files: card.files, backups: card.backups, shoots: refs)
+    }
 
     /// Light/dark preference, applied app-wide.
     var appearance: AppearanceMode {
@@ -112,6 +129,8 @@ final class AppModel {
     @ObservationIgnored let registryURL: URL
     @ObservationIgnored let thumbnails: any ThumbnailProvider
     @ObservationIgnored private var thumbnailCache: [String: CGImage] = [:]
+    /// Card browser previews, keyed by file path. Cleared wholesale when it grows large.
+    @ObservationIgnored private var fileThumbnails: [String: CGImage] = [:]
     @ObservationIgnored private var shootsGeneration = 0
     @ObservationIgnored private var coverageTasks: [CoverageKey: Task<Void, Never>] = [:]
     @ObservationIgnored private var coverageGenerations: [CoverageKey: Int] = [:]
@@ -300,6 +319,7 @@ final class AppModel {
         // No media, or a scan error: never verify, never backed.
         if let phase = CardPhase.afterScan(fileCount: card.files.count, error: card.scanError) {
             card.missing = card.files
+            card.backups = [:]
             card.plan = nil
             card.phase = phase
             return
@@ -403,6 +423,7 @@ final class AppModel {
 
     private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {
         card.missing = BackupVerifier.missing(files: card.files, results: results)
+        card.backups = results.compactMapValues { if case .verified(let copy) = $0 { copy } else { nil } }
         guard let phase = CardPhase.afterVerify(fileCount: card.files.count, missingCount: card.missing.count,
                                                 hasPlan: card.plan != nil, current: card.phase) else { return }
         if phase == .backed {
@@ -959,6 +980,16 @@ extension AppModel {
     struct ShootCoverageError: LocalizedError {
         let reason: String
         var errorDescription: String? { reason }
+    }
+
+    /// Preview for one file in the card browser (read-only QuickLook; nil when none can be made).
+    func fileThumbnail(for url: URL) async -> CGImage? {
+        let key = url.standardizedFileURL.path
+        if let cached = fileThumbnails[key] { return cached }
+        guard let image = try? await thumbnails.thumbnail(for: url, maxPixels: 320) else { return nil }
+        if fileThumbnails.count > 600 { fileThumbnails.removeAll() }
+        fileThumbnails[key] = image
+        return image
     }
 
     #if DEBUG

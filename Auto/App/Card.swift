@@ -16,6 +16,8 @@ final class Card: Identifiable {
     var phase: Phase = .scanning
     var files: [MediaFile] = []
     var missing: [MediaFile] = []
+    /// Card file URL -> its verified copy, from the last backup check.
+    var backups: [URL: URL] = [:]
     var cameras: [Camera] = []
     var shootDate: Date?
     var shootDays: [String: [ShootDay]] = [:]
