@@ -28,6 +28,8 @@ nonisolated enum ShootCoverageChecker {
         var verified: Set<URL>
         /// True when the run was cancelled: `verified` is partial and must not be treated as complete.
         var cancelled: Bool
+        /// Set when the shoot folder couldn't be checked at all (not a readable folder, or on a card).
+        var failure: String? = nil
     }
 
     /// Card files that have a checksum-identical copy INSIDE `shootFolder` (any subfolder; camera
@@ -41,14 +43,28 @@ nonisolated enum ShootCoverageChecker {
         sessionCopies: [CopiedFile],
         cache: VerificationCache,
         verifier: BackupVerifier = BackupVerifier(),
+        cardVolumes: [URL] = [],
         progress: @escaping @Sendable (CopyProgress) -> Void
     ) async -> Result {
         MainThreadProbe.shared.mark("ShootCoverageChecker.run")
         return await withTaskCancellationHandler {
-            var candidates = await DriveIndex.build(shootFolder)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: shootFolder.path, isDirectory: &isDir), isDir.boolValue,
+                  FileManager.default.isReadableFile(atPath: shootFolder.path) else {
+                return Result(verified: [], cancelled: false, failure: "The shoot folder can't be read.")
+            }
+            if VolumeClassifier.isOnCard(shootFolder, cards: cardVolumes) {
+                return Result(verified: [], cancelled: false, failure: "The shoot folder is on a camera card.")
+            }
+            // A card's own files never count as their own backup, even if a shoot folder contains the card.
+            var candidates = await DriveIndex.build(shootFolder).compactMapValues { urls -> [URL]? in
+                let kept = urls.filter { !VolumeClassifier.isInside($0, anyOf: cardVolumes) }
+                return kept.isEmpty ? nil : kept
+            }
             let known = Set(candidates.values.joined().map(canonical))
             let inside = sessionCopies.filter {
                 isInside($0.destination, folder: shootFolder) && !known.contains(canonical($0.destination))
+                    && !VolumeClassifier.isInside($0.destination, anyOf: cardVolumes)
             }
             candidates = BackupVerifier.addingCandidates(inside, to: candidates)
 

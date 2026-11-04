@@ -6,7 +6,7 @@ nonisolated struct CopyJob: Sendable {
     let destDir: URL
 }
 
-nonisolated struct CopyProgress: Sendable {
+nonisolated struct CopyProgress: Sendable, Equatable {
     var filesDone = 0
     var filesTotal = 0
     var bytesDone: Int64 = 0
