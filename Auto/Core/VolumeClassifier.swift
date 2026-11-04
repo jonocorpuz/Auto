@@ -33,13 +33,20 @@ nonisolated enum VolumeClassifier {
         cardMarkers.contains { FileManager.default.fileExists(atPath: url.appendingPathComponent($0).path) }
     }
 
+    /// Standardized path with no trailing slash, so `file:///Volumes/X/` equals `/Volumes/X`.
+    static func normalizedPath(_ url: URL) -> String {
+        var p = url.standardizedFileURL.path
+        while p.count > 1 && p.hasSuffix("/") { p.removeLast() }
+        return p
+    }
+
     static func classify(_ volumes: [VolumeDescriptor], workingVolume: URL?) -> VolumeClassification {
-        let working = workingVolume?.standardizedFileURL
+        let working = workingVolume.map(normalizedPath)
         var cards: [URL] = []
         var drives: [DriveVolume] = []
         for v in volumes {
             guard !v.isRootFileSystem, v.isLocal, v.url.path.hasPrefix("/Volumes/"), !v.isDiskImage else { continue }
-            let isWorking = v.url.standardizedFileURL == working
+            let isWorking = working != nil && normalizedPath(v.url) == working
             if !isWorking && (v.hasCardLayout || v.isRemovable) {
                 cards.append(v.url)
             } else if !v.isInternal || isWorking {
@@ -47,7 +54,8 @@ nonisolated enum VolumeClassifier {
             }
         }
         drives.sort { a, b in
-            let aw = a.url.standardizedFileURL == working, bw = b.url.standardizedFileURL == working
+            let aw = working != nil && normalizedPath(a.url) == working
+            let bw = working != nil && normalizedPath(b.url) == working
             return aw != bw ? aw : a.name < b.name
         }
         return VolumeClassification(cards: cards, drives: drives)

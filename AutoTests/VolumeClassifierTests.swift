@@ -41,6 +41,16 @@ struct VolumeClassifierTests {
         #expect(r.drives.map(\.name) == ["Work", "Alpha", "Zed"])
     }
 
+    @Test func trailingSlashWorkingVolumeStillMatches() throws {
+        let slashed = try #require(URL(string: "file:///Volumes/Work/"))
+        let vols = [Self.vol("Zed"), Self.vol("Work", layout: true)]
+        for (v, w) in [(vols, slashed), (vols.map { d -> VolumeDescriptor in var d = d; d.url = URL(string: "\(d.url.absoluteString)/")!; return d }, Self.working)] {
+            let r = VolumeClassifier.classify(v, workingVolume: w)
+            #expect(r.cards.isEmpty)
+            #expect(r.drives.map(\.name) == ["Work", "Zed"])
+        }
+    }
+
     @Test func hasCardLayoutDetectsMarkers() throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("vc-\(UUID().uuidString)")
