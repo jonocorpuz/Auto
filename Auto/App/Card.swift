@@ -17,9 +17,11 @@ final class Card: Identifiable {
     var shootDate: Date?
     var plan: CopyPlan?
     var progress = CopyProgress()
+    var verifyProgress = CopyProgress()
     var backedTo: String?
     var ejecting = false
     @ObservationIgnored var engine: CopyEngine?
+    @ObservationIgnored var verifier: BackupVerifier?
 
     init(volume: URL, name: String) {
         self.volume = volume

@@ -33,7 +33,7 @@ struct CardRow: View {
 
     private var tint: Color {
         switch card.phase {
-        case .scanning: Color(nsColor: AppModel.Status.idle.tint)
+        case .scanning, .verifying: Color(nsColor: AppModel.Status.idle.tint)
         case .copying: Color(nsColor: AppModel.Status.copying.tint)
         case .backed: Color(nsColor: AppModel.Status.backed.tint)
         case .needsBackup, .ready: Color(nsColor: AppModel.Status.unbacked.tint)
@@ -44,6 +44,7 @@ struct CardRow: View {
     private var phaseLabel: String {
         switch card.phase {
         case .scanning: "Checking…"
+        case .verifying: "Checking backup…"
         case .needsBackup: "Not backed up"
         case .ready: "Ready to copy"
         case .copying: "Copying…"
@@ -87,6 +88,21 @@ struct CardRow: View {
         switch card.phase {
         case .scanning:
             ProgressView().controlSize(.small)
+
+        case .verifying:
+            let p = card.verifyProgress
+            VStack(alignment: .leading, spacing: 6) {
+                ProgressView(value: p.fraction)
+                HStack {
+                    Text("Checking backup… \(min(p.filesDone + 1, p.filesTotal))/\(p.filesTotal)")
+                        .monospacedDigit()
+                    Spacer()
+                    Text(p.currentFile).lineLimit(1).truncationMode(.middle)
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Comparing each file with the copy on \(model.workingDriveName). Don't format yet.")
+                .font(.caption).foregroundStyle(.secondary)
 
         case .needsBackup:
             if model.workRoot != nil && model.workingVolume == nil {
