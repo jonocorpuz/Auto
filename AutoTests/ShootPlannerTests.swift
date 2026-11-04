@@ -11,12 +11,6 @@ struct ShootPlannerTests {
         MediaFile(url: URL(fileURLWithPath: "/card/\(name)"), size: size, date: Date(), kind: kind, cameraID: camera)
     }
 
-    @Test func folderNameUsesFormatAndName() {
-        #expect(ShootPlanner.folderName(date: date(2026, 3, 7), name: " Brand film ", dateFormat: "dd.MM.yy") == "07.03.26 Brand film")
-        #expect(ShootPlanner.folderName(date: date(2026, 3, 7), name: "", dateFormat: "yyyy-MM-dd") == "2026-03-07")
-        #expect(ShootPlanner.folderName(date: date(2026, 3, 7), name: "", dateFormat: "") == "07.03.26")
-    }
-
     @Test func traversalShootNameStaysInsideTheWorkRoot() throws {
         let root = URL(fileURLWithPath: "/Volumes/T7/Work")
         let shoot = try ShootPlanner.shootURL(root: root, name: "../../CARD/DCIM")
@@ -34,22 +28,6 @@ struct ShootPlannerTests {
     func unusableShootNamesThrow(_ name: String) {
         #expect(throws: ShootPlanner.PathError.invalidName) {
             try ShootPlanner.shootURL(root: URL(fileURLWithPath: "/w"), name: name)
-        }
-    }
-
-    @Test func slashesInTheDateFormatDontMakeFolders() throws {
-        #expect(ShootPlanner.folderName(date: date(2026, 3, 7), name: "a/b:c", dateFormat: "dd/MM/yy") == "07-03-26 a-b-c")
-        let root = URL(fileURLWithPath: "/w")
-        let shoot = try ShootPlanner.shootURL(root: root, client: "Acme", date: date(2026, 3, 7), name: "", dateFormat: "dd/MM/yy")
-        #expect(shoot.path == "/w/Acme/07-03-26")
-        // A format that renders as ".." falls back to the default.
-        #expect(ShootPlanner.folderName(date: date(2026, 3, 7), name: "", dateFormat: "'..'") == "07.03.26")
-    }
-
-    @Test(arguments: ["", "   ", ".", "..", " .. ", "\n"])
-    func unusableClientNamesThrow(_ client: String) {
-        #expect(throws: ShootPlanner.PathError.invalidClient) {
-            try ShootPlanner.shootURL(root: URL(fileURLWithPath: "/w"), client: client, date: Date(), name: "", dateFormat: "dd.MM.yy")
         }
     }
 
@@ -128,15 +106,6 @@ struct ShootPlannerTests {
         #expect(dirs.map(\.path) == Set(f.jobs.map(\.destDir.path)).sorted())
         #expect(dirs.count == 3)
         #expect(!dirs.contains(f.shoot))
-    }
-
-    @Test func sectionsAndSuggestions() {
-        let s = ShootPlanner.sections(for: [file("a.JPG", kind: .photo, camera: "a")])
-        #expect(s.photo && !s.video)
-        let clients = ["Acme", "Beta", "Acme Two"]
-        #expect(ShootPlanner.suggestions(for: "acm", in: clients) == ["Acme", "Acme Two"])
-        #expect(ShootPlanner.suggestions(for: "beta", in: clients).isEmpty)
-        #expect(ShootPlanner.suggestions(for: "", in: clients).isEmpty)
     }
 
     @Test func flatPlanPutsEverythingInOneFolder() {

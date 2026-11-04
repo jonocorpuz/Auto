@@ -58,10 +58,6 @@ final class AppModel {
         }
     }
 
-    var dateFormat: String {
-        didSet { UserDefaults.standard.set(dateFormat, forKey: Keys.dateFormat) }
-    }
-
     /// Open or raise the main window when a new card mounts.
     var autoOpen: Bool {
         didSet { UserDefaults.standard.set(autoOpen, forKey: Keys.autoOpen) }
@@ -104,7 +100,6 @@ final class AppModel {
 
     init() {
         let defaults = UserDefaults.standard
-        dateFormat = defaults.string(forKey: Keys.dateFormat) ?? ShootPlanner.defaultDateFormat
         autoOpen = defaults.object(forKey: Keys.autoOpen) as? Bool ?? true
         appearance = defaults.string(forKey: Keys.appearance).flatMap(AppearanceMode.init) ?? .system
         if let path = defaults.string(forKey: Keys.workRoot) {
@@ -114,7 +109,6 @@ final class AppModel {
 
     private enum Keys {
         static let workRoot = "workRoot"
-        static let dateFormat = "dateFormat"
         static let autoOpen = "autoOpen"
         static let appearance = "appearance"
     }
@@ -157,7 +151,7 @@ final class AppModel {
         return "your drive"
     }
 
-    /// "T7 Shield > 2026 > Client work" style path for display.
+    /// "T7 Shield > 2026 > Shoots" style path for display.
     var workRootBreadcrumb: String {
         guard let root = workRoot else { return "your drive" }
         let parts = root.pathComponents
@@ -209,13 +203,13 @@ final class AppModel {
     // MARK: Scanning
 
     private func scan(_ card: Card) {
-            card.shootDays = ShootDays.byCamera(result.files, calendar: .current)
         card.phase = .scanning
         Task {
             let result = await CardScanner.scan(card.volume, volumeName: card.name)
             card.files = result.files
             card.cameras = result.cameras
             card.shootDate = result.shootDate
+            card.shootDays = ShootDays.byCamera(result.files, calendar: .current)
             card.scanError = result.error
             recompute(card)
         }
@@ -335,50 +329,6 @@ final class AppModel {
     }
 
     // MARK: Shoots
-
-    func existingClients() -> [String] {
-        guard let root = workRoot,
-              let items = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return [] }
-        return items
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .map(\.lastPathComponent)
-            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-    }
-
-    func shootFolderName(date: Date, name: String) -> String {
-        ShootPlanner.folderName(date: date, name: name, dateFormat: dateFormat)
-    }
-
-    func shootFolderExists(client: String, date: Date, name: String) -> Bool {
-        guard let root = workRoot,
-              let shoot = try? ShootPlanner.shootURL(root: root, client: client, date: date, name: name, dateFormat: dateFormat) else { return false }
-        return FileManager.default.fileExists(atPath: shoot.path)
-    }
-
-    /// Whether `client` can be used as a client folder name.
-    func isValidClientName(_ client: String) -> Bool {
-        ShootPlanner.safeComponent(client) != nil
-    }
-
-    func createShoot(card: Card, client: String, shootName: String, date: Date, cameras: [Camera]) throws {
-        guard let root = workRoot else { return }
-        let shoot = try ShootPlanner.shootURL(root: root, client: client, date: date, name: shootName, dateFormat: dateFormat)
-        // Copies onto a card never count as a backup (e.g. the work folder was set on a card).
-        if isOnCard(shoot) { throw CardDestinationError() }
-        guard card.engine == nil else { return }
-        stopVerifier(card)
-        let jobs = ShootPlanner.jobs(missing: card.missing, shoot: shoot, cameras: cameras, fallback: card.name)
-        guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: shoot) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
-
-        let fm = FileManager.default
-        try fm.createDirectory(at: shoot.appendingPathComponent("Project"), withIntermediateDirectories: true)
-        for dir in Set(jobs.map(\.destDir)) {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        card.plan = ShootPlanner.plan(jobs: jobs, shoot: shoot)
-        card.phase = .ready
-        editingShoot = nil
-    }
 
     /// Whether `name` can be used as the shoot folder name.
     func isValidShootName(_ name: String) -> Bool {

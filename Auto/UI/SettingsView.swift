@@ -53,14 +53,6 @@ struct SettingsView: View {
                     }
                 }
 
-                SettingsSection("Shoots") {
-                    SettingsRow("Date format", detail: "Example: \(model.shootFolderName(date: Date(), name: "Brand film"))") {
-                        TextField("", text: $model.dateFormat, prompt: Text(ShootPlanner.defaultDateFormat))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 160)
-                    }
-                }
-
                 SettingsSection("Ingest", soon: true) {
                     SettingsRow("Eject card after a verified backup") {
                         Toggle("", isOn: $ejectAfterBackup).labelsHidden()

@@ -25,18 +25,15 @@ nonisolated struct CopyPlan: Sendable {
 
 /// Pure helpers for naming shoot folders and turning missing files into copy jobs.
 nonisolated enum ShootPlanner {
-    static let defaultDateFormat = "dd.MM.yy"
     static let videoFolder = "Video"
     static let photoFolder = "Photo"
 
     enum PathError: LocalizedError, Equatable {
-        case invalidClient
         case invalidName
         case outsideWorkFolder
 
         var errorDescription: String? {
             switch self {
-            case .invalidClient: "Enter a client name that works as a folder name."
             case .invalidName: "Enter a shoot name that works as a folder name."
             case .outsideWorkFolder: "That shoot folder would land outside your work folder."
             }
@@ -57,32 +54,6 @@ nonisolated enum ShootPlanner {
     static func isInside(_ url: URL, root: URL) -> Bool {
         let r = root.standardizedFileURL.path
         return url.standardizedFileURL.path.hasPrefix(r.hasSuffix("/") ? r : r + "/")
-    }
-
-    /// "<formatted date> <name>", or just the date when the name is blank. Always a single safe
-    /// folder name: a format like "dd/MM/yy" gives "07-03-26".
-    static func folderName(date: Date, name: String, dateFormat: String) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = dateFormat.isEmpty ? defaultDateFormat : dateFormat
-        var stamp = safeComponent(formatter.string(from: date))
-        if stamp == nil {
-            formatter.dateFormat = defaultDateFormat
-            stamp = safeComponent(formatter.string(from: date))
-        }
-        let safeStamp = stamp ?? "Shoot"
-        guard let safeName = safeComponent(name) else { return safeStamp }
-        return "\(safeStamp) \(safeName)"
-    }
-
-    /// Shoot folder: root/Client/<date name>. Throws if the client isn't a usable folder name or
-    /// the result would escape `root`.
-    static func shootURL(root: URL, client: String, date: Date, name: String, dateFormat: String) throws -> URL {
-        guard let clientFolder = safeComponent(client) else { throw PathError.invalidClient }
-        let shoot = root.appendingPathComponent(clientFolder, isDirectory: true)
-            .appendingPathComponent(folderName(date: date, name: name, dateFormat: dateFormat), isDirectory: true)
-        guard isInside(shoot, root: root) else { throw PathError.outsideWorkFolder }
-        return shoot
     }
 
     /// Shoot folder: root/<name>. Throws if the name isn't usable or the result would escape `root`.
@@ -154,19 +125,6 @@ nonisolated enum ShootPlanner {
         CopyPlan(jobs: missing.map { CopyJob(file: $0, destDir: dir) }, destinationLabel: dir.lastPathComponent, destinationRoot: dir)
     }
 
-    /// Photos only or video only decides which sections the preview shows.
-    static func sections(for missing: [MediaFile]) -> (video: Bool, photo: Bool) {
-        (missing.contains { $0.kind != .photo }, missing.contains { $0.kind == .photo })
-    }
-
-    /// Client names matching what the user typed (hides the list once it is an exact single match).
-    static func suggestions(for typed: String, in clients: [String], limit: Int = 5) -> [String] {
-        let trimmed = typed.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return [] }
-        let matches = clients.filter { $0.localizedCaseInsensitiveContains(trimmed) }
-        if matches.count == 1, matches[0].caseInsensitiveCompare(trimmed) == .orderedSame { return [] }
-        return Array(matches.prefix(limit))
-    }
 }
 
 /// One row of the planned folder tree shown before copying.
