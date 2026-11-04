@@ -83,14 +83,26 @@ struct VolumeClassifierTests {
         #expect(again.cards == [fixture])
     }
 
-    @MainActor @Test func watcherReportsViaOnChange() {
+    @MainActor @Test func watcherReportsViaOnChange() async {
         let suite = "w-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let watcher = VolumeWatcher(defaults: defaults, readVolumes: { [Self.vol("SD", layout: true), Self.vol("SSD")] })
         var got: ([URL], [DriveVolume], Bool)?
         watcher.onChange = { got = ($0, $1, $2) }
-        watcher.refresh(mountedNew: true)
+        await watcher.refreshAndWait(mountedNew: true)
         #expect(got?.0.count == 1 && got?.1.count == 1 && got?.2 == true)
+    }
+
+    @MainActor @Test func overlappingRefreshesPublishOnlyLatest() async {
+        let suite = "w-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let watcher = VolumeWatcher(defaults: defaults, readVolumes: { [Self.vol("SD", layout: true)] })
+        var calls: [Bool] = []
+        watcher.onChange = { _, _, new in calls.append(new) }
+        watcher.refresh(mountedNew: true)
+        await watcher.refreshAndWait(mountedNew: false)
+        #expect(calls == [true]) // stale one dropped, its mount announcement carried over
     }
 }
