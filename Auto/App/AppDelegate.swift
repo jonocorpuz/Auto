@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = AppModel()
     private var statusItem: NSStatusItem!
     private var mainWindow: NSWindow?
+    private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -16,7 +17,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         updateIcon()
         observeStatus()
-        if model.workRoot == nil { openMainWindow() }
+        model.openMainWindow = { [weak self] in self?.openMainWindow() }
+        model.openSettings = { [weak self] in self?.openSettings() }
+        model.start()
+        // Dev convenience: a fixture card also opens the window at launch, since no mount event fires for it.
+        if model.workRoot == nil || VolumeWatcher.fixtureCard(from: .standard) != nil { openMainWindow() }
+    }
+
+    /// Launching the app again (Finder, Spotlight, `open`) brings the window forward.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openMainWindow()
+        return false
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -98,14 +109,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainWindow?.makeKeyAndOrderFront(nil)
     }
 
+    /// Owned here instead of relying on SwiftUI's `openSettings`/`showSettingsWindow:`, which are unreliable
+    /// from a status-item menu in an accessory app.
     @objc func openSettings() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentViewController: NSHostingController(
+                rootView: SettingsView().environment(model)
+            ))
+            window.title = "Auto Settings"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.delegate = self
+            window.center()
+            settingsWindow = window
+        }
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     func windowWillClose(_ notification: Notification) {
-        guard (notification.object as? NSWindow) === mainWindow else { return }
-        NSApp.setActivationPolicy(.accessory)
+        guard let closing = notification.object as? NSWindow, closing === mainWindow || closing === settingsWindow else { return }
+        let other = closing === mainWindow ? settingsWindow : mainWindow
+        if other?.isVisible != true { NSApp.setActivationPolicy(.accessory) }
     }
 }
