@@ -90,20 +90,9 @@ struct CardRow: View {
     @ViewBuilder private func dayChips(_ days: [ShootDay]) -> some View {
         if !days.isEmpty {
             let calendar = Calendar.current
-            let thisYear = calendar.component(.year, from: Date())
             HStack(spacing: 4) {
                 ForEach(Array(days.prefix(4).enumerated()), id: \.offset) { _, day in
-                    let sameYear = calendar.component(.year, from: day.start) == thisYear
-                    let date = sameYear
-                        ? day.start.formatted(.dateTime.month(.abbreviated).day())
-                        : day.start.formatted(.dateTime.month(.abbreviated).day().year())
-                    Text("\(date) · \(day.fileCount)")
-                        .font(.caption)
-                        .monospacedDigit()
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Theme.surfaceMuted, in: Capsule())
-                        .overlay(Capsule().strokeBorder(Theme.border))
+                    DayChip(day: day, calendar: calendar)
                 }
                 if days.count > 4 {
                     Text("+\(days.count - 4)").font(.caption).foregroundStyle(.secondary)
