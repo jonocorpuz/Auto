@@ -104,6 +104,52 @@ struct CardRow: View {
         }
     }
 
+    // MARK: Add to shoot
+
+    private var onlineShoots: [ShootItem] {
+        model.shoots.filter { if case .online? = $0.availability { true } else { false } }
+    }
+
+    private func matchesCard(_ item: ShootItem) -> Bool {
+        card.shootDays.values.contains { days in
+            days.contains { model.calendar.isDate($0.start, inSameDayAs: item.date) }
+        }
+    }
+
+    private func shootLabel(_ item: ShootItem) -> String {
+        "\(item.record.name) — \(item.date.formatted(date: .abbreviated, time: .omitted))"
+    }
+
+    @ViewBuilder private var addToShoot: some View {
+        let online = onlineShoots
+        let matching = online.filter(matchesCard)
+        let others = online.filter { !matchesCard($0) }.prefix(10)
+        Menu("Add to Shoot") {
+            if online.isEmpty {
+                Text("No shoots yet")
+            } else {
+                ForEach(matching) { item in
+                    Button { model.shootSheet = .add(shootID: item.id, cardID: card.id) } label: {
+                        Label(shootLabel(item), systemImage: "calendar.badge.checkmark")
+                    }
+                }
+                if !matching.isEmpty && !others.isEmpty { Divider() }
+                ForEach(Array(others)) { item in
+                    Button(shootLabel(item)) { model.shootSheet = .add(shootID: item.id, cardID: card.id) }
+                }
+            }
+        }
+        .menuStyle(.button)
+        .fixedSize()
+        .disabled(online.isEmpty)
+        if card.phase != .copying, let best = matching.first {
+            Button("Add to \(best.record.name)") {
+                model.shootSheet = .add(shootID: best.id, cardID: card.id)
+            }
+            .foregroundStyle(Theme.accent)
+        }
+    }
+
     // MARK: Phase content
 
     @ViewBuilder private var phaseContent: some View {
@@ -125,6 +171,7 @@ struct CardRow: View {
             }
             Text("Comparing each file with the copy on \(model.workingDriveName). Don't format yet.")
                 .font(.caption).foregroundStyle(.secondary)
+            HStack { Spacer(); addToShoot }
 
         case .needsBackup:
             if model.workRoot != nil && model.workingVolume == nil {
@@ -137,6 +184,7 @@ struct CardRow: View {
                 Button("Show in Finder") { model.openInFinder(card) }
                 Spacer()
                 Button("Choose folder…") { model.chooseFolder(for: card) }
+                addToShoot
                 Button("New Shoot…") { model.newShoot(card: card) }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.workRoot == nil || model.workingVolume == nil)
@@ -149,6 +197,7 @@ struct CardRow: View {
                 HStack {
                     Button("Discard") { model.discardPlan(card) }
                     Button("Show in Finder") { model.openInFinder(card) }
+                    addToShoot
                     Spacer()
                     Button("Copy") { model.copy(card) }
                         .buttonStyle(.borderedProminent)
@@ -182,6 +231,7 @@ struct CardRow: View {
                         .font(.callout)
                 }
                 Spacer()
+                addToShoot
                 Button("Show in Finder") { model.openInFinder(card) }
                 Button(card.ejecting ? "Ejecting…" : "Eject") { model.eject(card) }
                     .buttonStyle(.borderedProminent)
@@ -221,6 +271,7 @@ struct CardRow: View {
             HStack {
                 if card.plan != nil { Button("Discard") { model.discardPlan(card) } }
                 Button("Show in Finder") { model.openInFinder(card) }
+                addToShoot
                 Spacer()
                 Button("Choose folder…") { model.chooseFolder(for: card) }
                 Button("Retry") { model.retry(card) }
