@@ -59,10 +59,17 @@ nonisolated enum ShootCoverageChecker {
             if VolumeClassifier.isOnCard(shootFolder, cards: cardVolumes) {
                 return Result(verified: [], cancelled: false, failure: "The shoot folder is on a camera card.")
             }
+            // Canonicalize excluded folders once; each candidate is canonicalized once below.
+            let excludedRoots = excluding.map { canonical($0) }.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+            func isExcluded(_ url: URL) -> Bool {
+                guard !excludedRoots.isEmpty else { return false }
+                let path = canonical(url)
+                return excludedRoots.contains { path.hasPrefix($0) }
+            }
             // A card's own files never count as their own backup, even if a shoot folder contains the card.
             var candidates = await DriveIndex.build(shootFolder).compactMapValues { urls -> [URL]? in
                 let kept = urls.filter { url in
-                    !VolumeClassifier.isInside(url, anyOf: cardVolumes) && !excluding.contains { ex in isInside(url, folder: ex) }
+                    !VolumeClassifier.isInside(url, anyOf: cardVolumes) && !isExcluded(url)
                 }
                 return kept.isEmpty ? nil : kept
             }
@@ -70,7 +77,7 @@ nonisolated enum ShootCoverageChecker {
             let inside = sessionCopies.filter { copy in
                 isInside(copy.destination, folder: shootFolder) && !known.contains(canonical(copy.destination))
                     && !VolumeClassifier.isInside(copy.destination, anyOf: cardVolumes)
-                    && !excluding.contains { ex in isInside(copy.destination, folder: ex) }
+                    && !isExcluded(copy.destination)
             }
             candidates = BackupVerifier.addingCandidates(inside, to: candidates)
 

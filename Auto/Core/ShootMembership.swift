@@ -14,13 +14,14 @@ nonisolated enum ShootMembership {
         case failed(String)
     }
 
-    /// Other folders strictly inside `folder` (lexical, standardized). An equal path or a
-    /// sibling sharing a name prefix ("Wedding2" vs "Wedding") is not inside.
+    /// Other folders strictly inside `folder`, compared with symlinks resolved (as the checker does).
+    /// An equal path or a sibling sharing a name prefix ("Wedding2" vs "Wedding") is not inside.
+    /// Touches the file system: only call it off the main actor (it runs inside `run`).
     static func nested(in folder: URL, among folders: [URL]) -> [URL] {
-        let root = folder.standardizedFileURL.path
+        let root = folder.resolvingSymlinksInPath().standardizedFileURL.path
         let prefix = root.hasSuffix("/") ? root : root + "/"
         return folders.filter {
-            let p = $0.standardizedFileURL.path
+            let p = $0.resolvingSymlinksInPath().standardizedFileURL.path
             return p != root && p.hasPrefix(prefix)
         }
     }
