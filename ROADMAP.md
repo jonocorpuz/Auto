@@ -78,9 +78,9 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - [x] Card-first shoot flow removed (`createShoot(card:…)`, `shootPreview`, `ingestCandidate`); shoot-first flow is the only one
 - [x] Card browser: clicking a card opens a read-only, Finder-style page (icon grid with QuickLook thumbnails or list, locations sidebar, status bar). Files are grouped by `CardBrowser.group` into "Not Backed Up", one group per online shoot holding the verified copy, and "Backed Up Elsewhere"; `Card.backups` records each file's verified copy
 - [x] Card browser actions: Quick Look (Space toggles, double-click opens), Show in Finder / Show Backup in Finder, Add to Shoot for the selection (`AppModel.addFiles` → `addFootage(onlyFiles:)` → `copy`; refuses when a plan is already pending). Groups are memoized; thumbnails keyed by file identity with a negative cache
-- [ ] Card browser: a file verified in two shoots shows only under the copy the verifier picked (`Card.backups` holds one copy per file); keep all copies if this matters
-- [ ] Card browser: grid has no keyboard navigation (arrows, ⌘A, shift-range); Quick Look panel has no responder-chain controller (works, but QL logs a warning)
-- [ ] Card browser: verify on screen (Quick Look, context menus, Add to Shoot, CardRow buttons still working with the row tap)
+- [x] Card browser: a file with a verified copy in several shoots appears under each of them (`ShootMembership` checks every online shoot, excluding nested shoots; "Not Backed Up" stays exclusive; `browserMembership` is separate from Add Footage coverage)
+- [x] Card browser: Finder-style grid selection and keyboard navigation (`GridSelection`: click, ⌘/⇧, ⌘A, arrows, Home/End, section-aware); Quick Look takes panel control through the responder chain (`AppDelegate`)
+- [ ] Card browser: verify on screen, needs a running app: Quick Look open/switch/Space toggle with no "no controller" log; arrows working right after opening or switching to icons; column count with always-visible scrollbars; scroll-to under pinned headers; ⌘-click on duplicated rows in list mode; sidebar spinner/warning rows; Add to Shoot, context menus and CardRow buttons still working with the row tap
 - [ ] Shoot flows are untested on the card-lifecycle paths: card removal clearing coverage, `addFootage` before coverage finishes, copy completion re-running coverage, recompute with a card inside a shoot, `mkdir` EEXIST race. Needs a card-source injection seam instead of `#if DEBUG _testInsert`
 - [ ] Verify the Shoots grid and New Shoot / Add Footage sheets visually (launch the app, check the window); not yet done
 - [ ] Per-root `DriveIndex` caching across recomputes
@@ -123,6 +123,8 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - Investigate one-off Media Library (Apple Music) TCC prompt seen on a fresh build; likely stale TCC grant after re-signing
 - Show in Finder for shoots (cards already have it)
 - Edit a shoot's name or date (v1: fixed at creation)
+- Card browser: reuse `AppModel.index` for shoots on the work volume instead of re-walking them in membership checks
+- Card browser: test that card removal clears browser membership (needs a `VolumeWatcher` seam)
 
 ## Key Decisions
 
@@ -148,3 +150,4 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 | 2026-11-03 | Existing plain folders are used only through an explicit "Use this folder" | Auto must not take over a user's folder silently |
 | 2026-11-03 | Shoot identity lives in `.auto-shoot.json` in the folder; the registry in Application Support is a list of known shoots. A corrupt registry is kept as `shoots.json.corrupt-<ts>`, never overwritten. Forget removes the registry entry only | The shoot survives relocation and rescans; no silent loss of the list or any file |
 | 2026-11-03 | Shoot name and date are not editable in v1 | Keeps v1 small; editing is in the Backlog |
+| 2026-11-04 | Card browser membership is per shoot, read-only, and runs only while the browsed card is shown and the main window is visible; a partial or cancelled shoot check is never reported | A failed or interrupted check must not hide a copy or shrink "Not Backed Up"; Add Footage keeps its own coverage so the two cannot interfere |
