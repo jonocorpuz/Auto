@@ -38,17 +38,30 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         lock.lock(); _cancelled = true; lock.unlock()
     }
 
+    /// Test hooks, called synchronously on the copy thread. Set before `run`.
+    var onChunkWritten: (@Sendable (Int64) -> Void)?
+    var onVerifyChunk: (@Sendable (Int64) -> Void)?
+
     private static let chunk = 8 << 20
 
     func run(_ jobs: [CopyJob], onProgress: @escaping @MainActor @Sendable (CopyProgress) -> Void) async -> CopyOutcome {
-        await withCheckedContinuation { continuation in
+        // Progress flows through a stream consumed on the main actor; `run` awaits the
+        // consumer after finishing it, so no callback is delivered after `run` returns.
+        let (stream, yield) = AsyncStream<CopyProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let consumer = Task { @MainActor in
+            for await p in stream { onProgress(p) }
+        }
+        let outcome: CopyOutcome = await withCheckedContinuation { continuation in
             Thread.detachNewThread {
-                continuation.resume(returning: self.runSync(jobs, onProgress: onProgress))
+                continuation.resume(returning: self.runSync(jobs) { _ = yield.yield($0) })
             }
         }
+        yield.finish()
+        await consumer.value
+        return outcome
     }
 
-    private func runSync(_ jobs: [CopyJob], onProgress: @escaping @MainActor @Sendable (CopyProgress) -> Void) -> CopyOutcome {
+    private func runSync(_ jobs: [CopyJob], onProgress: @escaping @Sendable (CopyProgress) -> Void) -> CopyOutcome {
         var progress = CopyProgress(filesTotal: jobs.count, bytesTotal: jobs.reduce(0) { $0 + $1.file.size })
         var outcome = CopyOutcome()
         var lastReport = Date.distantPast
@@ -57,8 +70,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             let now = Date()
             if force || now.timeIntervalSince(lastReport) > 0.1 {
                 lastReport = now
-                let snapshot = progress
-                Task { @MainActor in onProgress(snapshot) }
+                onProgress(progress)
             }
         }
 
@@ -113,20 +125,21 @@ nonisolated final class CopyEngine: @unchecked Sendable {
                 onBytes(job.file.size)
                 return
             }
-            dest = uniqueURL(for: dest)
+            dest = Self.uniqueURL(for: dest)
         }
 
-        let partial = job.destDir.appendingPathComponent(".\(dest.lastPathComponent).auto-partial")
-        try? fm.removeItem(at: partial)
-        guard fm.createFile(atPath: partial.path, contents: nil) else {
+        // Unique, exclusively-created partial: never touches anyone else's file.
+        let partial = job.destDir.appendingPathComponent(".\(dest.lastPathComponent).\(UUID().uuidString).auto-partial")
+        let fd = open(partial.path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        guard fd >= 0 else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: partial.path])
         }
 
-        var sourceHash = Insecure.MD5()
-        var written: Int64 = 0
         do {
+            var sourceHash = Insecure.MD5()
+            var written: Int64 = 0
+            let writer = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
             let reader = try FileHandle(forReadingFrom: source)
-            let writer = try FileHandle(forWritingTo: partial)
             defer { try? reader.close(); try? writer.close() }
             while true {
                 if isCancelled { throw CopyError.cancelled }
@@ -136,44 +149,61 @@ nonisolated final class CopyEngine: @unchecked Sendable {
                 try writer.write(contentsOf: data)
                 written += Int64(data.count)
                 onBytes(written)
+                onChunkWritten?(written)
             }
-            try writer.synchronize()
+            // Force data to the platter, not just the cache; fall back if unsupported.
+            if fcntl(fd, F_FULLFSYNC) == -1 { try writer.synchronize() }
+
+            guard written == job.file.size else { throw CopyError.sizeMismatch }
+            guard try hash(partial, bypassCache: true) == Data(sourceHash.finalize()) else { throw CopyError.mismatch }
+
+            let attrs = try? fm.attributesOfItem(atPath: source.path)
+            var keep: [FileAttributeKey: Any] = [:]
+            if let created = attrs?[.creationDate] { keep[.creationDate] = created }
+            if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
+            try? fm.setAttributes(keep, ofItemAtPath: partial.path)
+            _ = try Self.moveWithoutOverwriting(partial, to: dest)
         } catch {
+            // Any failure after the partial exists (I/O, cancel, verify, rename) removes it.
             try? fm.removeItem(at: partial)
             throw error
         }
-
-        guard written == job.file.size else {
-            try? fm.removeItem(at: partial)
-            throw CopyError.sizeMismatch
-        }
-        guard try hash(partial) == Data(sourceHash.finalize()) else {
-            try? fm.removeItem(at: partial)
-            throw CopyError.mismatch
-        }
-
-        let attrs = try? fm.attributesOfItem(atPath: source.path)
-        var keep: [FileAttributeKey: Any] = [:]
-        if let created = attrs?[.creationDate] { keep[.creationDate] = created }
-        if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
-        try? fm.setAttributes(keep, ofItemAtPath: partial.path)
-        try fm.moveItem(at: partial, to: dest)
     }
 
-    private func hash(_ url: URL) throws -> Data {
+    /// `bypassCache` reads with F_NOCACHE so verification checks what is on disk.
+    private func hash(_ url: URL, bypassCache: Bool = false) throws -> Data {
         var md5 = Insecure.MD5()
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
+        if bypassCache { _ = fcntl(handle.fileDescriptor, F_NOCACHE, 1) }
+        var read: Int64 = 0
         while true {
             if isCancelled { throw CopyError.cancelled }
             let data: Data? = try autoreleasepool { try handle.read(upToCount: Self.chunk) }
             guard let data, !data.isEmpty else { break }
             md5.update(data: data)
+            read += Int64(data.count)
+            if bypassCache { onVerifyChunk?(read) }
         }
         return Data(md5.finalize())
     }
 
-    private func uniqueURL(for url: URL) -> URL {
+    /// Atomically renames `src` to `dest` only if `dest` doesn't exist (RENAME_EXCL).
+    /// On collision picks the next free name and retries (bounded). Returns the final URL.
+    static func moveWithoutOverwriting(_ src: URL, to dest: URL, maxAttempts: Int = 100) throws -> URL {
+        var target = dest
+        for _ in 0..<maxAttempts {
+            if renamex_np(src.path, target.path, UInt32(RENAME_EXCL)) == 0 { return target }
+            let err = errno
+            guard err == EEXIST else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(err), userInfo: [NSFilePathErrorKey: target.path])
+            }
+            target = uniqueURL(for: target)
+        }
+        throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: dest.path])
+    }
+
+    static func uniqueURL(for url: URL) -> URL {
         let base = url.deletingPathExtension().lastPathComponent
         let ext = url.pathExtension
         let dir = url.deletingLastPathComponent()

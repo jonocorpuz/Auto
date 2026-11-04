@@ -76,6 +76,23 @@ struct CopyEngineTests {
         #expect(names == ["A.MP4"])
     }
 
+    @Test func renameNeverOverwritesRacedDestination() throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let partial = f.dst.appendingPathComponent(".A.MP4.\(UUID().uuidString).auto-partial")
+        try Data(repeating: 0x01, count: 100).write(to: partial)
+        // Destination appears after name selection but before the rename.
+        let dest = f.dst.appendingPathComponent("A.MP4")
+        try Data(repeating: 0x99, count: 100).write(to: dest)
+        try Data(repeating: 0x98, count: 100).write(to: f.dst.appendingPathComponent("A 2.MP4"))
+
+        let final = try CopyEngine.moveWithoutOverwriting(partial, to: dest)
+        #expect(final.lastPathComponent == "A 3.MP4")
+        #expect(try Data(contentsOf: dest) == Data(repeating: 0x99, count: 100))
+        #expect(try Data(contentsOf: f.dst.appendingPathComponent("A 2.MP4")) == Data(repeating: 0x98, count: 100))
+        #expect(try Data(contentsOf: final) == Data(repeating: 0x01, count: 100))
+        #expect(!FileManager.default.fileExists(atPath: partial.path))
+    }
+
     @Test func sourceIsUnchangedAfterCopy() async throws {
         let f = try fixture(); defer { f.cleanup() }
         let file = try makeFile(in: f.src, "A.MP4", bytes: 50_000)
@@ -101,14 +118,35 @@ struct CopyEngineTests {
     @Test func cancelMidCopyRemovesPartialFile() async throws {
         let f = try fixture(); defer { f.cleanup() }
         // Several chunks (8 MB each) so cancellation lands mid-file.
-        let file = try makeFile(in: f.src, "Big.MP4", bytes: 64 << 20)
+        let file = try makeFile(in: f.src, "Big.MP4", bytes: 24 << 20)
         let engine = CopyEngine()
-        let outcome = await engine.run([CopyJob(file: file, destDir: f.dst)]) { progress in
-            if progress.bytesDone > 0 { engine.cancel() }
-        }
+        engine.onChunkWritten = { [unowned engine] _ in engine.cancel() } // after the first chunk
+        let outcome = await engine.run([CopyJob(file: file, destDir: f.dst)]) { _ in }
         #expect(outcome.cancelled)
         #expect(outcome.copiedKeys.isEmpty)
         #expect(try FileManager.default.contentsOfDirectory(atPath: f.dst.path).isEmpty)
+    }
+
+    @Test func cancelDuringVerificationLeavesNothing() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "Big.MP4", bytes: 24 << 20)
+        let engine = CopyEngine()
+        engine.onVerifyChunk = { [unowned engine] _ in engine.cancel() }
+        let outcome = await engine.run([CopyJob(file: file, destDir: f.dst)]) { _ in }
+        #expect(outcome.cancelled)
+        #expect(outcome.copiedKeys.isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: f.dst.path).isEmpty)
+    }
+
+    @Test func noProgressDeliveredAfterRunReturns() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let files = try (0..<5).map { try makeFile(in: f.src, "F\($0).MP4", bytes: 20_000) }
+        let box = ProgressBox()
+        _ = await CopyEngine().run(files.map { CopyJob(file: $0, destDir: f.dst) }) { _ in box.count += 1 }
+        let atReturn = box.count
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(atReturn > 0)
+        #expect(box.count == atReturn)
     }
 
     @Test func reportsFinalProgress() async throws {
@@ -122,4 +160,4 @@ struct CopyEngineTests {
     }
 }
 
-@MainActor final class ProgressBox { var last: CopyProgress? }
+@MainActor final class ProgressBox { var last: CopyProgress?; var count = 0 }

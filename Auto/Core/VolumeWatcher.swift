@@ -13,7 +13,10 @@ final class VolumeWatcher {
     /// Supplies the volume holding the work folder (for working-first drive sorting).
     var workingVolume: () -> URL?
     private let fixtureCard: URL?
-    private let readVolumes: () -> [VolumeDescriptor]
+    private let readVolumes: @Sendable () -> [VolumeDescriptor]
+    private var generation = 0
+    private var pendingMountedNew = false
+    private var inFlight: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
 
     private(set) var cards: [URL] = []
@@ -21,7 +24,7 @@ final class VolumeWatcher {
 
     init(workingVolume: @escaping () -> URL? = { nil },
          defaults: UserDefaults = .standard,
-         readVolumes: (() -> [VolumeDescriptor])? = nil) {
+         readVolumes: (@Sendable () -> [VolumeDescriptor])? = nil) {
         self.workingVolume = workingVolume
         self.fixtureCard = Self.fixtureCard(from: defaults)
         self.readVolumes = readVolumes ?? { VolumeWatcher.systemVolumes() }
@@ -60,11 +63,37 @@ final class VolumeWatcher {
         observers = []
     }
 
+    /// Reads and classifies volumes off the main actor, then publishes on main.
+    /// Results from superseded refreshes are dropped (generation counter).
     func refresh(mountedNew: Bool = false) {
-        let result = Self.classify(readVolumes(), workingVolume: workingVolume(), fixtureCard: fixtureCard)
-        cards = result.cards
-        drives = result.drives
-        onChange?(cards, drives, mountedNew)
+        inFlight = startRefresh(mountedNew: mountedNew)
+    }
+
+    /// Like `refresh`, but returns once the result has been published (or superseded).
+    func refreshAndWait(mountedNew: Bool = false) async {
+        let task = startRefresh(mountedNew: mountedNew)
+        inFlight = task
+        await task.value
+    }
+
+    private func startRefresh(mountedNew: Bool) -> Task<Void, Never> {
+        generation += 1
+        let mine = generation
+        pendingMountedNew = pendingMountedNew || mountedNew
+        let read = readVolumes
+        let working = workingVolume()
+        let fixture = fixtureCard
+        return Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.classify(read(), workingVolume: working, fixtureCard: fixture)
+            }.value
+            guard let self, self.generation == mine else { return }
+            let announce = self.pendingMountedNew
+            self.pendingMountedNew = false
+            self.cards = result.cards
+            self.drives = result.drives
+            self.onChange?(self.cards, self.drives, announce)
+        }
     }
 
     // MARK: System access
