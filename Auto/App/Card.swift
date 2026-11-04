@@ -8,7 +8,10 @@ final class Card: Identifiable {
 
     let volume: URL
     let name: String
-    var id: URL { volume }
+    /// Volume UUID + path (path alone for fixture folders). A different card mounted at the
+    /// same path gets a different identity, so it never inherits this card's state.
+    let identity: String
+    var id: String { identity }
 
     var phase: Phase = .scanning
     var files: [MediaFile] = []
@@ -26,9 +29,10 @@ final class Card: Identifiable {
     @ObservationIgnored var engine: CopyEngine?
     @ObservationIgnored var verifier: BackupVerifier?
 
-    init(volume: URL, name: String) {
+    init(volume: URL, name: String, identity: String? = nil) {
         self.volume = volume
         self.name = name
+        self.identity = identity ?? VolumeIdentity.of(volume)
     }
 
     var totalBytes: Int64 { files.reduce(0) { $0 + $1.size } }

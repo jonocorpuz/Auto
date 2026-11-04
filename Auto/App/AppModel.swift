@@ -139,14 +139,17 @@ final class AppModel {
     private func volumesChanged(cards found: [URL], drives found2: [DriveVolume], mountedNew: Bool) {
         drives = found2
 
-        let gone = cards.filter { card in !found.contains(card.volume) }
+        // Match by identity, not URL: a fast swap to another card with the same volume name
+        // drops the old Card (and its backed state) and scans the new one from scratch.
+        let identified = found.map { (url: $0, identity: VolumeIdentity.of($0)) }
+        let gone = cards.filter { card in !identified.contains { $0.identity == card.identity } }
         for card in gone { card.engine?.cancel(); card.verifier?.cancel() }
         if let editing = editingShoot, gone.contains(where: { $0 === editing }) { editingShoot = nil }
         cards.removeAll { card in gone.contains { $0 === card } }
 
         var added = false
-        for url in found where !cards.contains(where: { $0.volume == url }) {
-            let card = Card(volume: url, name: Self.volumeName(url))
+        for (url, identity) in identified where !cards.contains(where: { $0.identity == identity }) {
+            let card = Card(volume: url, name: Self.volumeName(url), identity: identity)
             cards.append(card)
             scan(card)
             added = true
