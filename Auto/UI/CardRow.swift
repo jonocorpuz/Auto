@@ -137,7 +137,7 @@ struct CardRow: View {
                 Button("Show in Finder") { model.openInFinder(card) }
                 Spacer()
                 Button("Choose folder…") { model.chooseFolder(for: card) }
-                Button("New Shoot…") { model.editingShoot = card }
+                Button("New Shoot…") { model.newShoot(card: card) }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.workRoot == nil || model.workingVolume == nil)
             }

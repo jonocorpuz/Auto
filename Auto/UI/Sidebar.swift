@@ -18,12 +18,12 @@ struct Sidebar: View {
             }
 
             Button {
-                model.ingest()
+                model.newShoot()
             } label: {
-                Label("Ingest", systemImage: "square.and.arrow.down")
+                Label("New Shoot", systemImage: "plus.rectangle.on.folder")
             }
             .buttonStyle(PrimaryPillButtonStyle())
-            .help(ingestHelp)
+            .help("Create a shoot folder and add footage to it")
             .padding(.top, 20)
 
             Spacer(minLength: 20)
@@ -49,11 +49,6 @@ struct Sidebar: View {
             Text("Auto").font(.system(size: 17, weight: .semibold))
         }
         .padding(.horizontal, 6)
-    }
-
-    private var ingestHelp: String {
-        guard let card = model.ingestCandidate else { return "Connect a camera card to ingest it." }
-        return card.phase == .ready ? "Copy \(card.name) to its shoot folder" : "Set up a shoot for \(card.name)"
     }
 }
 

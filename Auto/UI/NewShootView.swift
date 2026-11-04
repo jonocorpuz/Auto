@@ -56,7 +56,7 @@ struct NewShootView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { model.editingShoot = nil }
+                Button("Cancel") { model.shootSheet = nil }
                     .buttonStyle(.bordered)
                     .keyboardShortcut(.cancelAction)
                 Button("Create Shoot") { create() }

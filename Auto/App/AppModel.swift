@@ -34,8 +34,13 @@ final class AppModel {
 
     private(set) var cards: [Card] = []
     private(set) var drives: [DriveVolume] = []
-    /// The card whose New Shoot sheet is showing.
-    var editingShoot: Card?
+    /// The New Shoot sheet request currently showing, if any.
+    var shootSheet: ShootSheetRequest?
+    /// Card the legacy copy-flow sheet (`.create`) should use; nil picks the first card with work to do.
+    private(set) var shootSheetCard: Card?
+    /// Known shoots for the Shoots grid, newest first.
+    private(set) var shoots: [ShootItem] = []
+    private(set) var registry = ShootRegistry()
     private(set) var indexing = false
     /// Calendar used to split recordings into days (scan and New Shoot selection).
     let calendar = Calendar.current
@@ -54,15 +59,16 @@ final class AppModel {
     /// Root folder Auto works in. Persisted in UserDefaults.
     var workRoot: URL? {
         didSet {
-            UserDefaults.standard.set(workRoot?.path, forKey: Keys.workRoot)
+            defaults.set(workRoot?.path, forKey: Keys.workRoot)
             watcher.refresh()
             rebuildIndex()
+            Task { await loadShoots() }
         }
     }
 
     /// Open or raise the main window when a new card mounts.
     var autoOpen: Bool {
-        didSet { UserDefaults.standard.set(autoOpen, forKey: Keys.autoOpen) }
+        didSet { defaults.set(autoOpen, forKey: Keys.autoOpen) }
     }
 
     /// Sidebar selection in the main window.
@@ -71,7 +77,7 @@ final class AppModel {
     /// Light/dark preference, applied app-wide.
     var appearance: AppearanceMode {
         didSet {
-            UserDefaults.standard.set(appearance.rawValue, forKey: Keys.appearance)
+            defaults.set(appearance.rawValue, forKey: Keys.appearance)
             applyAppearance()
         }
     }
@@ -100,8 +106,18 @@ final class AppModel {
     @ObservationIgnored private var indexedVolumeID: String?
     @ObservationIgnored private lazy var watcher = VolumeWatcher(workingVolume: { [weak self] in self?.workingVolume })
 
-    init() {
-        let defaults = UserDefaults.standard
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored let registryURL: URL
+    @ObservationIgnored let thumbnails: any ThumbnailProvider
+    @ObservationIgnored private var thumbnailCache: [String: CGImage] = [:]
+    @ObservationIgnored private var shootsGeneration = 0
+
+    init(registryURL: URL = ShootStore.defaultURL(),
+         thumbnails: any ThumbnailProvider = QLThumbnailProvider(),
+         defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        self.registryURL = registryURL
+        self.thumbnails = thumbnails
         autoOpen = defaults.object(forKey: Keys.autoOpen) as? Bool ?? true
         appearance = defaults.string(forKey: Keys.appearance).flatMap(AppearanceMode.init) ?? .system
         if let path = defaults.string(forKey: Keys.workRoot) {
@@ -113,28 +129,41 @@ final class AppModel {
         static let workRoot = "workRoot"
         static let autoOpen = "autoOpen"
         static let appearance = "appearance"
+        static let lastParent = "shoots.lastParent"
     }
 
     func applyAppearance() {
         NSApp.appearance = appearance.nsAppearance
     }
 
-    // MARK: Ingest
+    // MARK: New Shoot sheet
 
-    /// The card the sidebar's Ingest button acts on: the first one with work to do.
+    /// The card the legacy copy-flow sheet acts on: the first one with work to do.
     var ingestCandidate: Card? {
         cards.first { $0.phase == .ready } ?? cards.first { $0.phase == .needsBackup }
     }
 
-    /// Sidebar Ingest: copy a card that already has a plan, or start a New Shoot for one that needs backup.
-    func ingest() {
+    /// Sidebar New Shoot: opens the create sheet.
+    func newShoot(card: Card? = nil) {
         selectedTab = .media
-        guard let card = ingestCandidate else { return }
-        if card.phase == .ready, card.plan != nil {
-            copy(card)
-        } else {
-            editingShoot = card
+        shootSheetCard = card
+        shootSheet = .create
+    }
+
+    /// Opens the sheet in add mode with the first card that has files on the shoot's day
+    /// (else the first card, else none).
+    func addFootage(to shootID: UUID) {
+        guard let item = shoots.first(where: { $0.id == shootID }) else { return }
+        shootSheetCard = nil
+        shootSheet = .add(shootID: shootID, cardID: cardForAdding(day: item.date)?.id)
+    }
+
+    func cardForAdding(day: Date) -> Card? {
+        let start = calendar.startOfDay(for: day)
+        let match = cards.first { card in
+            card.shootDays.values.contains { $0.contains { calendar.startOfDay(for: $0.start) == start } }
         }
+        return match ?? cards.first
     }
 
     // MARK: Working drive
@@ -176,6 +205,7 @@ final class AppModel {
         }
         watcher.start()
         rebuildIndex()
+        Task { await loadShoots() }
     }
 
     private func volumesChanged(cards found: [URL], drives found2: [DriveVolume], mountedNew: Bool) {
@@ -186,7 +216,11 @@ final class AppModel {
         let identified = found.map { (url: $0, identity: VolumeIdentity.of($0)) }
         let gone = cards.filter { card in !identified.contains { $0.identity == card.identity } }
         for card in gone { card.engine?.cancel(); card.verifier?.cancel() }
-        if let editing = editingShoot, gone.contains(where: { $0 === editing }) { editingShoot = nil }
+        if let shown = shootSheetCard, gone.contains(where: { $0 === shown }) {
+            shootSheetCard = nil
+            if shootSheet == .create { shootSheet = nil }
+        }
+        if case .add(_, let cardID?) = shootSheet, gone.contains(where: { $0.id == cardID }) { shootSheet = nil }
         cards.removeAll { card in gone.contains { $0 === card } }
 
         var added = false
@@ -200,6 +234,7 @@ final class AppModel {
 
         // The work drive was plugged in, unplugged or swapped: the index is stale.
         if workingVolume.map(VolumeIdentity.of) != indexedVolumeID { rebuildIndex() }
+        Task { await refreshShoots() }
     }
 
     // MARK: Scanning
@@ -385,7 +420,8 @@ final class AppModel {
         stopVerifier(card)
         card.plan = ShootPlanner.plan(jobs: jobs, shoot: shoot, workRoot: root)
         card.phase = .ready
-        editingShoot = nil
+        shootSheet = nil
+        shootSheetCard = nil
     }
 
     private struct EmptySelectionError: LocalizedError {
@@ -539,6 +575,188 @@ final class AppModel {
             // Shown beside the card; never replaces whatever phase the card is in now.
             if let error { card.ejectError = "Couldn't eject: \(error.localizedDescription)" }
         }
+    }
+}
+
+extension AppModel {
+    // MARK: Shoot registry
+
+    private func cardVolumes() -> [URL] { cards.map(\.volume) }
+
+    /// Loads the registry, merges shoots found under the work folder, saves if changed, then refreshes.
+    func loadShoots() async {
+        var loaded = await ShootStore.load(from: registryURL)
+        let before = loaded
+        if let root = workRoot {
+            let found = await ShootStore.discover(under: root, calendar: calendar)
+            // discover stamps lastSeen = now on every scan; only persist real additions or path-less changes.
+            let known = Set(loaded.records.map(\.id))
+            if found.contains(where: { !known.contains($0.id) }) { loaded.merge(discovered: found) }
+        }
+        registry = loaded
+        if loaded != before { await saveRegistry() }
+        await refreshShoots()
+    }
+
+    private func saveRegistry() async {
+        do { try await ShootStore.save(registry, to: registryURL) } catch {
+            NSLog("Auto: couldn't save shoots.json: \(error)")
+        }
+    }
+
+    private func day(of record: ShootRecord) -> Date {
+        let parts = record.day.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3,
+              let date = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])) else { return .distantPast }
+        return calendar.startOfDay(for: date)
+    }
+
+    private func publishShoots(previous: [UUID: ShootItem]) {
+        shoots = registry.records.map { record in
+            var item = previous[record.id] ?? ShootItem(record: record, date: .distantPast)
+            item.record = record
+            item.date = day(of: record)
+            return item
+        }.sorted { a, b in
+            a.date != b.date ? a.date > b.date : a.record.name.localizedStandardCompare(b.record.name) == .orderedAscending
+        }
+    }
+
+    /// Re-resolves availability, summaries and thumbnails for every known shoot.
+    func refreshShoots() async {
+        shootsGeneration += 1
+        let generation = shootsGeneration
+        publishShoots(previous: Dictionary(uniqueKeysWithValues: shoots.map { ($0.id, $0) }))
+
+        let availability = await ShootStore.resolve(registry.records, calendar: calendar, cardVolumes: cardVolumes())
+        guard generation == shootsGeneration else { return }
+        for i in shoots.indices {
+            let id = shoots[i].id
+            shoots[i].availability = availability[id]
+            if case .online? = availability[id] {} else { shoots[i].summary = nil; shoots[i].thumbnail = nil }
+        }
+
+        let online: [(UUID, URL)] = shoots.compactMap { item in
+            if case .online(let shoot)? = item.availability { return (item.id, shoot.folder) }
+            return nil
+        }
+        for (id, folder) in online {
+            let summary = await ShootSummary.scan(folder)
+            guard generation == shootsGeneration, let i = shoots.firstIndex(where: { $0.id == id }) else { return }
+            shoots[i].summary = summary
+        }
+
+        for (id, _) in online {
+            guard let i = shoots.firstIndex(where: { $0.id == id }), let rep = shoots[i].summary?.representative else { continue }
+            let key = "\(id.uuidString)|\(rep.path)"
+            let image: CGImage?
+            if let cached = thumbnailCache[key] {
+                image = cached
+            } else {
+                image = try? await thumbnails.thumbnail(for: rep, maxPixels: 480)
+                if let image { thumbnailCache[key] = image }
+            }
+            guard generation == shootsGeneration, let j = shoots.firstIndex(where: { $0.id == id }) else { return }
+            shoots[j].thumbnail = image
+        }
+    }
+
+    private func record(for shoot: Shoot) -> ShootRecord {
+        ShootRecord(id: shoot.id, name: shoot.name, day: ShootSidecar.dayString(shoot.date, calendar: calendar),
+                    path: shoot.folder.standardizedFileURL.path, lastSeen: Date())
+    }
+
+    private func register(_ shoot: Shoot) async {
+        registry.add(record(for: shoot))
+        await saveRegistry()
+        await refreshShoots()
+    }
+
+    /// Creates `<parent>/<name>` with its sidecar and registers it.
+    @discardableResult
+    func createShoot(name: String, date: Date, parent: URL) async throws -> Shoot {
+        let volumes = cardVolumes()
+        let calendar = calendar
+        let shoot = try await Task.detached {
+            try ShootFolders.create(name: name, date: date, parent: parent, cardVolumes: volumes, calendar: calendar)
+        }.value
+        await register(shoot)
+        return shoot
+    }
+
+    /// "Use this folder": turns an existing plain folder into a shoot.
+    @discardableResult
+    func adoptFolder(_ url: URL, name: String, date: Date) async throws -> Shoot {
+        let volumes = cardVolumes()
+        let calendar = calendar
+        let shoot = try await Task.detached {
+            try ShootFolders.adopt(folder: url, name: name, date: date, cardVolumes: volumes, calendar: calendar)
+        }.value
+        await register(shoot)
+        return shoot
+    }
+
+    func classifyShootFolder(parent: URL, name: String) -> ShootFolders.FolderCollision {
+        ShootFolders.classify(parent: parent, name: name)
+    }
+
+    /// Where new shoot folders go by default: the last chosen parent, else the work folder.
+    var defaultShootParent: URL? {
+        if let path = defaults.string(forKey: Keys.lastParent), FileManager.default.fileExists(atPath: path) {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return workRoot
+    }
+
+    func chooseShootParent() -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = "Choose where the shoot folder should be created."
+        panel.directoryURL = defaultShootParent
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        defaults.set(url.path, forKey: Keys.lastParent)
+        return url
+    }
+
+    /// Points a shoot at `folder` after checking the folder's sidecar carries the shoot's id.
+    func relocateShoot(id: UUID, to folder: URL) async throws {
+        guard registry.records.contains(where: { $0.id == id }) else { return }
+        let sidecar = try await Task.detached { try ShootFolders.readSidecar(in: folder) }.value
+        guard sidecar?.id == id else { throw ShootError.sidecarMismatch }
+        registry.relocate(id: id, to: folder.standardizedFileURL.path)
+        await saveRegistry()
+        await refreshShoots()
+    }
+
+    /// Asks the user for the shoot's new folder.
+    func locateShoot(id: UUID) {
+        guard let item = shoots.first(where: { $0.id == id }) else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Locate"
+        panel.message = "Choose the folder for \"\(item.record.name)\"."
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do { try await relocateShoot(id: id, to: url) } catch {
+                let alert = NSAlert()
+                alert.messageText = "Can't use that folder"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
+
+    /// Removes the shoot from Auto's list. Files on disk are never touched.
+    func forgetShoot(id: UUID) async {
+        registry.remove(id: id)
+        await saveRegistry()
+        await refreshShoots()
     }
 }
 
