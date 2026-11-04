@@ -4,7 +4,7 @@ The architectural blueprint, module boundaries, data flows and design principles
 
 See also: [CLAUDE.md](CLAUDE.md), [ROADMAP.md](ROADMAP.md).
 
-> **Status:** Boilerplate. Only `App/` and `UI/` exist today. `Core/` and `Integrations/` describe the target design and get built phase by phase (see ROADMAP.md). Keep this file in sync as modules land.
+> **Status:** `App/`, `UI/` and `Core/` exist (Phase 2 ingest parity, in progress). `Integrations/` and the Phase 3 pipeline are still the target design (see ROADMAP.md). Keep this file in sync as modules land.
 
 ---
 
@@ -15,23 +15,30 @@ Auto is a single-process macOS menu bar app (`LSUIElement`, no Dock icon). It cl
 ```mermaid
 flowchart TD
     subgraph UILayer ["UI (Auto/UI)"]
-        Menu["MenuView\nMenuBarExtra popover"]
-        Settings["SettingsView\nSettings scene"]
+        Main["MainView\nmain window"]
+        CardRow["CardRow\nper-card phase + actions"]
+        NewShoot["NewShootView\nshoot sheet"]
+        Settings["SettingsView"]
     end
 
     subgraph AppLayer ["App (Auto/App)"]
-        Entry["AutoApp\n@main, scenes"]
+        Delegate["AppDelegate\nNSStatusItem, main + settings windows"]
+        Entry["AutoApp\n@main, placeholder Settings scene"]
         Model["AppModel\n@Observable state + orchestration"]
+        CardModel["Card\none connected card"]
     end
 
     subgraph CoreLayer ["Core engines (Auto/Core)"]
-        Watcher["VolumeWatcher\ncard mount / unmount"]
+        Watcher["VolumeWatcher\nmount / unmount"]
+        Classifier["VolumeClassifier\ncards vs drives"]
         Scanner["CardScanner\nmedia + camera detection"]
+        Index["DriveIndex\nwork folder, name+size keys"]
+        Verifier["BackupVerifier\nhash-compares card files"]
         Copy["CopyEngine\nverified copy"]
-        Pipeline["Pipeline\nordered PipelineSteps"]
+        Planner["ShootPlanner\nfolder names, copy jobs, status"]
     end
 
-    subgraph Integrations ["Integrations (Auto/Integrations)"]
+    subgraph Integrations ["Integrations (Auto/Integrations), planned"]
         Resolve["ResolveClient\nDaVinci Resolve scripting"]
         Transcode["Transcoder\nAVFoundation / ffmpeg"]
     end
@@ -42,21 +49,38 @@ flowchart TD
         DR["DaVinci Resolve"]
     end
 
-    Menu --> Model
+    Entry --> Delegate
+    Delegate --> Model
+    Delegate --> Main
+    Delegate --> Settings
+    Main --> CardRow
+    CardRow --> NewShoot
+    Main --> Model
+    CardRow --> Model
+    NewShoot --> Model
     Settings --> Model
-    Entry --> Model
+    Model --> CardModel
     Model --> Watcher
+    Watcher --> Classifier
     Model --> Scanner
+    Model --> Index
+    Model --> Verifier
     Model --> Copy
-    Model --> Pipeline
+    Model --> Planner
     Watcher -.-> Cards
     Scanner --> Cards
+    Verifier --> Cards
     Copy --> Cards
+    Index --> Work
+    Verifier --> Work
     Copy --> Work
-    Pipeline --> Transcode
-    Pipeline --> Resolve
-    Transcode --> Work
-    Resolve --> DR
+    Model -.-> Transcode
+    Model -.-> Resolve
+    Transcode -.-> Work
+    Resolve -.-> DR
+
+    classDef planned stroke-dasharray: 5 5
+    class Transcode,Resolve planned
 ```
 
 ---
@@ -69,15 +93,30 @@ Auto/                         # repo root
 │   └── xcshareddata/xcschemes/Auto.xcscheme   # shared scheme: Auto + AutoTests
 ├── Auto/                     # App target sources
 │   ├── App/                  # Entry point + shared state (thin)
-│   │   ├── AutoApp.swift     #   MenuBarExtra + Settings scenes
-│   │   └── AppModel.swift    #   @Observable state; orchestrates Core
+│   │   ├── AutoApp.swift     #   @main; placeholder Settings scene (Cmd-comma goes to AppDelegate)
+│   │   ├── AppDelegate.swift #   NSStatusItem (left click: window, right click: menu); main + settings windows
+│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core
+│   │   └── Card.swift        #   one connected card: volume, files, cameras, phase, copy plan
 │   ├── UI/                   # SwiftUI views only, no I/O
-│   │   ├── MenuView.swift
+│   │   ├── MainView.swift    #   cards, working drive, other drives
+│   │   ├── CardRow.swift     #   per-card header, phase content and actions; static StatusDot
+│   │   ├── NewShootView.swift#   sheet: client, shoot name, date, camera folders, live preview
 │   │   └── SettingsView.swift
-│   ├── Core/                 # (planned) pure, testable engines, no SwiftUI
-│   ├── Integrations/         # (planned) Resolve / transcoder adapters behind protocols
+│   ├── Core/                 # pure, testable engines, no SwiftUI
+│   │   ├── VolumeWatcher.swift     #   NSWorkspace mount notifications, refresh off main
+│   │   ├── VolumeClassifier.swift  #   card vs work/backup drive vs ignored volume
+│   │   ├── MediaTypes.swift        #   extensions → MediaKind, skipped folders
+│   │   ├── MediaFile.swift         #   MediaFile, MediaKind, Camera models
+│   │   ├── CardScanner.swift       #   enumerate media, camera detection, shoot date
+│   │   ├── DriveIndex.swift        #   work-folder media grouped by name+size
+│   │   ├── BackupVerifier.swift    #   checksum-compares card files with drive candidates
+│   │   ├── CopyEngine.swift        #   verified copy with cancel
+│   │   └── ShootPlanner.swift      #   shoot folder naming, copy jobs, CardPhase, StatusAggregator
+│   ├── Integrations/         # (planned, Phase 3) Resolve / transcoder adapters behind protocols
 │   └── Assets.xcassets
 ├── AutoTests/                # Swift Testing target (hosted in Auto.app)
+│   ├── Support/FixtureCard.swift   #   builds a fake card in a temp dir
+│   └── *Tests.swift          #   one file per Core engine, plus AppModelTests
 ├── .claude/agents/           # Routed subagents: scout (haiku), architect (opus),
 │                             #   implementer (sonnet), reviewer (opus), docs-keeper (haiku)
 ├── .claude/skills/           # Claude Code skills
@@ -94,7 +133,7 @@ Auto/                         # repo root
 | :--- | :--- | :--- |
 | `UI` | `App` (via `@Environment(AppModel.self)`) | Touch files, volumes, processes |
 | `App` | `Core`, `Integrations` | Contain copy or pipeline logic itself |
-| `Core` | Foundation, CryptoKit, ImageIO, AVFoundation | Import SwiftUI or reference `AppModel` |
+| `Core` | Foundation, CryptoKit, ImageIO, AVFoundation; AppKit/DiskArbitration in `VolumeWatcher` only | Import SwiftUI or reference `AppModel` |
 | `Integrations` | Foundation, `Process` | Be called directly from views |
 
 ---
@@ -107,32 +146,40 @@ sequenceDiagram
     actor User
     participant Watcher as VolumeWatcher
     participant Model as AppModel
-    participant UI as Menu bar UI
     participant Scanner as CardScanner
+    participant Index as DriveIndex
+    participant Verify as BackupVerifier
+    participant UI as MainView / CardRow
     participant Copy as CopyEngine
-    participant Pipe as Pipeline
-    participant Resolve as ResolveClient
 
     Watcher->>Model: Card mounted (/Volumes/X)
     Model->>Scanner: scan(volume)
     Scanner-->>Model: media files, cameras, shoot date
-    Model->>Model: Diff against work-folder index (what isn't backed up yet)
-    Model->>UI: Status = unbacked, show popover
-    User->>UI: Pick / create Client → Shoot
-    UI->>Model: startIngest(shoot)
-    Model->>Copy: run(jobs)
-    loop each file
-        Copy->>Copy: copy → fsync → size + hash verify
-        Copy-->>Model: progress
+    Model->>Index: build(work folder), when the work drive is ready
+    Index-->>Model: candidates keyed by name+size
+    Model->>Verify: triage files, hash candidates (cached by drive mtime)
+    Verify-->>Model: matched / missing per file
+    alt every file matched by hash
+        Model->>UI: Status = backed (green)
+    else files missing
+        Model->>UI: Status = unbacked, offer New Shoot
+        User->>UI: Pick / create Client → Shoot
+        UI->>Model: createShoot(client, name, date, cameras)
+        Model->>Model: ShootPlanner builds copy jobs
+        Model->>Copy: run(jobs)
+        loop each file
+            Copy->>Copy: stream to unique O_EXCL partial, hash while reading
+            Copy->>Copy: F_FULLFSYNC, re-read uncached, compare hashes
+            Copy->>Copy: renamex_np RENAME_EXCL to final name
+            Copy-->>Model: progress
+        end
+        Copy-->>Model: outcome (copied keys, failures)
+        Model->>Verify: re-verify card files
+        Model->>UI: Status = backed, or error with reason
     end
-    Copy-->>Model: outcome (copied, failures)
-    Model->>Pipe: run(steps, on: shoot)
-    Pipe->>Pipe: organize → proxies → …
-    Pipe->>Resolve: create project, import media, build bins
-    Resolve-->>Pipe: done / unavailable
-    Pipe-->>Model: per-step results
-    Model->>UI: Status = done (or error with reason)
 ```
+
+The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet and is not in these diagrams.
 
 ---
 
@@ -140,29 +187,29 @@ sequenceDiagram
 
 | Concern | Choice | Rationale |
 | :--- | :--- | :--- |
-| UI | SwiftUI `MenuBarExtra` (`.window` style) + `Settings` scene | Native menu bar app with no AppKit status-item boilerplate (Backed used `NSStatusItem` + `NSPopover`). |
+| UI | SwiftUI windows hosted by an AppKit `AppDelegate` with an `NSStatusItem` | The status item opens a real window instead of a dropdown. `MenuBarExtra` was dropped; SwiftUI's `openSettings` is unreliable from an accessory-app menu, so AppDelegate owns the Settings window. |
 | State | `@Observable` `AppModel`, injected with `.environment` | Modern Observation; less boilerplate than Backed's `ObservableObject`/Combine. |
 | Concurrency | Swift concurrency; default `MainActor` isolation, heavy work `nonisolated` | Keeps UI correct by default while copying runs off-main. |
-| Volume detection | `NSWorkspace` mount notifications / DiskArbitration | Auto-detect cards on insert. |
-| Copy verification | Streamed copy + CryptoKit hash (or xxHash later for speed) | Backed's proven approach: verify before marking backed. |
+| Volume detection | `NSWorkspace` mount/unmount notifications; `FileManager.mountedVolumeURLs` on refresh, off the main actor | Auto-detect cards on insert; generation guard drops stale refreshes. |
+| Copy verification | Streamed CryptoKit hash on write, `F_FULLFSYNC`, uncached read-back (`F_NOCACHE`) hash compare (xxHash later for speed) | Backed's proven approach, hardened: verify what is on disk before marking backed. |
 | Metadata | ImageIO (EXIF), AVFoundation (QuickTime), Sony XML sidecars | Camera model / serial detection, carried over from Backed. |
 | Proxies | AVFoundation export (ffmpeg optional) | No bundled dependency for the default path. |
 | Resolve | DaVinci Resolve scripting API via `Process` (Python) | Same API the `davinci-resolve` MCP uses. Studio for external scripting. |
 | Tests | Swift Testing | Parameterized tests, clean `#expect` diagnostics. |
-| Persistence | `UserDefaults` for settings; JSON index file in the work folder | Simple, inspectable, no database. |
+| Persistence | `UserDefaults` for settings (work folder, date format, auto-open); the drive index is rebuilt by scanning the work folder | Simple, no database. A persisted, resumable index is Phase 4. |
 
 ---
 
 ## 5. Resiliency & Failure Defense
 
 1. **Read-only sources:** Auto never writes to, renames or deletes anything on a card.
-2. **Verify before trust:** A file counts as backed up only after size and checksum match. Partial copies go to a temp name and are renamed atomically on success.
-3. **Never overwrite:** Name collisions at the destination get a unique suffix.
+2. **Verify before trust:** A card is backed up only when every file has a checksum-identical copy on the work drive (`BackupVerifier`). Name and size only pick candidates. Copies stream into a unique `O_EXCL` partial, are flushed with `F_FULLFSYNC`, re-read uncached, and are hashed again before they count.
+3. **Never overwrite:** The final name is claimed with `renamex_np(RENAME_EXCL)`, so an existing file is never replaced. A name collision gets a unique suffix instead. An identical file from an earlier run is kept.
 4. **Fixture cards (the "mock mode"):**
-   - Tests build a fake card in a temp directory (DCIM / PRIVATE/M4ROOT layouts, tiny media files and sidecars).
-   - For manual runs, launch with `-AutoFixtureCard <path>` (UserDefaults launch argument) to treat a folder as a mounted card. *(planned)*
-5. **Integration fallbacks:** If Resolve isn't running or scripting is unavailable, the Resolve step reports "skipped: Resolve unavailable" and the ingest still counts as a success. Pipeline steps are independent and re-runnable.
-6. **Cancellation:** Copy and pipeline runs are cancellable. Cancelling leaves no half-written files under their final names.
+   - Tests build a fake card in a temp directory (DCIM / PRIVATE/M4ROOT layouts, tiny media files and sidecars) via `AutoTests/Support/FixtureCard.swift`.
+   - For manual runs, launch with `-AutoFixtureCard <path>` (UserDefaults launch argument) to treat a folder as a mounted card. The window also opens at launch, since no mount event fires for it.
+5. **Integration fallbacks:** *(Phase 3, planned)* If Resolve isn't running or scripting is unavailable, the Resolve step reports "skipped: Resolve unavailable" and the ingest still counts as a success. Pipeline steps are independent and re-runnable.
+6. **Cancellation:** Copy and verification runs are cancellable. A failed or cancelled copy removes its partial file, so nothing half-written is left under a final name.
 
 ---
 
@@ -171,6 +218,6 @@ sequenceDiagram
 Phases and their checklists live in [ROADMAP.md](ROADMAP.md). In summary:
 
 - **Phase 1: Foundation.** Menu bar shell, settings, work folder, test target. *(done)*
-- **Phase 2: Ingest parity with Backed.** Card detection, scanning, verified copy, client/shoot folders.
+- **Phase 2: Ingest parity with Backed.** Card detection, scanning, verified copy, client/shoot folders. *(engines and app wiring landed; manual end-to-end test pending)*
 - **Phase 3: Editing pipeline.** Organize, proxies, Resolve project setup.
 - **Phase 4: Polish & release.** Notifications, history, signing/notarization.
