@@ -14,8 +14,17 @@ struct CardRow: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
-        .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.border))
+        .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius)
+            .strokeBorder(hovering && canBrowse ? Theme.accent.opacity(0.6) : Theme.border))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        .onTapGesture { if canBrowse { model.browsingCardID = card.id } }
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
+
+    @State private var hovering = false
+
+    private var canBrowse: Bool { !card.files.isEmpty }
 
     // MARK: Header
 
@@ -28,6 +37,16 @@ struct CardRow: View {
             }
             Spacer()
             Text(phaseLabel).font(.callout).foregroundStyle(.secondary)
+            if canBrowse {
+                Button { model.browsingCardID = card.id } label: {
+                    Label("Browse", systemImage: "chevron.right")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Browse the files on this card")
+            }
         }
     }
 

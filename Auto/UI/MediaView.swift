@@ -16,6 +16,9 @@ struct MediaView: View {
                     .tint(Theme.accent)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let card = model.browsingCard {
+            CardBrowserView(card: card)
+                .id(card.id)
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
