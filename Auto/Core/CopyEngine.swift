@@ -122,9 +122,9 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: partial.path])
         }
 
-        var sourceHash = Insecure.MD5()
-        var written: Int64 = 0
         do {
+            var sourceHash = Insecure.MD5()
+            var written: Int64 = 0
             let reader = try FileHandle(forReadingFrom: source)
             let writer = try FileHandle(forWritingTo: partial)
             defer { try? reader.close(); try? writer.close() }
@@ -138,26 +138,21 @@ nonisolated final class CopyEngine: @unchecked Sendable {
                 onBytes(written)
             }
             try writer.synchronize()
+
+            guard written == job.file.size else { throw CopyError.sizeMismatch }
+            guard try hash(partial) == Data(sourceHash.finalize()) else { throw CopyError.mismatch }
+
+            let attrs = try? fm.attributesOfItem(atPath: source.path)
+            var keep: [FileAttributeKey: Any] = [:]
+            if let created = attrs?[.creationDate] { keep[.creationDate] = created }
+            if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
+            try? fm.setAttributes(keep, ofItemAtPath: partial.path)
+            try fm.moveItem(at: partial, to: dest)
         } catch {
+            // Any failure after the partial exists (I/O, cancel, verify, rename) removes it.
             try? fm.removeItem(at: partial)
             throw error
         }
-
-        guard written == job.file.size else {
-            try? fm.removeItem(at: partial)
-            throw CopyError.sizeMismatch
-        }
-        guard try hash(partial) == Data(sourceHash.finalize()) else {
-            try? fm.removeItem(at: partial)
-            throw CopyError.mismatch
-        }
-
-        let attrs = try? fm.attributesOfItem(atPath: source.path)
-        var keep: [FileAttributeKey: Any] = [:]
-        if let created = attrs?[.creationDate] { keep[.creationDate] = created }
-        if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
-        try? fm.setAttributes(keep, ofItemAtPath: partial.path)
-        try fm.moveItem(at: partial, to: dest)
     }
 
     private func hash(_ url: URL) throws -> Data {
