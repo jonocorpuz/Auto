@@ -6,7 +6,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = AppModel()
     private var statusItem: NSStatusItem!
     private var mainWindow: NSWindow?
-    private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -15,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.action = #selector(statusItemClicked)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        model.applyAppearance()
         updateIcon()
         observeStatus()
         model.openMainWindow = { [weak self] in self?.openMainWindow() }
@@ -95,9 +95,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 rootView: MainView().environment(model)
             ))
             window.title = "Auto"
-            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            window.contentMinSize = NSSize(width: 720, height: 480)
-            window.setContentSize(NSSize(width: 900, height: 600))
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.isMovableByWindowBackground = true
+            window.contentMinSize = NSSize(width: 820, height: 540)
+            window.setContentSize(NSSize(width: 1100, height: 720))
             window.setFrameAutosaveName("MainWindow")
             window.isReleasedWhenClosed = false
             window.delegate = self
@@ -109,28 +112,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainWindow?.makeKeyAndOrderFront(nil)
     }
 
-    /// Owned here instead of relying on SwiftUI's `openSettings`/`showSettingsWindow:`, which are unreliable
+    /// Settings is a tab in the main window. Owned here (not SwiftUI's `openSettings`), which is unreliable
     /// from a status-item menu in an accessory app.
     @objc func openSettings() {
-        if settingsWindow == nil {
-            let window = NSWindow(contentViewController: NSHostingController(
-                rootView: SettingsView().environment(model)
-            ))
-            window.title = "Auto Settings"
-            window.styleMask = [.titled, .closable]
-            window.isReleasedWhenClosed = false
-            window.delegate = self
-            window.center()
-            settingsWindow = window
-        }
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate()
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        model.selectedTab = .settings
+        openMainWindow()
     }
 
     func windowWillClose(_ notification: Notification) {
-        guard let closing = notification.object as? NSWindow, closing === mainWindow || closing === settingsWindow else { return }
-        let other = closing === mainWindow ? settingsWindow : mainWindow
-        if other?.isVisible != true { NSApp.setActivationPolicy(.accessory) }
+        guard let closing = notification.object as? NSWindow, closing === mainWindow else { return }
+        NSApp.setActivationPolicy(.accessory)
     }
 }

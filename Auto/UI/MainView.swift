@@ -1,17 +1,28 @@
 import SwiftUI
 
-/// The app's main window: connected cards, the working drive and any other drives.
+/// The app's main window: a sidebar of tabs beside a floating content panel.
 struct MainView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         @Bindable var model = model
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
-            content
+        HStack(spacing: 0) {
+            Sidebar()
+            VStack(spacing: 0) {
+                header
+                Divider().overlay(Theme.border)
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .background(Theme.panel)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius))
+            .overlay(RoundedRectangle(cornerRadius: Theme.panelRadius).strokeBorder(Theme.border))
+            .shadow(color: .black.opacity(0.05), radius: 12, y: 2)
+            .padding([.top, .trailing, .bottom], 10)
         }
-        .frame(minWidth: 720, minHeight: 480)
+        .background(Theme.canvas)
+        .ignoresSafeArea()
+        .frame(minWidth: 820, minHeight: 540)
         .sheet(item: $model.editingShoot) { card in
             NewShootView(card: card)
         }
@@ -19,64 +30,42 @@ struct MainView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            StatusDot(color: Color(nsColor: model.status.tint))
-            Text(model.status.label).font(.headline)
+            Text(model.selectedTab.title)
+                .font(.system(size: 20, weight: .semibold))
             Spacer()
-            if let root = model.workRoot {
-                Label(root.lastPathComponent, systemImage: "folder")
-                    .foregroundStyle(.secondary)
-                    .help(root.path)
+            if model.selectedTab == .media {
+                HStack(spacing: 6) {
+                    StatusDot(color: Color(nsColor: model.status.tint))
+                    Text(model.status.label).font(.callout).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Theme.surfaceMuted, in: Capsule())
+                if let root = model.workRoot {
+                    Label(root.lastPathComponent, systemImage: "folder")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Theme.surfaceMuted, in: Capsule())
+                        .help(root.path)
+                }
             }
-            Button("Settings…", systemImage: "gearshape") { model.openSettings() }
         }
-        .padding()
+        .padding(.horizontal, 24)
+        .frame(height: 60)
     }
 
     @ViewBuilder private var content: some View {
-        if model.workRoot == nil {
-            ContentUnavailableView {
-                Label("Where do shoots go?", systemImage: "folder.badge.questionmark")
-            } description: {
-                Text("Pick your client work folder on your working drive.")
-            } actions: {
-                Button("Choose Work Folder…") { model.setWorkRoot() }
-                    .buttonStyle(.borderedProminent)
-            }
-        } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if model.cards.isEmpty {
-                        ContentUnavailableView(
-                            "No cards connected",
-                            systemImage: "sdcard",
-                            description: Text("Connect a camera card and Auto checks it against \(model.workingDriveName).")
-                        )
-                        .frame(maxWidth: .infinity, minHeight: 240)
-                    } else {
-                        ForEach(model.cards) { card in CardRow(card: card) }
-                    }
-                    drivesSection
-                }
-                .padding()
-            }
-        }
-    }
-
-    @ViewBuilder private var drivesSection: some View {
-        if !model.drives.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Drives").font(.subheadline).foregroundStyle(.secondary)
-                ForEach(model.drives) { drive in
-                    HStack(spacing: 8) {
-                        Image(systemName: "externaldrive").foregroundStyle(.secondary)
-                        Text(drive.name)
-                        Spacer()
-                        if drive.url == model.workingVolume {
-                            Text("Working drive").font(.callout).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
+        switch model.selectedTab {
+        case .media:
+            MediaView()
+        case .videoEdit:
+            EditPlaceholderView(tab: .videoEdit, message: "Proxies, organizing and DaVinci Resolve project setup will live here.")
+        case .photoEdit:
+            EditPlaceholderView(tab: .photoEdit, message: "Culling and photo edits will live here.")
+        case .settings:
+            SettingsView()
         }
     }
 }
