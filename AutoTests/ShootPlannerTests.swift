@@ -55,17 +55,14 @@ struct ShootPlannerTests {
         #expect(jobs.map(\.destDir.path) == ["/w/s/Video/FX3 B"])
     }
 
-    @Test func foldersMergeCaseVariants() {
+    @Test func caseVariantCameraFoldersMerge() {
         let cams = [Camera(id: "a", model: "FX3", serial: nil, folderName: "FX3"),
                     Camera(id: "b", model: "FX3", serial: nil, folderName: "fx3")]
-        let shoot = URL(fileURLWithPath: "/w/s"), root = URL(fileURLWithPath: "/w")
+        let shoot = URL(fileURLWithPath: "/w/s")
         let jobs = ShootPlanner.jobs(missing: [file("1.MP4", kind: .video, camera: "a"), file("2.MP4", kind: .video, camera: "b"),
                                                file("3.JPG", kind: .photo, camera: "b")],
                                      shoot: shoot, cameras: cams, fallback: "CARD")
         #expect(ShootPlanner.directories(for: jobs).map(\.path) == ["/w/s/Photo/fx3", "/w/s/Video/FX3"])
-        let rows = ShootPlanner.folders(for: jobs, shoot: shoot, root: root)
-        #expect(rows.filter { $0.components.last == "FX3" }.map(\.fileCount) == [2])
-        #expect(!rows.contains { $0.components.last == "fx3" && !$0.isPhoto })
     }
 
     @Test func jobsSplitVideoAndPhotoPerCamera() {
@@ -92,33 +89,6 @@ struct ShootPlannerTests {
         let root = URL(fileURLWithPath: "/w")
         let shoot = URL(fileURLWithPath: "/w/Brand film")
         return (ShootPlanner.jobs(missing: missing, shoot: shoot, cameras: cams, fallback: "CARD"), shoot, root)
-    }
-
-    @Test func foldersMirrorJobs() {
-        let f = mixedJobs()
-        let rows = ShootPlanner.folders(for: f.jobs, shoot: f.shoot, root: f.root)
-        #expect(rows.map(\.components) == [["Brand film"], ["Brand film", "Video"], ["Brand film", "Video", "B-cam"],
-                                           ["Brand film", "Video", "A-cam"], ["Brand film", "Photo"], ["Brand film", "Photo", "A-cam"]])
-        #expect(rows.map(\.depth) == [0, 1, 2, 2, 1, 2])
-        #expect(rows.map(\.fileCount) == [0, 0, 2, 1, 0, 1])
-        #expect(rows.map(\.isPhoto) == [false, false, false, false, true, true])
-        #expect(rows[2].name == "B-cam")
-        #expect(rows[2].id == "Brand film/Video/B-cam")
-    }
-
-    @Test func foldersOmitUnusedSections() {
-        let shoot = URL(fileURLWithPath: "/w/S")
-        let jobs = ShootPlanner.jobs(missing: [file("1.JPG", kind: .photo, camera: "a")], shoot: shoot, cameras: [], fallback: "CARD")
-        let rows = ShootPlanner.folders(for: jobs, shoot: shoot, root: URL(fileURLWithPath: "/w"))
-        #expect(rows.map(\.name) == ["S", "Photo", "CARD"])
-    }
-
-    @Test func layoutUsesVideoAndNeverProjectOrFootage() {
-        let f = mixedJobs()
-        let comps = ShootPlanner.folders(for: f.jobs, shoot: f.shoot, root: f.root).flatMap(\.components)
-            + ShootPlanner.directories(for: f.jobs).flatMap(\.pathComponents)
-        #expect(!comps.contains("Project") && !comps.contains("Footage"))
-        #expect(comps.contains("Video"))
     }
 
     @Test func directoriesAreUniqueLeafDestinations() {
@@ -178,20 +148,7 @@ struct ShootPlannerTests {
         let shoot = try ShootPlanner.shootURL(root: root, name: "New Shoot")
         #expect(ShootPlanner.isInside(shoot, root: root))
         let jobs = ShootPlanner.jobs(missing: [file("a.MP4", kind: .video, camera: "a")], shoot: shoot, cameras: [], fallback: "Card")
-        #expect(!ShootPlanner.folders(for: jobs, shoot: shoot, root: root).isEmpty)
-    }
-
-    @Test func foldersMatchWhenRootSpellingDiffers() throws {
-        func rows(_ prefix: String) throws -> [[String]] {
-            let root = URL(fileURLWithPath: "\(prefix)/x", isDirectory: true)
-            let shoot = try ShootPlanner.shootURL(root: root, name: "S")
-            let jobs = ShootPlanner.jobs(missing: [file("a.MP4", kind: .video, camera: "a")], shoot: shoot, cameras: [], fallback: "Card")
-            return ShootPlanner.folders(for: jobs, shoot: shoot, root: root).map { $0.components.filter { $0 != "private" } }
-        }
-        let a = try rows("/tmp"), b = try rows("/private/tmp")
-        #expect(!a.isEmpty)
-        #expect(a.map(\.count) == b.map(\.count))
-        #expect(a.map { $0.suffix(1) } == b.map { $0.suffix(1) })
+        #expect(jobs.allSatisfy { ShootPlanner.isInside($0.destDir, root: root) })
     }
 
     @Test func afterVerifyPhase() {

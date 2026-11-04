@@ -44,13 +44,6 @@ struct DestinationSafetyTests {
         }
     }
 
-    @Test func problemReportsFileInPath() throws {
-        let base = try temp(); defer { try? FileManager.default.removeItem(at: base) }
-        try Data([1]).write(to: base.appendingPathComponent("shoot"))
-        #expect(ShootPlanner.problem(for: [base.appendingPathComponent("shoot/Video/FX3")]) == .notAFolder("shoot"))
-        #expect(ShootPlanner.problem(for: [base.appendingPathComponent("fine/Video")]) == nil)
-    }
-
     @Test func flatPlanRootEqualsDirIsAllowed() throws {
         let base = try temp(); defer { try? FileManager.default.removeItem(at: base) }
         try ShootPlanner.checkDestination(base, root: base, cardVolumes: [])

@@ -147,11 +147,6 @@ final class AppModel {
 
     // MARK: New Shoot sheet
 
-    /// The card the legacy copy-flow sheet acts on: the first one with work to do.
-    var ingestCandidate: Card? {
-        cards.first { $0.phase == .ready } ?? cards.first { $0.phase == .needsBackup }
-    }
-
     /// Sidebar New Shoot: opens the create sheet.
     func newShoot(card: Card? = nil) {
         selectedTab = .media
@@ -428,33 +423,6 @@ final class AppModel {
         ShootPlanner.safeComponent(name) != nil
     }
 
-    /// Preview of what a shoot would create for the selected files. Folders stay empty without a
-    /// work folder or a usable name; the counts always reflect the selection.
-    func shootPreview(card: Card, name: String, cameras: [Camera], selection: ShootSelection) -> ShootPreview {
-        let selected = selection.filter(card.missing)
-        let photos = selected.filter { $0.kind == .photo }.count
-        var preview = ShootPreview(folders: [], videoCount: selected.count - photos, photoCount: photos, problem: nil)
-        guard let root = workRoot else { return preview }
-        do {
-            let shoot = try ShootPlanner.shootURL(root: root, name: name)
-            let jobs = ShootPlanner.jobs(missing: selected, shoot: shoot, cameras: cameras, fallback: card.name)
-            let fm = FileManager.default
-            preview.folders = ShootPlanner.folders(for: jobs, shoot: shoot, root: root).map { row in
-                var row = row
-                let url = row.components.reduce(root) { $0.appendingPathComponent($1, isDirectory: true) }
-                var isDir: ObjCBool = false
-                row.exists = fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
-                return row
-            }
-            preview.problem = ShootPlanner.problem(for: [shoot] + ShootPlanner.directories(for: jobs))?.errorDescription
-        } catch ShootPlanner.PathError.invalidName {
-            // Not an error to show while the user is still typing a name.
-        } catch {
-            preview.problem = error.localizedDescription
-        }
-        return preview
-    }
-
     private struct PhaseError: LocalizedError {
         var errorDescription: String? { "This card can't start a new shoot right now." }
     }
@@ -464,27 +432,6 @@ final class AppModel {
         case .needsBackup, .ready, .failed: true
         default: false
         }
-    }
-
-    func createShoot(card: Card, name: String, cameras: [Camera], selection: ShootSelection) throws {
-        guard let root = workRoot else { return }
-        guard workingVolume != nil else { throw ShootPlanner.PathError.workFolderMissing }
-        let shoot = try ShootPlanner.shootURL(root: root, name: name)
-        // Copies onto a card never count as a backup (e.g. the work folder was set on a card).
-        if isOnCard(shoot) { throw CardDestinationError() }
-        guard card.engine == nil else { return }
-        guard canPlan(card) else { throw PhaseError() }
-        let jobs = ShootPlanner.jobs(missing: selection.filter(card.missing), shoot: shoot, cameras: cameras, fallback: card.name)
-        guard !jobs.isEmpty else { throw EmptySelectionError() }
-        guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: shoot) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
-
-        try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobs), root: root, cardVolumes: volumes(including: card))
-        stopVerifier(card)
-        card.plan = ShootPlanner.plan(jobs: jobs, shoot: shoot, workRoot: root)
-        addTargets[card.id] = nil
-        card.phase = .ready
-        shootSheet = nil
-        shootSheetCard = nil
     }
 
     private struct EmptySelectionError: LocalizedError {
