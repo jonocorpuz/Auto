@@ -180,4 +180,60 @@ struct GridSelectionTests {
         s.selectAll(in: dup)
         #expect(s.selected == [0, 1, 2, 3])
     }
+
+    /// [[a b c] [a b c]] at 3 columns: every file is in both sections.
+    private let twin = GridLayout(sections: [[0, 1, 2], [0, 1, 2]], columns: 3)
+
+    @Test func downThroughDuplicateStartingSectionsDoesNotStick() {
+        var s = GridSelection<Int>()
+        s.click(0, section: 0)
+        s.move(.down, extend: false, in: twin)
+        #expect(s.cursor == 0 && s.cursorSection == 1)
+        s.move(.down, extend: false, in: twin)
+        #expect(s.cursorSection == 1) // bottom edge, stays
+        s.move(.up, extend: false, in: twin)
+        #expect(s.cursor == 0 && s.cursorSection == 0)
+    }
+
+    @Test func clickInSecondSectionNavigatesFromThere() {
+        var s = GridSelection<Int>()
+        s.click(1, section: 1)
+        s.move(.up, extend: false, in: twin)
+        #expect(s.cursor == 1 && s.cursorSection == 0)
+        s.click(1, section: 1)
+        s.move(.down, extend: false, in: twin)
+        #expect(s.cursorSection == 1)
+    }
+
+    @Test func leftRightSkipSlotsOfTheSameFile() {
+        let l = GridLayout(sections: [[0, 1, 2], [2, 3]], columns: 3)
+        var s = GridSelection<Int>()
+        s.click(2, section: 1)
+        s.move(.left, extend: false, in: l)
+        #expect(s.cursor == 1)
+        s.move(.right, extend: false, in: l)
+        #expect(s.cursor == 2)
+        s.move(.right, extend: false, in: l)
+        #expect(s.cursor == 3)
+    }
+
+    @Test func shiftRangeAcrossDuplicateSections() {
+        var s = GridSelection<Int>()
+        s.click(1, section: 0)
+        s.move(.down, extend: true, in: twin)
+        #expect(s.selected == [1, 2, 0])
+        s.move(.up, extend: true, in: twin)
+        #expect(s.selected == [1])
+        s.extend(to: 0, section: 1, in: twin)
+        #expect(s.selected == [0, 1, 2] && s.cursorSection == 1)
+    }
+
+    @Test func arrowAfterExternalMultiSelectionStartsFromLastSelected() {
+        var s = GridSelection<Int>(selected: [1, 3, 6])
+        s.move(.right, extend: false, in: layout)
+        #expect(s.selected == [7])
+        var t = GridSelection<Int>(selected: [1, 3])
+        t.move(.right, extend: true, in: layout)
+        #expect(t.selected == [3, 4] && t.anchor == 3)
+    }
 }
