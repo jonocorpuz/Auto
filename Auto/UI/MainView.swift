@@ -23,18 +23,11 @@ struct MainView: View {
         .background(Theme.canvas)
         .ignoresSafeArea()
         .frame(minWidth: 820, minHeight: 540)
-        .sheet(item: $model.shootSheet) { _ in
-            // Temporary: the real create/add sheet comes with the next slice.
-            if let card = model.shootSheetCard ?? model.ingestCandidate ?? model.cards.first {
-                NewShootView(card: card)
-            } else {
-                VStack(spacing: 12) {
-                    Text("New Shoot").font(.headline)
-                    Text("Coming soon.").foregroundStyle(.secondary)
-                    Button("Close") { model.shootSheet = nil }
-                }
-                .padding(32)
-            }
+        .sheet(isPresented: Binding(
+            get: { model.shootSheet != nil },
+            set: { if !$0 { model.shootSheet = nil } }
+        )) {
+            NewShootView()
         }
     }
 
