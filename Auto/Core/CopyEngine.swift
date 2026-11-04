@@ -138,10 +138,11 @@ nonisolated final class CopyEngine: @unchecked Sendable {
                 written += Int64(data.count)
                 onBytes(written)
             }
-            try writer.synchronize()
+            // Force data to the platter, not just the cache; fall back if unsupported.
+            if fcntl(fd, F_FULLFSYNC) == -1 { try writer.synchronize() }
 
             guard written == job.file.size else { throw CopyError.sizeMismatch }
-            guard try hash(partial) == Data(sourceHash.finalize()) else { throw CopyError.mismatch }
+            guard try hash(partial, bypassCache: true) == Data(sourceHash.finalize()) else { throw CopyError.mismatch }
 
             let attrs = try? fm.attributesOfItem(atPath: source.path)
             var keep: [FileAttributeKey: Any] = [:]
@@ -156,15 +157,20 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         }
     }
 
-    private func hash(_ url: URL) throws -> Data {
+    /// `bypassCache` reads with F_NOCACHE so verification checks what is on disk.
+    private func hash(_ url: URL, bypassCache: Bool = false) throws -> Data {
         var md5 = Insecure.MD5()
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
+        if bypassCache { _ = fcntl(handle.fileDescriptor, F_NOCACHE, 1) }
+        var read: Int64 = 0
         while true {
             if isCancelled { throw CopyError.cancelled }
             let data: Data? = try autoreleasepool { try handle.read(upToCount: Self.chunk) }
             guard let data, !data.isEmpty else { break }
             md5.update(data: data)
+            read += Int64(data.count)
+            if bypassCache { onVerifyChunk?(read) }
         }
         return Data(md5.finalize())
     }
