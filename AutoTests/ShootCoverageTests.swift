@@ -40,7 +40,7 @@ struct ShootCoverageTests {
     }
 
     private func check(_ files: [MediaFile], _ e: Env, copies: [CopiedFile] = [], cache: VerificationCache = VerificationCache()) async -> Set<URL> {
-        await ShootCoverageChecker.run(files: files, shootFolder: e.shoot, sessionCopies: copies, cache: cache) { _ in }
+        await ShootCoverageChecker.run(files: files, shootFolder: e.shoot, sessionCopies: copies, cache: cache) { _ in }.verified
     }
 
     @Test func completeWhenEveryDayFileVerified() async throws {
@@ -119,5 +119,23 @@ struct ShootCoverageTests {
         let a = try card(e, "A.MP4", Data(repeating: 1, count: 500), date: day1)
         try put(Data(repeating: 1, count: 500), "A.MP4", in: e.shoot.appendingPathComponent("Video/OtherCam"))
         #expect(await check([a], e) == [a.url])
+    }
+
+    @Test func cancellationIsReportedAndNotComplete() async throws {
+        let e = try env(); defer { e.cleanup() }
+        let a = try card(e, "A.MP4", Data(repeating: 1, count: 500), date: day1)
+        try put(Data(repeating: 1, count: 500), "A.MP4", in: e.shoot)
+        let verifier = BackupVerifier()
+        verifier.onChunkHashed = { [unowned verifier] _ in verifier.cancel() }
+        let r = await ShootCoverageChecker.run(files: [a], shootFolder: e.shoot, sessionCopies: [], cache: VerificationCache(), verifier: verifier) { _ in }
+        #expect(r.cancelled)
+        #expect(r.verified.isEmpty)
+    }
+
+    @Test func runsOffMainThread() async throws {
+        let e = try env(); defer { e.cleanup() }
+        let a = try card(e, "A.MP4", Data(repeating: 1, count: 500), date: day1)
+        _ = await ShootCoverageChecker.run(files: [a], shootFolder: e.shoot, sessionCopies: [], cache: VerificationCache()) { _ in }
+        #expect(MainThreadProbe.shared.everRanOnMain("ShootCoverageChecker.run") == false)
     }
 }

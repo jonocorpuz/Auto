@@ -24,30 +24,46 @@ nonisolated struct ShootCoverage: Sendable, Equatable {
 }
 
 nonisolated enum ShootCoverageChecker {
+    struct Result: Sendable, Equatable {
+        var verified: Set<URL>
+        /// True when the run was cancelled: `verified` is partial and must not be treated as complete.
+        var cancelled: Bool
+    }
+
     /// Card files that have a checksum-identical copy INSIDE `shootFolder` (any subfolder; camera
     /// folder irrelevant). Name + size only nominate candidates. Copies outside the folder never
     /// count. Read-only: nothing is written anywhere.
-    static func run(
+    /// `@concurrent`: a plain nonisolated async func would run on the caller's actor (see DriveIndex).
+    /// Cancelling the calling task cancels `verifier`.
+    @concurrent static func run(
         files: [MediaFile],
         shootFolder: URL,
         sessionCopies: [CopiedFile],
         cache: VerificationCache,
+        verifier: BackupVerifier = BackupVerifier(),
         progress: @escaping @Sendable (CopyProgress) -> Void
-    ) async -> Set<URL> {
-        var candidates = await DriveIndex.build(shootFolder)
-        let known = Set(candidates.values.joined().map(canonical))
-        let inside = sessionCopies.filter {
-            isInside($0.destination, folder: shootFolder) && !known.contains(canonical($0.destination))
-        }
-        candidates = BackupVerifier.addingCandidates(inside, to: candidates)
+    ) async -> Result {
+        MainThreadProbe.shared.mark("ShootCoverageChecker.run")
+        return await withTaskCancellationHandler {
+            var candidates = await DriveIndex.build(shootFolder)
+            let known = Set(candidates.values.joined().map(canonical))
+            let inside = sessionCopies.filter {
+                isInside($0.destination, folder: shootFolder) && !known.contains(canonical($0.destination))
+            }
+            candidates = BackupVerifier.addingCandidates(inside, to: candidates)
 
-        let triage = await BackupVerifier.triageOffMain(files: files, candidates: candidates, cache: cache)
-        var results = triage.settled
-        if !triage.toVerify.isEmpty {
-            let outcome = await BackupVerifier().run(triage.toVerify, candidates: candidates, cache: cache) { progress($0) }
-            results.merge(outcome.results) { $1 }
+            let triage = await BackupVerifier.triageOffMain(files: files, candidates: candidates, cache: cache)
+            var results = triage.settled
+            var cancelled = Task.isCancelled
+            if !triage.toVerify.isEmpty, !cancelled {
+                let outcome = await verifier.run(triage.toVerify, candidates: candidates, cache: cache) { progress($0) }
+                results.merge(outcome.results) { $1 }
+                cancelled = outcome.cancelled || Task.isCancelled
+            }
+            return Result(verified: Set(results.filter { $0.value.isVerified }.keys), cancelled: cancelled)
+        } onCancel: {
+            verifier.cancel()
         }
-        return Set(results.filter { $0.value.isVerified }.keys)
     }
 
     private static func canonical(_ url: URL) -> String {
