@@ -75,6 +75,21 @@ struct CardBrowserView: View {
             .opacity(0)
             .accessibilityHidden(true)
         }
+        // ⌘A as a key equivalent too, so it works even when the grid or table doesn't have focus
+        // (or the Edit menu's Select All would otherwise swallow it).
+        .background {
+            Button("") {
+                if mode == .icons {
+                    grid.selectAll(in: gridLayout(shown, spacing: 6))
+                    selection = grid.selected
+                } else {
+                    selection = Set(shown.flatMap(\.files).map(\.id))
+                }
+            }
+            .keyboardShortcut("a", modifiers: .command)
+            .opacity(0)
+            .accessibilityHidden(true)
+        }
     }
 
     // MARK: Toolbar
