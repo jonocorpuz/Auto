@@ -132,6 +132,36 @@ struct ShootCoverageTests {
         #expect(r.verified.isEmpty)
     }
 
+    @Test func excludedSubfolderCopyDoesNotCount() async throws {
+        let e = try env(); defer { e.cleanup() }
+        let a = try card(e, "A.MP4", Data(repeating: 1, count: 500), date: day1)
+        let sub = e.shoot.appendingPathComponent("Nested")
+        try put(Data(repeating: 1, count: 500), "A.MP4", in: sub)
+        let r = await ShootCoverageChecker.run(files: [a], shootFolder: e.shoot, sessionCopies: [], cache: VerificationCache(), excluding: [sub]) { _ in }
+        #expect(r.verified.isEmpty)
+        let r2 = await ShootCoverageChecker.run(files: [a], shootFolder: e.shoot, sessionCopies: [], cache: VerificationCache()) { _ in }
+        #expect(r2.verified == [a.url])
+    }
+
+    @Test func excludedSessionCopyDoesNotCount() async throws {
+        let e = try env(); defer { e.cleanup() }
+        let a = try card(e, "A.MP4", Data(repeating: 1, count: 500), date: day1)
+        let sub = e.shoot.appendingPathComponent("Nested")
+        let dest = try put(Data(repeating: 1, count: 500), "A.MP4", in: sub)
+        let copy = CopiedFile(file: a, destination: dest, destinationModified: nil, preexisting: false)
+        let r = await ShootCoverageChecker.run(files: [a], shootFolder: e.shoot, sessionCopies: [copy], cache: VerificationCache(), excluding: [sub]) { _ in }
+        #expect(r.verified.isEmpty && r.copies.isEmpty)
+    }
+
+    @Test func copiesMapsVerifiedCopy() async throws {
+        let e = try env(); defer { e.cleanup() }
+        let a = try card(e, "A.MP4", Data(repeating: 1, count: 500), date: day1)
+        let dest = try put(Data(repeating: 1, count: 500), "A.MP4", in: e.shoot.appendingPathComponent("Video"))
+        let r = await ShootCoverageChecker.run(files: [a], shootFolder: e.shoot, sessionCopies: [], cache: VerificationCache()) { _ in }
+        #expect(r.copies.count == 1)
+        #expect(r.copies[a.url]?.resolvingSymlinksInPath().path == dest.resolvingSymlinksInPath().path)
+    }
+
     @Test func runsOffMainThread() async throws {
         let e = try env(); defer { e.cleanup() }
         let a = try card(e, "A.MP4", Data(repeating: 1, count: 500), date: day1)
