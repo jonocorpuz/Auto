@@ -67,6 +67,28 @@ final class AppModel {
         didSet { UserDefaults.standard.set(autoOpen, forKey: Keys.autoOpen) }
     }
 
+    /// Sidebar selection in the main window.
+    var selectedTab: AppTab = .media
+
+    /// Light/dark preference, applied app-wide.
+    var appearance: AppearanceMode {
+        didSet {
+            UserDefaults.standard.set(appearance.rawValue, forKey: Keys.appearance)
+            applyAppearance()
+        }
+    }
+
+    /// Shown in the sidebar's account row. Local macOS user until real accounts exist.
+    let accountName: String = {
+        let name = NSFullUserName()
+        return name.isEmpty ? NSUserName() : name
+    }()
+
+    var accountInitials: String {
+        let letters = accountName.split(separator: " ").prefix(2).compactMap(\.first)
+        return letters.isEmpty ? "?" : String(letters).uppercased()
+    }
+
     /// Provided by AppDelegate.
     @ObservationIgnored var openMainWindow: () -> Void = {}
     @ObservationIgnored var openSettings: () -> Void = {}
@@ -84,6 +106,7 @@ final class AppModel {
         let defaults = UserDefaults.standard
         dateFormat = defaults.string(forKey: Keys.dateFormat) ?? ShootPlanner.defaultDateFormat
         autoOpen = defaults.object(forKey: Keys.autoOpen) as? Bool ?? true
+        appearance = defaults.string(forKey: Keys.appearance).flatMap(AppearanceMode.init) ?? .system
         if let path = defaults.string(forKey: Keys.workRoot) {
             workRoot = URL(fileURLWithPath: path)
         }
@@ -93,6 +116,29 @@ final class AppModel {
         static let workRoot = "workRoot"
         static let dateFormat = "dateFormat"
         static let autoOpen = "autoOpen"
+        static let appearance = "appearance"
+    }
+
+    func applyAppearance() {
+        NSApp.appearance = appearance.nsAppearance
+    }
+
+    // MARK: Ingest
+
+    /// The card the sidebar's Ingest button acts on: the first one with work to do.
+    var ingestCandidate: Card? {
+        cards.first { $0.phase == .ready } ?? cards.first { $0.phase == .needsBackup }
+    }
+
+    /// Sidebar Ingest: copy a card that already has a plan, or start a New Shoot for one that needs backup.
+    func ingest() {
+        selectedTab = .media
+        guard let card = ingestCandidate else { return }
+        if card.phase == .ready, card.plan != nil {
+            copy(card)
+        } else {
+            editingShoot = card
+        }
     }
 
     // MARK: Working drive
