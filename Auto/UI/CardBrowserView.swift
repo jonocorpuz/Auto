@@ -45,6 +45,8 @@ struct CardBrowserView: View {
                 }
             }
         }
+        .onAppear { model.browserAppeared(card.id) }
+        .onDisappear { model.browserDisappeared(card.id) }
         .onChange(of: groups.map(\.kind)) { _, kinds in
             if let location, !kinds.contains(location) { place = .all }
         }
@@ -166,13 +168,27 @@ struct CardBrowserView: View {
                 }
             }
             let backed = groups.filter { $0.kind != .notBackedUp }
-            if !backed.isEmpty {
+            let shownShoots = Set(groups.compactMap { group -> UUID? in
+                if case .shoot(let id) = group.kind { id } else { nil }
+            })
+            let pending = model.browserMembership.filter { $0.value == .checking && !shownShoots.contains($0.key) }.count
+            if !backed.isEmpty || pending > 0 {
                 Section("Backed Up") {
                     ForEach(backed) { group in
+                        let state = group.kind.shootID.flatMap { model.browserMembership[$0] }
                         LocationRow(title: group.title,
                                     symbol: group.kind == .elsewhere ? "externaldrive.fill" : "folder.fill",
-                                    tint: Theme.accent, count: group.files.count)
+                                    tint: Theme.accent, count: group.files.count,
+                                    checking: state == .checking,
+                                    failure: { if case .failed(let reason)? = state { reason } else { nil } }())
                             .tag(Place.group(group.kind))
+                    }
+                    if pending > 0 {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Checking \(Format.count(pending, "shoot", "shoots"))…")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -389,7 +405,7 @@ struct CardBrowserView: View {
     @ViewBuilder private func fileMenu(_ files: [MediaFile], groups: [CardBrowser.Group]) -> some View {
         Button("Quick Look") { quickLook(files) }
         Button("Show in Finder") { model.revealInFinder(files.map(\.url)) }
-        let copies = files.compactMap { card.backups[$0.url] }
+        let copies = model.browserBackupCopies(files, in: location)
         if !copies.isEmpty {
             Button(copies.count == files.count ? "Show Backup in Finder" : "Show Backups in Finder (\(copies.count))") {
                 model.revealInFinder(copies)
@@ -431,7 +447,7 @@ struct CardBrowserView: View {
             Section("Add \(Format.count(files.count, "file", "files")) to") {
                 ForEach(shoots) { item in
                     // Files already verified inside this shoot are skipped; disable if that's all of them.
-                    let inShoot = Set(groups.first { $0.kind == .shoot(item.id) }?.files.map(\.id) ?? [])
+                    let inShoot = filesAlreadyIn(item.id, groups: groups)
                     Button("\(item.record.name) — \(item.date.formatted(date: .abbreviated, time: .omitted))") {
                         add(files, to: item.id)
                     }
@@ -439,6 +455,14 @@ struct CardBrowserView: View {
                 }
             }
         }
+    }
+
+    /// Prefer the shoot's verified membership; until it is known, use what the group shows.
+    private func filesAlreadyIn(_ shootID: UUID, groups: [CardBrowser.Group]) -> Set<MediaFile.ID> {
+        if case .done(let urls, _)? = model.browserMembership[shootID] {
+            return Set(card.files.filter { urls.contains($0.url) }.map(\.id))
+        }
+        return Set(groups.first { $0.kind == .shoot(shootID) }?.files.map(\.id) ?? [])
     }
 
     private func add(_ files: [MediaFile], to shootID: UUID) {
@@ -466,6 +490,7 @@ struct CardBrowserView: View {
             let p = card.progress
             text += " — Copying \(min(p.filesDone + 1, p.filesTotal)) of \(p.filesTotal)…"
         }
+        if model.browserMembership.values.contains(.checking) { text += " — Checking shoots…" }
         return Text(text)
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -495,11 +520,17 @@ struct CardBrowserView: View {
 
 // MARK: - Pieces
 
+private extension CardBrowser.GroupKind {
+    var shootID: UUID? { if case .shoot(let id) = self { id } else { nil } }
+}
+
 private struct LocationRow: View {
     let title: String
     let symbol: String
     let tint: Color
     let count: Int
+    var checking = false
+    var failure: String?
 
     var body: some View {
         HStack {
@@ -509,6 +540,12 @@ private struct LocationRow: View {
                 Image(systemName: symbol).foregroundStyle(tint)
             }
             Spacer()
+            if checking {
+                ProgressView().controlSize(.mini)
+            } else if let failure {
+                Image(systemName: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
+                    .help("Couldn't check this shoot: \(failure)")
+            }
             Text("\(count)").font(.caption).foregroundStyle(.secondary).monospacedDigit()
         }
     }
