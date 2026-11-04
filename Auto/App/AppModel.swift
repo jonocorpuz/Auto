@@ -209,6 +209,7 @@ final class AppModel {
     // MARK: Scanning
 
     private func scan(_ card: Card) {
+            card.shootDays = ShootDays.byCamera(result.files, calendar: .current)
         card.phase = .scanning
         Task {
             let result = await CardScanner.scan(card.volume, volumeName: card.name)
