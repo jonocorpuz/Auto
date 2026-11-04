@@ -379,6 +379,44 @@ final class AppModel {
         editingShoot = nil
     }
 
+    /// Whether `name` can be used as the shoot folder name.
+    func isValidShootName(_ name: String) -> Bool {
+        ShootPlanner.safeComponent(name) != nil
+    }
+
+    /// Preview rows for the folders a shoot would create. Empty without a work folder or a usable name.
+    func shootFolders(card: Card, name: String, cameras: [Camera]) -> [PlannedFolder] {
+        guard let root = workRoot, let shoot = try? ShootPlanner.shootURL(root: root, name: name) else { return [] }
+        let jobs = ShootPlanner.jobs(missing: card.missing, shoot: shoot, cameras: cameras, fallback: card.name)
+        let fm = FileManager.default
+        return ShootPlanner.folders(for: jobs, shoot: shoot, root: root).map { row in
+            var row = row
+            let url = row.components.reduce(root) { $0.appendingPathComponent($1, isDirectory: true) }
+            var isDir: ObjCBool = false
+            row.exists = fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+            return row
+        }
+    }
+
+    func createShoot(card: Card, name: String, cameras: [Camera]) throws {
+        guard let root = workRoot else { return }
+        let shoot = try ShootPlanner.shootURL(root: root, name: name)
+        // Copies onto a card never count as a backup (e.g. the work folder was set on a card).
+        if isOnCard(shoot) { throw CardDestinationError() }
+        guard card.engine == nil else { return }
+        stopVerifier(card)
+        let jobs = ShootPlanner.jobs(missing: card.missing, shoot: shoot, cameras: cameras, fallback: card.name)
+        guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: shoot) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
+
+        let fm = FileManager.default
+        for dir in ShootPlanner.directories(for: jobs) {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        card.plan = ShootPlanner.plan(jobs: jobs, shoot: shoot)
+        card.phase = .ready
+        editingShoot = nil
+    }
+
     func chooseFolder(for card: Card) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -413,7 +451,7 @@ final class AppModel {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = "Use this folder"
-        panel.message = "Choose the folder your client folders live in, e.g. T7 Shield › 2026 › Client work."
+        panel.message = "Choose the folder your shoots live in, e.g. T7 Shield › 2026."
         panel.directoryURL = workRoot ?? URL(fileURLWithPath: "/Volumes")
         NSApp.activate()
         if panel.runModal() == .OK, let url = panel.url { workRoot = url }
