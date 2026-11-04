@@ -17,6 +17,45 @@ struct ShootPlannerTests {
         #expect(ShootPlanner.folderName(date: date(2026, 3, 7), name: "", dateFormat: "") == "07.03.26")
     }
 
+    @Test func traversalClientStaysInsideTheWorkRoot() throws {
+        let root = URL(fileURLWithPath: "/Volumes/T7/Work")
+        let shoot = try ShootPlanner.shootURL(root: root, client: "../../CARD/DCIM", date: date(2026, 3, 7), name: "x", dateFormat: "dd.MM.yy")
+        #expect(shoot.path == "/Volumes/T7/Work/..-..-CARD-DCIM/07.03.26 x")
+        #expect(ShootPlanner.isInside(shoot, root: root))
+    }
+
+    @Test func slashesInTheDateFormatDontMakeFolders() throws {
+        #expect(ShootPlanner.folderName(date: date(2026, 3, 7), name: "a/b:c", dateFormat: "dd/MM/yy") == "07-03-26 a-b-c")
+        let root = URL(fileURLWithPath: "/w")
+        let shoot = try ShootPlanner.shootURL(root: root, client: "Acme", date: date(2026, 3, 7), name: "", dateFormat: "dd/MM/yy")
+        #expect(shoot.path == "/w/Acme/07-03-26")
+        // A format that renders as ".." falls back to the default.
+        #expect(ShootPlanner.folderName(date: date(2026, 3, 7), name: "", dateFormat: "'..'") == "07.03.26")
+    }
+
+    @Test(arguments: ["", "   ", ".", "..", " .. ", "\n"])
+    func unusableClientNamesThrow(_ client: String) {
+        #expect(throws: ShootPlanner.PathError.invalidClient) {
+            try ShootPlanner.shootURL(root: URL(fileURLWithPath: "/w"), client: client, date: Date(), name: "", dateFormat: "dd.MM.yy")
+        }
+    }
+
+    @Test func safeComponentAndContainment() {
+        #expect(ShootPlanner.safeComponent(" Acme / Co ") == "Acme - Co")
+        #expect(ShootPlanner.safeComponent("..") == nil)
+        #expect(ShootPlanner.isInside(URL(fileURLWithPath: "/w/a"), root: URL(fileURLWithPath: "/w/")))
+        #expect(!ShootPlanner.isInside(URL(fileURLWithPath: "/w"), root: URL(fileURLWithPath: "/w")))
+        #expect(!ShootPlanner.isInside(URL(fileURLWithPath: "/work/a"), root: URL(fileURLWithPath: "/w")))
+        #expect(!ShootPlanner.isInside(URL(fileURLWithPath: "/w/../x"), root: URL(fileURLWithPath: "/w")))
+    }
+
+    @Test func cameraFolderNamesAreSanitized() {
+        let cams = [Camera(id: "a", model: "FX3", serial: nil, folderName: "../../evil")]
+        let jobs = ShootPlanner.jobs(missing: [file("1.MP4", kind: .video, camera: "a"), file("2.MP4", kind: .video, camera: "?")],
+                                     shoot: URL(fileURLWithPath: "/w/C/s"), cameras: cams, fallback: "..")
+        #expect(jobs.map(\.destDir.path) == ["/w/C/s/Footage/..-..-evil", "/w/C/s/Footage/Card"])
+    }
+
     @Test func jobsSplitFootageAndPhotoPerCamera() {
         let cams = [Camera(id: "a", model: "FX3", serial: nil, folderName: "A-cam"),
                     Camera(id: "b", model: "A7", serial: nil, folderName: " ")]

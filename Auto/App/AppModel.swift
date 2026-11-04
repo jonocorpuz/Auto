@@ -287,19 +287,25 @@ final class AppModel {
     }
 
     func shootFolderExists(client: String, date: Date, name: String) -> Bool {
-        guard let root = workRoot else { return false }
-        return FileManager.default.fileExists(
-            atPath: ShootPlanner.shootURL(root: root, client: client, date: date, name: name, dateFormat: dateFormat).path)
+        guard let root = workRoot,
+              let shoot = try? ShootPlanner.shootURL(root: root, client: client, date: date, name: name, dateFormat: dateFormat) else { return false }
+        return FileManager.default.fileExists(atPath: shoot.path)
+    }
+
+    /// Whether `client` can be used as a client folder name.
+    func isValidClientName(_ client: String) -> Bool {
+        ShootPlanner.safeComponent(client) != nil
     }
 
     func createShoot(card: Card, client: String, shootName: String, date: Date, cameras: [Camera]) throws {
         guard let root = workRoot else { return }
-        let shoot = ShootPlanner.shootURL(root: root, client: client, date: date, name: shootName, dateFormat: dateFormat)
+        let shoot = try ShootPlanner.shootURL(root: root, client: client, date: date, name: shootName, dateFormat: dateFormat)
         // Copies onto a card never count as a backup (e.g. the work folder was set on a card).
         if isOnCard(shoot) { throw CardDestinationError() }
         guard card.engine == nil else { return }
         stopVerifier(card)
         let jobs = ShootPlanner.jobs(missing: card.missing, shoot: shoot, cameras: cameras, fallback: card.name)
+        guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: shoot) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
 
         let fm = FileManager.default
         try fm.createDirectory(at: shoot.appendingPathComponent("Project"), withIntermediateDirectories: true)

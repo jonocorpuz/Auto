@@ -64,7 +64,7 @@ struct NewShootView: View {
                 Button("Create") { create() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedClient.isEmpty)
+                    .disabled(!model.isValidClientName(client))
             }
         }
         .padding(20)
@@ -113,6 +113,7 @@ struct NewShootView: View {
 
     private var clientCaption: String {
         if trimmedClient.isEmpty { return "Finds existing clients as you type" }
+        if !model.isValidClientName(client) { return "Not a usable folder name" }
         if let existing = existingClient { return "Adds to existing \(existing) folder" }
         return "Creates a new client folder"
     }

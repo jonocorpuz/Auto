@@ -27,20 +27,58 @@ nonisolated struct CopyPlan: Sendable {
 nonisolated enum ShootPlanner {
     static let defaultDateFormat = "dd.MM.yy"
 
-    /// "<formatted date> <name>", or just the date when the name is blank.
+    enum PathError: LocalizedError, Equatable {
+        case invalidClient
+        case outsideWorkFolder
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidClient: "Enter a client name that works as a folder name."
+            case .outsideWorkFolder: "That shoot folder would land outside your work folder."
+            }
+        }
+    }
+
+    /// One safe folder name: "/" and ":" become "-", control characters are dropped and the
+    /// result is trimmed. nil for "", "." and "..", which would not create a folder of their own.
+    static func safeComponent(_ raw: String) -> String? {
+        let replaced = raw.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        let visible = String(String.UnicodeScalarView(replaced.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+        let trimmed = visible.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != ".", trimmed != ".." else { return nil }
+        return trimmed
+    }
+
+    /// True when `url` is strictly inside `root` (standardized paths, trailing "/" on the root).
+    static func isInside(_ url: URL, root: URL) -> Bool {
+        let r = root.standardizedFileURL.path
+        return url.standardizedFileURL.path.hasPrefix(r.hasSuffix("/") ? r : r + "/")
+    }
+
+    /// "<formatted date> <name>", or just the date when the name is blank. Always a single safe
+    /// folder name: a format like "dd/MM/yy" gives "07-03-26".
     static func folderName(date: Date, name: String, dateFormat: String) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = dateFormat.isEmpty ? defaultDateFormat : dateFormat
-        let stamp = formatter.string(from: date)
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? stamp : "\(stamp) \(trimmed)"
+        var stamp = safeComponent(formatter.string(from: date))
+        if stamp == nil {
+            formatter.dateFormat = defaultDateFormat
+            stamp = safeComponent(formatter.string(from: date))
+        }
+        let safeStamp = stamp ?? "Shoot"
+        guard let safeName = safeComponent(name) else { return safeStamp }
+        return "\(safeStamp) \(safeName)"
     }
 
-    /// Shoot folder: root/Client/<date name>.
-    static func shootURL(root: URL, client: String, date: Date, name: String, dateFormat: String) -> URL {
-        root.appendingPathComponent(client.trimmingCharacters(in: .whitespaces))
-            .appendingPathComponent(folderName(date: date, name: name, dateFormat: dateFormat))
+    /// Shoot folder: root/Client/<date name>. Throws if the client isn't a usable folder name or
+    /// the result would escape `root`.
+    static func shootURL(root: URL, client: String, date: Date, name: String, dateFormat: String) throws -> URL {
+        guard let clientFolder = safeComponent(client) else { throw PathError.invalidClient }
+        let shoot = root.appendingPathComponent(clientFolder, isDirectory: true)
+            .appendingPathComponent(folderName(date: date, name: name, dateFormat: dateFormat), isDirectory: true)
+        guard isInside(shoot, root: root) else { throw PathError.outsideWorkFolder }
+        return shoot
     }
 
     /// Footage/Photo/<camera folder> per missing file. Cameras with an empty folder name use their model;
@@ -48,12 +86,12 @@ nonisolated enum ShootPlanner {
     static func jobs(missing: [MediaFile], shoot: URL, cameras: [Camera], fallback: String) -> [CopyJob] {
         var folderFor: [String: String] = [:]
         for camera in cameras {
-            let trimmed = camera.folderName.trimmingCharacters(in: .whitespaces)
-            folderFor[camera.id] = trimmed.isEmpty ? camera.model : trimmed
+            folderFor[camera.id] = safeComponent(camera.folderName) ?? safeComponent(camera.model) ?? "Camera"
         }
+        let fallbackFolder = safeComponent(fallback) ?? "Card"
         return missing.map { file in
             let section = file.kind == .photo ? "Photo" : "Footage"
-            let dir = shoot.appendingPathComponent(section).appendingPathComponent(folderFor[file.cameraID] ?? fallback)
+            let dir = shoot.appendingPathComponent(section).appendingPathComponent(folderFor[file.cameraID] ?? fallbackFolder)
             return CopyJob(file: file, destDir: dir)
         }
     }
