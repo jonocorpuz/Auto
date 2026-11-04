@@ -15,7 +15,7 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 | Area | Backed | Auto target |
 | :--- | :--- | :--- |
 | Scope | Ingest + verify only | Ingest **+ editing pipeline** |
-| App shell | AppKit `NSStatusItem` + `NSPopover`, SwiftPM + `build.sh` | SwiftUI `MenuBarExtra`, Xcode project, shared scheme |
+| App shell | AppKit `NSStatusItem` + `NSPopover`, SwiftPM + `build.sh` | Menu bar status item that opens a full app window (no dropdown), Xcode project, shared scheme |
 | State | `ObservableObject` + Combine | `@Observable` |
 | Tests | None | Swift Testing on every Core engine |
 | Destinations | One work folder | Primary + optional backup destination(s) |
@@ -42,7 +42,8 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - [ ] `CopyEngine`: streamed copy, temp name + atomic rename, size + hash verify, unique names, cancel
 - [ ] `VolumeWatcher`: detect card mount/unmount, ignore non-card volumes
 - [ ] New Shoot flow: client autocomplete → shoot name → folder preview (`Client/YYYY-MM-DD Shoot/Camera/`)
-- [ ] Status icon states: idle / unbacked / copying / backed / error
+- [ ] Status item: click opens the main app window (no dropdown/popover); right-click menu for Settings / Quit
+- [ ] Status icon states: idle / unbacked / copying / backed / error (static "a." with tinted dot, no animation)
 - [ ] `-AutoFixtureCard <path>` launch argument for manual testing
 
 ## Phase 3: Editing pipeline
@@ -70,7 +71,6 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 
 - xxHash for faster verification on large cards
 - Proxy generation in Resolve instead of AVFoundation
-- Port Backed's `OrbView` / status visuals
 
 ## Key Decisions
 
@@ -82,3 +82,5 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 | 2026-11-03 | macOS 26 minimum | Latest SwiftUI APIs; personal tool |
 | 2026-11-03 | Multi-agent workflow with model routing (`.claude/agents/`) | Parallel slices; cheap models for search/docs, opus for design/review |
 | 2026-11-03 | Micro-commits, no AI co-author, never auto-push | Developer preference |
+| 2026-11-03 | No menu bar dropdown: the status item opens the main window | Developer wants the app to live in the menu bar but open as a real window |
+| 2026-11-03 | Drop Backed's animated `OrbView` | Developer found it cheesy; status is shown with a static tinted dot |
