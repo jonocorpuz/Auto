@@ -76,6 +76,23 @@ struct CopyEngineTests {
         #expect(names == ["A.MP4"])
     }
 
+    @Test func renameNeverOverwritesRacedDestination() throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let partial = f.dst.appendingPathComponent(".A.MP4.\(UUID().uuidString).auto-partial")
+        try Data(repeating: 0x01, count: 100).write(to: partial)
+        // Destination appears after name selection but before the rename.
+        let dest = f.dst.appendingPathComponent("A.MP4")
+        try Data(repeating: 0x99, count: 100).write(to: dest)
+        try Data(repeating: 0x98, count: 100).write(to: f.dst.appendingPathComponent("A 2.MP4"))
+
+        let final = try CopyEngine.moveWithoutOverwriting(partial, to: dest)
+        #expect(final.lastPathComponent == "A 3.MP4")
+        #expect(try Data(contentsOf: dest) == Data(repeating: 0x99, count: 100))
+        #expect(try Data(contentsOf: f.dst.appendingPathComponent("A 2.MP4")) == Data(repeating: 0x98, count: 100))
+        #expect(try Data(contentsOf: final) == Data(repeating: 0x01, count: 100))
+        #expect(!FileManager.default.fileExists(atPath: partial.path))
+    }
+
     @Test func sourceIsUnchangedAfterCopy() async throws {
         let f = try fixture(); defer { f.cleanup() }
         let file = try makeFile(in: f.src, "A.MP4", bytes: 50_000)

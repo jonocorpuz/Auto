@@ -113,20 +113,21 @@ nonisolated final class CopyEngine: @unchecked Sendable {
                 onBytes(job.file.size)
                 return
             }
-            dest = uniqueURL(for: dest)
+            dest = Self.uniqueURL(for: dest)
         }
 
-        let partial = job.destDir.appendingPathComponent(".\(dest.lastPathComponent).auto-partial")
-        try? fm.removeItem(at: partial)
-        guard fm.createFile(atPath: partial.path, contents: nil) else {
+        // Unique, exclusively-created partial: never touches anyone else's file.
+        let partial = job.destDir.appendingPathComponent(".\(dest.lastPathComponent).\(UUID().uuidString).auto-partial")
+        let fd = open(partial.path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        guard fd >= 0 else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: partial.path])
         }
 
         do {
             var sourceHash = Insecure.MD5()
             var written: Int64 = 0
+            let writer = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
             let reader = try FileHandle(forReadingFrom: source)
-            let writer = try FileHandle(forWritingTo: partial)
             defer { try? reader.close(); try? writer.close() }
             while true {
                 if isCancelled { throw CopyError.cancelled }
@@ -147,7 +148,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             if let created = attrs?[.creationDate] { keep[.creationDate] = created }
             if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
             try? fm.setAttributes(keep, ofItemAtPath: partial.path)
-            try fm.moveItem(at: partial, to: dest)
+            _ = try Self.moveWithoutOverwriting(partial, to: dest)
         } catch {
             // Any failure after the partial exists (I/O, cancel, verify, rename) removes it.
             try? fm.removeItem(at: partial)
@@ -168,7 +169,22 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         return Data(md5.finalize())
     }
 
-    private func uniqueURL(for url: URL) -> URL {
+    /// Atomically renames `src` to `dest` only if `dest` doesn't exist (RENAME_EXCL).
+    /// On collision picks the next free name and retries (bounded). Returns the final URL.
+    static func moveWithoutOverwriting(_ src: URL, to dest: URL, maxAttempts: Int = 100) throws -> URL {
+        var target = dest
+        for _ in 0..<maxAttempts {
+            if renamex_np(src.path, target.path, UInt32(RENAME_EXCL)) == 0 { return target }
+            let err = errno
+            guard err == EEXIST else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(err), userInfo: [NSFilePathErrorKey: target.path])
+            }
+            target = uniqueURL(for: target)
+        }
+        throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: dest.path])
+    }
+
+    static func uniqueURL(for url: URL) -> URL {
         let base = url.deletingPathExtension().lastPathComponent
         let ext = url.pathExtension
         let dir = url.deletingLastPathComponent()
