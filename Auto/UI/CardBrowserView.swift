@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Finder-style, read-only view of one card's files, grouped into "Not Backed Up" and the shoots
-/// that hold verified copies. Selecting files does nothing yet; it's just another way to look.
+/// that hold verified copies. Read-only except "Add to Shoot", which goes through the same checked
+/// add-footage flow as the sheet. Space or double-click opens Quick Look.
 struct CardBrowserView: View {
     @Environment(AppModel.self) private var model
     let card: Card
@@ -19,6 +20,8 @@ struct CardBrowserView: View {
     @State private var selection = Set<MediaFile.ID>()
     @AppStorage("cardBrowserMode") private var mode: Mode = .icons
     @AppStorage("cardBrowserIconSize") private var iconSize: Double = 110
+    @State private var adding = false
+    @State private var actionError: String?
 
     var body: some View {
         let groups = model.browserGroups(for: card)
@@ -40,6 +43,19 @@ struct CardBrowserView: View {
         }
         .onChange(of: groups.map(\.kind)) { _, kinds in
             if let location, !kinds.contains(location) { place = .all }
+        }
+        .onChange(of: place) { selection = [] }
+        .onChange(of: card.files) { _, files in
+            let present = Set(files.map(\.id))
+            selection = selection.filter(present.contains)
+        }
+        .alert("Couldn't add to shoot", isPresented: Binding(
+            get: { actionError != nil },
+            set: { if !$0 { actionError = nil } }
+        )) {
+            Button("OK") { actionError = nil }
+        } message: {
+            Text(actionError ?? "")
         }
         .onKeyPress(.escape) {
             if selection.isEmpty { model.browsingCardID = nil } else { selection = [] }
@@ -71,6 +87,23 @@ struct CardBrowserView: View {
             .lineLimit(1)
 
             Spacer()
+
+            let chosen = selectedFiles(groups)
+            Button { quickLook(chosen, all: groups) } label: {
+                Image(systemName: "eye")
+            }
+            .buttonStyle(.borderless)
+            .help("Quick Look (Space)")
+            .keyboardShortcut(.space, modifiers: [])
+            .disabled(chosen.isEmpty && card.files.isEmpty)
+
+            Button { model.revealInFinder(chosen.isEmpty ? [card.volume] : chosen.map(\.url)) } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.borderless)
+            .help(chosen.isEmpty ? "Show card in Finder" : "Show selection in Finder")
+
+            addToShootMenu(chosen, groups: groups)
 
             if mode == .icons {
                 Slider(value: $iconSize, in: 72...200)
@@ -142,6 +175,11 @@ struct CardBrowserView: View {
                         ForEach(group.files) { file in
                             FileIcon(file: file, size: iconSize, selected: selection.contains(file.id))
                                 .onTapGesture { select(file, extend: NSEvent.modifierFlags.contains(.command)) }
+                                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                                    selection = [file.id]
+                                    quickLook([file], all: groups)
+                                })
+                                .contextMenu { fileMenu(targets(for: file, in: groups), groups: groups) }
                         }
                     } header: {
                         GroupHeader(group: group)
@@ -185,6 +223,102 @@ struct CardBrowserView: View {
             }
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .contextMenu(forSelectionType: MediaFile.ID.self) { ids in
+            let files = orderedFiles(groups).filter { ids.contains($0.id) }
+            if !files.isEmpty { fileMenu(files, groups: groups) }
+        } primaryAction: { ids in
+            quickLook(orderedFiles(groups).filter { ids.contains($0.id) }, all: groups)
+        }
+    }
+
+    // MARK: Actions
+
+    private func orderedFiles(_ groups: [CardBrowser.Group]) -> [MediaFile] {
+        groups.flatMap(\.files)
+    }
+
+    /// Selected files in on-screen order.
+    private func selectedFiles(_ groups: [CardBrowser.Group]) -> [MediaFile] {
+        orderedFiles(groups).filter { selection.contains($0.id) }
+    }
+
+    /// Right-clicking a selected file acts on the whole selection; otherwise on just that file.
+    private func targets(for file: MediaFile, in groups: [CardBrowser.Group]) -> [MediaFile] {
+        selection.contains(file.id) ? selectedFiles(groups) : [file]
+    }
+
+    /// With a selection, previews it; with none, previews everything shown.
+    private func quickLook(_ files: [MediaFile], all groups: [CardBrowser.Group]) {
+        let list = files.isEmpty ? orderedFiles(groups) : files
+        model.quickLook(list.map(\.url))
+    }
+
+    @ViewBuilder private func fileMenu(_ files: [MediaFile], groups: [CardBrowser.Group]) -> some View {
+        Button("Quick Look") { quickLook(files, all: groups) }
+        Button("Show in Finder") { model.revealInFinder(files.map(\.url)) }
+        let copies = files.compactMap { card.backups[$0.url] }
+        if !copies.isEmpty {
+            Button(copies.count == files.count ? "Show Backup in Finder" : "Show Backups in Finder (\(copies.count))") {
+                model.revealInFinder(copies)
+            }
+        }
+        Divider()
+        addToShootItems(files, groups: groups)
+    }
+
+    private var onlineShoots: [ShootItem] {
+        model.shoots.filter { if case .online? = $0.availability { true } else { false } }
+    }
+
+    private var canAdd: Bool {
+        guard !adding else { return false }
+        switch card.phase {
+        case .scanning, .copying, .empty, .unreadable: return false
+        default: return card.engine == nil
+        }
+    }
+
+    private func addToShootMenu(_ files: [MediaFile], groups: [CardBrowser.Group]) -> some View {
+        Menu {
+            addToShootItems(files, groups: groups)
+        } label: {
+            Label(adding ? "Adding…" : "Add to Shoot", systemImage: "plus.rectangle.on.folder")
+        }
+        .menuStyle(.button)
+        .fixedSize()
+        .disabled(files.isEmpty || !canAdd || onlineShoots.isEmpty)
+        .help(files.isEmpty ? "Select files to add them to a shoot" : "Copy the selected files into a shoot")
+    }
+
+    @ViewBuilder private func addToShootItems(_ files: [MediaFile], groups: [CardBrowser.Group]) -> some View {
+        let shoots = onlineShoots
+        if shoots.isEmpty {
+            Text("No shoots online")
+        } else {
+            Section("Add \(Format.count(files.count, "file", "files")) to") {
+                ForEach(shoots) { item in
+                    // Files already verified inside this shoot are skipped; disable if that's all of them.
+                    let inShoot = Set(groups.first { $0.kind == .shoot(item.id) }?.files.map(\.id) ?? [])
+                    Button("\(item.record.name) — \(item.date.formatted(date: .abbreviated, time: .omitted))") {
+                        add(files, to: item.id)
+                    }
+                    .disabled(!canAdd || files.allSatisfy { inShoot.contains($0.id) })
+                }
+            }
+        }
+    }
+
+    private func add(_ files: [MediaFile], to shootID: UUID) {
+        adding = true
+        let urls = Set(files.map(\.url))
+        Task {
+            defer { adding = false }
+            do {
+                try await model.addFiles(urls, from: card.id, toShoot: shootID)
+            } catch {
+                actionError = error.localizedDescription
+            }
+        }
     }
 
     private func statusBar(_ groups: [CardBrowser.Group]) -> some View {
@@ -192,6 +326,10 @@ struct CardBrowserView: View {
         let bytes = groups.reduce(Int64(0)) { $0 + $1.bytes }
         var text = "\(Format.count(count, "item", "items")) · \(Format.bytes(bytes))"
         if !selection.isEmpty { text = "\(selection.count) of " + text + " selected" }
+        if card.phase == .copying {
+            let p = card.progress
+            text += " — Copying \(min(p.filesDone + 1, p.filesTotal)) of \(p.filesTotal)…"
+        }
         return Text(text)
             .font(.caption)
             .foregroundStyle(.secondary)
