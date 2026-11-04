@@ -42,6 +42,7 @@ flowchart TD
         ShootFs["ShootFolders\ncreate / adopt, sidecar write"]
         Registry["ShootRegistry / ShootStore\nknown shoots, availability"]
         Coverage["ShootCoverageChecker\nchecksum coverage inside a shoot"]
+        Membership["ShootMembership\nper-shoot verified copies for the card browser"]
     end
 
     subgraph Integrations ["Integrations (Auto/Integrations)"]
@@ -79,6 +80,7 @@ flowchart TD
     Model --> ShootFs
     Model --> Registry
     Model --> Coverage
+    Model --> Membership
     Model --> Thumbs
     Watcher -.-> Cards
     Scanner --> Cards
@@ -89,6 +91,7 @@ flowchart TD
     Copy --> Work
     ShootFs --> Work
     Coverage --> Work
+    Membership --> Work
     Registry --> ShootReg
     Model -.-> Transcode
     Model -.-> Resolve
@@ -112,7 +115,7 @@ Auto/                         # repo root
 │   │   ├── AutoApp.swift     #   @main; placeholder Settings scene (Cmd-comma goes to AppDelegate)
 │   │   ├── AppDelegate.swift #   NSStatusItem (left click: window, right click: menu); main window (Settings is a tab)
 │   │   ├── AppTab.swift      #   sidebar tabs + light/dark AppearanceMode
-│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage)
+│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage, browser membership)
 │   │   ├── ShootItem.swift   #   ShootItem (registry record + availability, summary, thumbnail); ShootSheetRequest
 │   │   ├── ShootCoverageState.swift # CoverageKey (shoot, card) and CoverageState per pair
 │   │   └── Card.swift        #   one connected card: volume, files, cameras, phase, copy plan
@@ -147,12 +150,15 @@ Auto/                         # repo root
 │   │   ├── ShootFolders.swift      #   classify names/folders, create shoots (exclusive mkdir, sidecar write), adopt
 │   │   ├── ShootRegistry.swift     #   registry records, ShootStore (load/save/quarantine), availability, discovery
 │   │   ├── ShootCoverage.swift     #   checksum coverage of a card's day inside a shoot folder (cancellable, off main)
-│   │   ├── CardBrowser.swift #   groups card files: Not Backed Up / per shoot (deepest folder wins) / Backed Up Elsewhere
+│   │   ├── ShootMembership.swift   #   per-shoot verified copies for the card browser (sequential, read-only, excludes nested shoots, never reports partial results)
+│   │   ├── CardBrowser.swift #   groups card files: Not Backed Up / one group per shoot holding a verified copy / Backed Up Elsewhere
+│   │   ├── GridSelection.swift     #   Finder-style selection and arrow/Home/End navigation over sectioned grids (pure model, no AppKit)
 │   │   ├── ShootSummary.swift      #   shoot counts + representative file
 │   │   └── MainThreadProbe.swift   #   records whether instrumented engines ran on main (tests assert it)
 │   ├── Integrations/         # adapters behind protocols; faked in tests
 │   │   ├── ThumbnailProvider.swift #   protocol: preview image for a media file
 │   │   ├── QLThumbnailProvider.swift # QuickLookThumbnailing adapter
+│   │   ├── QuickLookPreviewer.swift # shared Quick Look panel; takes control via the responder chain (AppDelegate forwards)
 │   │   └── (planned, Phase 3) Resolve / transcoder adapters
 │   └── Assets.xcassets
 ├── AutoTests/                # Swift Testing target (hosted in Auto.app)
@@ -233,6 +239,8 @@ sequenceDiagram
         Model->>UI: Status = backed, or Not backed up (unselected files remain missing)
     end
 ```
+
+Card browser membership is a separate, read-only pass. While the browsed card is on screen and the main window is visible, `AppModel` runs `ShootMembership` once per online shoot (sequentially, off main, excluding nested shoots) and stores the verified copies in `browserMembership`. Scan, copy and recompute cancel and invalidate it, and a generation guard drops stale results. It never feeds the backed-up status or Add Footage coverage, and a partial or cancelled shoot is never reported.
 
 The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet and is not in these diagrams.
 
