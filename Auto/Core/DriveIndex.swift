@@ -3,7 +3,10 @@ import Foundation
 nonisolated enum DriveIndex {
     /// Every media file on the drive, grouped by name+size key. Same-key files are candidates only:
     /// they still need a checksum comparison before a card file counts as backed up.
-    static func build(_ root: URL) async -> [String: [URL]] {
+    /// `@concurrent`: with approachable concurrency a plain nonisolated async func would run on the
+    /// caller's actor (the main actor) and freeze the UI while walking the drive.
+    @concurrent static func build(_ root: URL) async -> [String: [URL]] {
+        MainThreadProbe.shared.mark("DriveIndex.build")
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
         guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [:] }
         var index: [String: [URL]] = [:]

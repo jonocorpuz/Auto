@@ -9,7 +9,9 @@ nonisolated enum CardScanner {
         var shootDate: Date?
     }
 
-    static func scan(_ volume: URL, volumeName: String) async -> Result {
+    /// `@concurrent` so the walk never runs on the caller's (main) actor.
+    @concurrent static func scan(_ volume: URL, volumeName: String) async -> Result {
+        MainThreadProbe.shared.mark("CardScanner.scan")
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey]
         guard let walker = FileManager.default.enumerator(at: volume, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
             return Result(files: [], cameras: [], shootDate: nil)
@@ -49,7 +51,7 @@ nonisolated enum CardScanner {
 
     // MARK: Camera detection
 
-    static func detectCamera(_ url: URL, kind: MediaKind, fallback: String) async -> Camera {
+    @concurrent static func detectCamera(_ url: URL, kind: MediaKind, fallback: String) async -> Camera {
         var model: String?
         var serial: String?
 
