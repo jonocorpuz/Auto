@@ -76,6 +76,8 @@ final class AppModel {
     /// Files CopyEngine copied and verified this session, with their exact destinations.
     @ObservationIgnored private var sessionCopies: [CopiedFile] = []
     @ObservationIgnored private var indexGeneration = 0
+    /// Identity of the working volume the current index was built for (nil: none).
+    @ObservationIgnored private var indexedVolumeID: String?
     @ObservationIgnored private lazy var watcher = VolumeWatcher(workingVolume: { [weak self] in self?.workingVolume })
 
     init() {
@@ -150,6 +152,9 @@ final class AppModel {
             added = true
         }
         if added && mountedNew && autoOpen { openMainWindow() }
+
+        // The work drive was plugged in, unplugged or swapped: the index is stale.
+        if workingVolume.map(VolumeIdentity.of) != indexedVolumeID { rebuildIndex() }
     }
 
     // MARK: Scanning
@@ -168,6 +173,7 @@ final class AppModel {
     func rebuildIndex() {
         indexGeneration += 1
         let generation = indexGeneration
+        indexedVolumeID = workingVolume.map(VolumeIdentity.of)
         guard let volume = workingVolume else {
             index = [:]
             indexing = false
