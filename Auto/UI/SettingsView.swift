@@ -4,6 +4,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        @Bindable var model = model
         Form {
             LabeledContent("Work folder") {
                 HStack {
@@ -11,22 +12,18 @@ struct SettingsView: View {
                         .foregroundStyle(model.workRoot == nil ? .secondary : .primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Button("Choose…", action: chooseFolder)
+                    Button("Choose…") { model.setWorkRoot() }
                 }
             }
+            TextField("Date format", text: $model.dateFormat, prompt: Text(ShootPlanner.defaultDateFormat))
+            LabeledContent("Example") {
+                Text(model.shootFolderName(date: Date(), name: "Brand film")).foregroundStyle(.secondary)
+            }
+            Toggle("Open Auto when a card is connected", isOn: $model.autoOpen)
         }
         .formStyle(.grouped)
         .frame(width: 460)
         .padding()
-    }
-
-    private func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        if panel.runModal() == .OK { model.workRoot = panel.url }
     }
 }
 
