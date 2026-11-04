@@ -204,8 +204,7 @@ final class AppModel {
     /// Name+size hits are just candidates; `BackupVerifier` hashes them off the main actor.
     private func recompute(_ card: Card) {
         if case .copying = card.phase { return }
-        card.verifier?.cancel()
-        card.verifier = nil
+        stopVerifier(card)
 
         // No media, or a scan error: never verify, never backed.
         if let phase = CardPhase.afterScan(fileCount: card.files.count, error: card.scanError) {
@@ -245,11 +244,17 @@ final class AppModel {
             let outcome = await verifier.run(triage.toVerify, candidates: candidates, cache: verifications) { progress in
                 card.verifyProgress = progress
             }
-            // Superseded by a newer recompute, or the card went away.
+            // Superseded by a newer recompute, a copy/plan that took over, or the card went away.
             guard !outcome.cancelled, card.verifier === verifier else { return }
             card.verifier = nil
+            guard card.phase == .verifying else { return }
             finishRecompute(card, results: triage.settled.merging(outcome.results) { $1 })
         }
+    }
+
+    private func stopVerifier(_ card: Card) {
+        card.verifier?.cancel()
+        card.verifier = nil
     }
 
     private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {
@@ -292,6 +297,8 @@ final class AppModel {
         let shoot = ShootPlanner.shootURL(root: root, client: client, date: date, name: shootName, dateFormat: dateFormat)
         // Copies onto a card never count as a backup (e.g. the work folder was set on a card).
         if isOnCard(shoot) { throw CardDestinationError() }
+        guard card.engine == nil else { return }
+        stopVerifier(card)
         let jobs = ShootPlanner.jobs(missing: card.missing, shoot: shoot, cameras: cameras, fallback: card.name)
 
         let fm = FileManager.default
@@ -321,6 +328,8 @@ final class AppModel {
             alert.runModal()
             return
         }
+        guard card.engine == nil else { return }
+        stopVerifier(card)
         card.plan = ShootPlanner.flatPlan(missing: card.missing, into: dir)
         card.phase = .ready
     }
@@ -343,6 +352,7 @@ final class AppModel {
     }
 
     func discardPlan(_ card: Card) {
+        guard card.engine == nil else { return }
         card.plan = nil
         recompute(card)
     }
@@ -356,7 +366,9 @@ final class AppModel {
     // MARK: Copying
 
     func copy(_ card: Card) {
-        guard let plan = card.plan else { return }
+        // One engine per card; a running verifier yields to the copy.
+        guard let plan = card.plan, card.engine == nil, card.phase != .copying else { return }
+        stopVerifier(card)
         if isOnCard(plan.destinationRoot) {
             card.phase = .failed(CardDestinationError().localizedDescription)
             return
@@ -398,10 +410,15 @@ final class AppModel {
         card.engine?.cancel()
     }
 
+    /// Retries the copy if there is a plan, otherwise re-checks the card. Never both at once.
     func retry(_ card: Card) {
-        card.phase = .needsBackup
-        recompute(card)
-        if card.plan != nil { copy(card) }
+        guard card.engine == nil else { return }
+        if card.plan != nil {
+            copy(card)
+        } else {
+            card.phase = .needsBackup
+            recompute(card)
+        }
     }
 
     func eject(_ card: Card) {
