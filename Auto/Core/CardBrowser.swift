@@ -2,7 +2,7 @@ import Foundation
 
 /// Groups a card's files for the read-only card browser: files with no verified copy first,
 /// then one group per shoot that holds verified copies, then copies that live outside any shoot.
-/// Pure: no I/O, so it's safe to call from views.
+/// Pure: no I/O (path containment is lexical, like `ShootPlanner.isInside`), so it's safe to call from views.
 nonisolated enum CardBrowser {
     enum GroupKind: Sendable, Hashable {
         case notBackedUp
@@ -19,7 +19,7 @@ nonisolated enum CardBrowser {
         var bytes: Int64 { files.reduce(0) { $0 + $1.size } }
     }
 
-    struct ShootRef: Sendable, Hashable {
+    struct ShootRef: Sendable, Hashable, Equatable {
         let id: UUID
         let name: String
         let folder: URL
@@ -64,6 +64,6 @@ nonisolated enum CardBrowser {
     }
 
     private static func canonical(_ url: URL) -> String {
-        url.resolvingSymlinksInPath().standardizedFileURL.path
+        url.standardizedFileURL.path
     }
 }
