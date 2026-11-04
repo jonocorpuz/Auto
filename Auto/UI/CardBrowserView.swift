@@ -30,6 +30,7 @@ struct CardBrowserView: View {
     var body: some View {
         let groups = model.browserGroups(for: card)
         let shown = location.map { kind in groups.filter { $0.kind == kind } } ?? groups
+        let shownIDs = Set(CardBrowser.uniqueFiles(shown).map(\.id))
         VStack(spacing: 0) {
             toolbar(groups: groups)
             Divider().overlay(Theme.border)
@@ -46,13 +47,14 @@ struct CardBrowserView: View {
             }
         }
         .onAppear { model.browserAppeared(card.id) }
+        .onChange(of: mode) { _, new in if new == .icons { gridFocused = true } }
         .onDisappear { model.browserDisappeared(card.id) }
         .onChange(of: groups.map(\.kind)) { _, kinds in
             if let location, !kinds.contains(location) { place = .all }
         }
         .onChange(of: place) { selection = [] }
-        .onChange(of: card.files) { _, files in
-            let present = Set(files.map(\.id))
+        // Selection only ever holds files that are shown (membership can move files out of this place).
+        .onChange(of: shownIDs) { _, present in
             grid.prune(keeping: present)
             selection = selection.filter(present.contains)
         }
@@ -82,7 +84,7 @@ struct CardBrowserView: View {
         .background {
             Button("") {
                 if mode == .icons {
-                    grid.selectAll(in: gridLayout(shown, spacing: 6))
+                    grid.selectAll(in: gridLayout(shown))
                     selection = grid.selected
                 } else {
                     selection = Set(shown.flatMap(\.files).map(\.id))
@@ -212,36 +214,43 @@ struct CardBrowserView: View {
     }
 
     private func iconGrid(_ groups: [CardBrowser.Group]) -> some View {
-        let spacing = 6.0
         return ScrollViewReader { proxy in
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: iconSize + 16), spacing: spacing)], alignment: .leading,
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: iconSize + 16), spacing: Self.gridSpacing)], alignment: .leading,
                           spacing: 10, pinnedViews: .sectionHeaders) {
-                    ForEach(groups) { group in
+                    ForEach(Array(groups.enumerated()), id: \.element.id) { section, group in
                         Section {
                             ForEach(group.files) { file in
                                 FileIcon(file: file, size: iconSize, selected: selection.contains(file.id))
-                                    .id(IconID(kind: group.kind, file: file.id))
+                                    // Scroll target sits a header's height above the cell so a minimal
+                                    // scroll upward doesn't leave the icon under the pinned header.
+                                    .overlay(alignment: .top) {
+                                        Color.clear.frame(width: 1, height: 1)
+                                            .offset(y: -Self.headerHeight)
+                                            .id(IconID(kind: group.kind, file: file.id))
+                                    }
                                     .onTapGesture {
                                         gridFocused = true
-                                        clickIcon(file, groups: groups)
+                                        clickIcon(file, section: section, groups: groups)
                                     }
                                     .simultaneousGesture(TapGesture(count: 2).onEnded {
-                                        grid.click(file.id)
+                                        grid.click(file.id, section: section)
                                         selection = grid.selected
                                         quickLook([file])
                                     })
-                                    .contextMenu { fileMenu(targets(for: file, in: groups), groups: groups) }
+                                    // Built only when the menu opens, not for every cell on every body pass.
+                                    .contextMenu { LazyFileMenu(owner: self, file: file, groups: groups) }
                             }
                         } header: {
                             GroupHeader(group: group)
                         }
                     }
                 }
+                // Measured inside the scroll view, so an always-visible scrollbar is already excluded.
+                .onGeometryChange(for: Double.self) { $0.size.width } action: { gridWidth = $0 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 12)
             }
-            .onGeometryChange(for: Double.self) { $0.size.width } action: { gridWidth = $0 }
             .background(Theme.surface)
             .contentShape(Rectangle())
             .onTapGesture {
@@ -252,9 +261,9 @@ struct CardBrowserView: View {
             .focusable()
             .focusEffectDisabled()
             .focused($gridFocused)
-            .onAppear { gridFocused = true }
+            .task { gridFocused = true }
             .onKeyPress(phases: [.down, .repeat]) { press in
-                handleKey(press, groups: groups, proxy: proxy, spacing: spacing)
+                handleKey(press, groups: groups, proxy: proxy)
             }
         }
     }
@@ -276,27 +285,33 @@ struct CardBrowserView: View {
         var id: ID { ID(kind: kind, file: file.id) }
     }
 
-    private func gridLayout(_ groups: [CardBrowser.Group], spacing: Double) -> GridLayout<MediaFile.ID> {
+    private static let gridSpacing = 6.0
+    /// Approximate height of the pinned group header.
+    private static let headerHeight = 34.0
+
+    /// `gridWidth` is the grid's own width (horizontal padding already excluded).
+    private func gridLayout(_ groups: [CardBrowser.Group]) -> GridLayout<MediaFile.ID> {
         let columns = GridLayout<MediaFile.ID>.columnCount(
-            width: gridWidth, itemMinimum: iconSize + 16, spacing: spacing, padding: 12)
+            width: gridWidth, itemMinimum: iconSize + 16, spacing: Self.gridSpacing, padding: 0)
         return GridLayout(sections: groups.map { $0.files.map(\.id) }, columns: columns)
     }
 
-    private func clickIcon(_ file: MediaFile, groups: [CardBrowser.Group]) {
+    private func clickIcon(_ file: MediaFile, section: Int, groups: [CardBrowser.Group]) {
         let flags = NSEvent.modifierFlags
         if flags.contains(.command) {
-            grid.toggle(file.id)
+            grid.toggle(file.id, section: section)
         } else if flags.contains(.shift) {
-            grid.extend(to: file.id, in: gridLayout(groups, spacing: 6))
+            grid.extend(to: file.id, section: section, in: gridLayout(groups))
         } else {
-            grid.click(file.id)
+            grid.click(file.id, section: section)
         }
         selection = grid.selected
     }
 
-    private func handleKey(_ press: KeyPress, groups: [CardBrowser.Group], proxy: ScrollViewProxy,
-                           spacing: Double) -> KeyPress.Result {
-        let layout = gridLayout(groups, spacing: spacing)
+    private func handleKey(_ press: KeyPress, groups: [CardBrowser.Group], proxy: ScrollViewProxy) -> KeyPress.Result {
+        let layout = gridLayout(groups)
+        // Option/Control arrows mean something else (and Cmd-Up/Down aren't supported): leave them alone.
+        if press.modifiers.contains(.option) || press.modifiers.contains(.control) { return .ignored }
         if press.modifiers.contains(.command) {
             guard press.characters == "a", !press.modifiers.contains(.shift) else { return .ignored }
             grid.selectAll(in: layout)
@@ -315,9 +330,10 @@ struct CardBrowserView: View {
         }
         grid.move(direction, extend: press.modifiers.contains(.shift), in: layout)
         selection = grid.selected
-        // A file can sit in several groups; the grid resolves the cursor to its first occurrence.
-        if let cursor = grid.cursor, let group = groups.first(where: { $0.files.contains { $0.id == cursor } }) {
-            proxy.scrollTo(IconID(kind: group.kind, file: cursor))
+        // A file can sit in several groups; scroll to the icon the cursor is on.
+        if let cursor = grid.cursor,
+           let position = layout.position(of: cursor, preferring: grid.cursorSection) {
+            proxy.scrollTo(IconID(kind: groups[position.section].kind, file: cursor))
         }
         return .handled
     }
@@ -371,7 +387,20 @@ struct CardBrowserView: View {
                 group.files.filter { selection.contains($0.id) }.map { Row.ID(kind: group.kind, file: $0.id) }
             })
         } set: { rows in
-            selection = Set(rows.map(\.file))
+            // A plain click or arrow selects exactly that row's file.
+            if rows.count <= 1, !NSEvent.modifierFlags.contains(.command) {
+                selection = Set(rows.map(\.file))
+                return
+            }
+            // Otherwise diff against the rows shown selected: a file with several rows is deselected
+            // when any of its rows is removed and selected when any is added.
+            let old = Set(groups.flatMap { group in
+                group.files.filter { selection.contains($0.id) }.map { Row.ID(kind: group.kind, file: $0.id) }
+            })
+            var next = selection
+            next.subtract(old.subtracting(rows).map(\.file))
+            next.formUnion(rows.subtracting(old).map(\.file))
+            selection = next
         }
     }
 
@@ -392,7 +421,7 @@ struct CardBrowserView: View {
     }
 
     /// Right-clicking a selected file acts on the whole selection; otherwise on just that file.
-    private func targets(for file: MediaFile, in groups: [CardBrowser.Group]) -> [MediaFile] {
+    fileprivate func targets(for file: MediaFile, in groups: [CardBrowser.Group]) -> [MediaFile] {
         selection.contains(file.id) ? selectedFiles(groups) : [file]
     }
 
@@ -402,7 +431,7 @@ struct CardBrowserView: View {
         model.quickLook(files.map(\.url), toggle: toggle)
     }
 
-    @ViewBuilder private func fileMenu(_ files: [MediaFile], groups: [CardBrowser.Group]) -> some View {
+    @ViewBuilder fileprivate func fileMenu(_ files: [MediaFile], groups: [CardBrowser.Group]) -> some View {
         Button("Quick Look") { quickLook(files) }
         Button("Show in Finder") { model.revealInFinder(files.map(\.url)) }
         let copies = model.browserBackupCopies(files, in: location)
@@ -522,6 +551,18 @@ struct CardBrowserView: View {
 
 private extension CardBrowser.GroupKind {
     var shootID: UUID? { if case .shoot(let id) = self { id } else { nil } }
+}
+
+/// Context menu content for one icon. A separate view so its body (selected files, shoot membership)
+/// runs only when the menu opens.
+private struct LazyFileMenu: View {
+    let owner: CardBrowserView
+    let file: MediaFile
+    let groups: [CardBrowser.Group]
+
+    var body: some View {
+        owner.fileMenu(owner.targets(for: file, in: groups), groups: groups)
+    }
 }
 
 private struct LocationRow: View {
