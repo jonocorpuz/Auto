@@ -4,7 +4,7 @@ The architectural blueprint, module boundaries, data flows and design principles
 
 See also: [CLAUDE.md](CLAUDE.md), [ROADMAP.md](ROADMAP.md).
 
-> **Status:** `App/`, `UI/` and `Core/` exist (Phase 2 ingest parity, in progress). `Integrations/` and the Phase 3 pipeline are still the target design (see ROADMAP.md). Keep this file in sync as modules land.
+> **Status:** `App/`, `UI/` and `Core/` exist (Phase 2 ingest parity, in progress). `Integrations/` has the thumbnail adapter; Resolve and transcoding, and the Phase 3 pipeline, are still the target design (see ROADMAP.md). Keep this file in sync as modules land.
 
 ---
 
@@ -16,10 +16,11 @@ Auto is a single-process macOS menu bar app (`LSUIElement`, no Dock icon). It cl
 flowchart TD
     subgraph UILayer ["UI (Auto/UI)"]
         Main["MainView\nsidebar + content panel"]
-        Sidebar["Sidebar\ntabs, Ingest, account"]
-        Media["MediaView\ncards, shoots, drives"]
-        CardRow["CardRow\nper-card phase + actions"]
-        NewShoot["NewShootView\nshoot sheet"]
+        Sidebar["Sidebar\ntabs, New Shoot, account"]
+        Media["MediaView\ncards, Shoots grid (ShootTile), drives"]
+        CardRow["CardRow\nper-card phase, Add to Shoot, actions"]
+        NewShoot["NewShootView\nsheet: create shoot"]
+        AddFootage["AddFootageSheet\ncopy a card into a shoot"]
         Settings["SettingsView"]
     end
 
@@ -38,16 +39,21 @@ flowchart TD
         Verifier["BackupVerifier\nhash-compares card files"]
         Copy["CopyEngine\nverified copy"]
         Planner["ShootPlanner\nfolder layout, copy jobs, status"]
+        ShootFs["ShootFolders\ncreate / adopt, sidecar write"]
+        Registry["ShootRegistry / ShootStore\nknown shoots, availability"]
+        Coverage["ShootCoverageChecker\nchecksum coverage inside a shoot"]
     end
 
-    subgraph Integrations ["Integrations (Auto/Integrations), planned"]
-        Resolve["ResolveClient\nDaVinci Resolve scripting"]
-        Transcode["Transcoder\nAVFoundation / ffmpeg"]
+    subgraph Integrations ["Integrations (Auto/Integrations)"]
+        Thumbs["ThumbnailProvider\nQuickLook adapter"]
+        Resolve["ResolveClient\nDaVinci Resolve scripting (planned)"]
+        Transcode["Transcoder\nAVFoundation / ffmpeg (planned)"]
     end
 
     subgraph External ["Outside the app"]
         Cards[("Camera cards\n/Volumes/*")]
         Work[("Work folder\nShoot/Video|Photo/Camera/...")]
+        ShootReg[("~/Library/Application Support/Auto/shoots.json")]
         DR["DaVinci Resolve"]
     end
 
@@ -56,6 +62,7 @@ flowchart TD
     Delegate --> Main
     Delegate --> Settings
     Main --> CardRow
+    CardRow --> AddFootage
     CardRow --> NewShoot
     Main --> Model
     CardRow --> Model
@@ -69,6 +76,10 @@ flowchart TD
     Model --> Verifier
     Model --> Copy
     Model --> Planner
+    Model --> ShootFs
+    Model --> Registry
+    Model --> Coverage
+    Model --> Thumbs
     Watcher -.-> Cards
     Scanner --> Cards
     Verifier --> Cards
@@ -76,6 +87,9 @@ flowchart TD
     Index --> Work
     Verifier --> Work
     Copy --> Work
+    ShootFs --> Work
+    Coverage --> Work
+    Registry --> ShootReg
     Model -.-> Transcode
     Model -.-> Resolve
     Transcode -.-> Work
@@ -98,21 +112,26 @@ Auto/                         # repo root
 │   │   ├── AutoApp.swift     #   @main; placeholder Settings scene (Cmd-comma goes to AppDelegate)
 │   │   ├── AppDelegate.swift #   NSStatusItem (left click: window, right click: menu); main window (Settings is a tab)
 │   │   ├── AppTab.swift      #   sidebar tabs + light/dark AppearanceMode
-│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core
+│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage)
+│   │   ├── ShootItem.swift   #   ShootItem (registry record + availability, summary, thumbnail); ShootSheetRequest
+│   │   ├── ShootCoverageState.swift # CoverageKey (shoot, card) and CoverageState per pair
 │   │   └── Card.swift        #   one connected card: volume, files, cameras, phase, copy plan
 │   ├── UI/                   # SwiftUI views only, no I/O
 │   │   ├── MainView.swift    #   sidebar + floating content panel, switches on AppModel.selectedTab
-│   │   ├── Sidebar.swift     #   logo, tabs, Ingest button, account row (appearance menu)
-│   │   ├── MediaView.swift   #   Media tab: stats, cards, recent shoots (placeholder), drives
+│   │   ├── Sidebar.swift     #   logo, tabs, New Shoot button, account row (appearance menu)
+│   │   ├── MediaView.swift   #   Media tab: stats, cards, Shoots grid, drives
+│   │   ├── ShootTile.swift   #   one shoot in the grid: thumbnail, counts, offline/missing state, actions
 │   │   ├── EditPlaceholderView.swift # empty Video Edit / Photo Edit tabs
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
-│   │   ├── CardRow.swift     #   per-card header, phase content and actions, per-camera day chips; static StatusDot
+│   │   ├── CardRow.swift     #   per-card header, phase content and actions, Add to Shoot menu, per-camera day chips; static StatusDot
 │   │   ├── DayChip.swift     #   recording-day chip, shared by CardRow and the New Shoot sheet
-│   │   ├── NewShootView.swift#   sheet: shoot name, cameras and recording days, live folder preview (Theme tokens)
+│   │   ├── NewShootView.swift#   sheet: create mode (name, date, location) or add-footage mode
+│   │   ├── AddFootageSheet.swift #   add a card's footage to a shoot: card picker, completeness banner, Add N files
 │   │   └── SettingsView.swift#   Settings tab; "Soon" rows persist values nothing reads yet
 │   ├── Core/                 # pure, testable engines, no SwiftUI
 │   │   ├── VolumeWatcher.swift     #   NSWorkspace mount notifications, refresh off main
 │   │   ├── VolumeClassifier.swift  #   card vs work/backup drive vs ignored volume
+│   │   ├── VolumeIdentity.swift    #   card / volume identity (volume UUID + normalized path)
 │   │   ├── MediaTypes.swift        #   extensions → MediaKind, skipped folders
 │   │   ├── MediaFile.swift         #   MediaFile, MediaKind, Camera models
 │   │   ├── CardScanner.swift       #   enumerate media, camera detection, shoot date
@@ -121,8 +140,18 @@ Auto/                         # repo root
 │   │   ├── CopyEngine.swift        #   verified copy with cancel
 │   │   ├── ShootDays.swift         #   recording days per camera (ShootDays.byCamera)
 │   │   ├── ShootSelection.swift    #   (camera, day) include-set for a shoot; unselected files stay on the card
-│   │   └── ShootPlanner.swift      #   shoot folder naming, planned folder rows, copy jobs, destination checks (checkDestination/createDirectories), CardPhase, StatusAggregator
-│   ├── Integrations/         # (planned, Phase 3) Resolve / transcoder adapters behind protocols
+│   │   ├── ShootPlanner.swift      #   shoot folder naming, planned folder rows, copy jobs, destination checks (checkDestination/createDirectories), CardPhase, StatusAggregator
+│   │   ├── Shoot.swift             #   Shoot model (id, name, day, folder)
+│   │   ├── ShootSidecar.swift      #   `.auto-shoot.json` codec, versioned (v1)
+│   │   ├── ShootFolders.swift      #   classify names/folders, create shoots (exclusive mkdir, sidecar write), adopt
+│   │   ├── ShootRegistry.swift     #   registry records, ShootStore (load/save/quarantine), availability, discovery
+│   │   ├── ShootCoverage.swift     #   checksum coverage of a card's day inside a shoot folder (cancellable, off main)
+│   │   ├── ShootSummary.swift      #   shoot counts + representative file
+│   │   └── MainThreadProbe.swift   #   records whether instrumented engines ran on main (tests assert it)
+│   ├── Integrations/         # adapters behind protocols; faked in tests
+│   │   ├── ThumbnailProvider.swift #   protocol: preview image for a media file
+│   │   ├── QLThumbnailProvider.swift # QuickLookThumbnailing adapter
+│   │   └── (planned, Phase 3) Resolve / transcoder adapters
 │   └── Assets.xcassets
 ├── AutoTests/                # Swift Testing target (hosted in Auto.app)
 │   ├── Support/FixtureCard.swift   #   builds a fake card in a temp dir
@@ -144,7 +173,7 @@ Auto/                         # repo root
 | `UI` | `App` (via `@Environment(AppModel.self)`) | Touch files, volumes, processes |
 | `App` | `Core`, `Integrations` | Contain copy or pipeline logic itself |
 | `Core` | Foundation, CryptoKit, ImageIO, AVFoundation; AppKit/DiskArbitration in `VolumeWatcher` only | Import SwiftUI or reference `AppModel` |
-| `Integrations` | Foundation, `Process` | Be called directly from views |
+| `Integrations` | Foundation, `Process`, QuickLookThumbnailing | Be called directly from views |
 
 ---
 
@@ -159,7 +188,9 @@ sequenceDiagram
     participant Scanner as CardScanner
     participant Index as DriveIndex
     participant Verify as BackupVerifier
-    participant UI as MainView / CardRow
+    participant UI as MainView / CardRow / sheets
+    participant Folders as ShootFolders
+    participant Coverage as ShootCoverageChecker
     participant Copy as CopyEngine
 
     Watcher->>Model: Card mounted (/Volumes/X)
@@ -172,21 +203,31 @@ sequenceDiagram
     alt every file matched by hash
         Model->>UI: Status = backed (green)
     else files missing
-        Model->>UI: Status = unbacked, offer New Shoot
-        User->>UI: Enter shoot name, pick cameras and recording days
-        UI->>Model: createShoot(name, cameras, selection)
-        Model->>Model: ShootPlanner.createDirectories, checking each component first
-        Model->>Model: plan of selected files only (selection.filter)
-        Model->>Copy: run(jobs), each destination re-checked
-        loop each file
-            Copy->>Copy: stream to unique O_EXCL partial, hash while reading
-            Copy->>Copy: F_FULLFSYNC, re-read uncached, compare hashes
-            Copy->>Copy: renamex_np RENAME_EXCL to final name
-            Copy-->>Model: progress
+        Model->>UI: Status = unbacked, offer Add to Shoot or New Shoot
+        alt New Shoot (name, date, location)
+            User->>UI: Enter name, pick date and location
+            UI->>Model: createShoot(name, date, parent)
+            Model->>Folders: create: exclusive mkdir (parent must exist), sidecar O_EXCL temp, RENAME_EXCL
+            Folders-->>Model: Shoot (sidecar written)
+            Model->>Model: save registry (serialized)
+        else Add to Shoot (existing shoot, same or other card)
+            User->>UI: Pick shoot, check files in the shoot's date
+            UI->>Model: addFootage(shoot, card, selection)
+            Model->>Coverage: fresh coverage (checksum, only inside the shoot folder)
+            Coverage-->>Model: copies per card file
+            Model->>Model: re-read sidecar, plan only files not in the shoot
+            Model->>Model: create Video/Photo/<camera> inside the shoot
+            Model->>Copy: run(jobs), each destination re-checked
+            loop each file
+                Copy->>Copy: stream to unique O_EXCL partial, hash while reading
+                Copy->>Copy: F_FULLFSYNC, re-read uncached, compare hashes
+                Copy->>Copy: renamex_np RENAME_EXCL to final name
+                Copy-->>Model: progress
+            end
+            Copy-->>Model: outcome (copied keys, failures)
+            Model->>Coverage: re-check coverage for the shoot and card
         end
-        Copy-->>Model: outcome (copied keys, failures)
-        Model->>Model: prune copied files from card.missing
-        Model->>Verify: re-verify card files
+        Model->>Verify: re-verify card files (verified copies in any online shoot count)
         Model->>UI: Status = backed, or Not backed up (unselected files remain missing)
     end
 ```
@@ -208,14 +249,14 @@ The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet
 | Proxies | AVFoundation export (ffmpeg optional) | No bundled dependency for the default path. |
 | Resolve | DaVinci Resolve scripting API via `Process` (Python) | Same API the `davinci-resolve` MCP uses. Studio for external scripting. |
 | Tests | Swift Testing | Parameterized tests, clean `#expect` diagnostics. |
-| Persistence | `UserDefaults` for settings (work folder, auto-open, appearance); the drive index is rebuilt by scanning the work folder | Simple, no database. A persisted, resumable index is Phase 4. |
+| Persistence | `UserDefaults` for settings (work folder, auto-open, appearance); the drive index is rebuilt by scanning the work folder; known shoots in `~/Library/Application Support/Auto/shoots.json`; each shoot's identity in `.auto-shoot.json` in its folder | Simple, no database. A persisted, resumable index is Phase 4. The registry is a list of known shoots; the sidecar makes a shoot findable after a relocate or rescan. |
 
 ---
 
 ## 5. Resiliency & Failure Defense
 
 1. **Read-only sources:** Auto never writes to, renames or deletes anything on a card.
-2. **Verify before trust:** A card is backed up only when every file has a checksum-identical copy on the work drive (`BackupVerifier`). Name and size only pick candidates. Copies stream into a unique `O_EXCL` partial, are flushed with `F_FULLFSYNC`, re-read uncached, and are hashed again before they count.
+2. **Verify before trust:** A card is backed up only when every file has a checksum-identical copy on the work drive or in an online registered shoot (`BackupVerifier`). Shoot coverage (`ShootCoverageChecker`) reads only inside the shoot folder and never counts card files. Name and size only pick candidates. Copies stream into a unique `O_EXCL` partial, are flushed with `F_FULLFSYNC`, re-read uncached, and are hashed again before they count.
 3. **Never overwrite:** The final name is claimed with `renamex_np(RENAME_EXCL)`, so an existing file is never replaced. A name collision gets a unique suffix instead. An identical file from an earlier run is kept.
 4. **Fixture cards (the "mock mode"):**
    - Tests build a fake card in a temp directory (DCIM / PRIVATE/M4ROOT layouts, tiny media files and sidecars) via `AutoTests/Support/FixtureCard.swift`.
@@ -223,6 +264,7 @@ The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet
 5. **Integration fallbacks:** *(Phase 3, planned)* If Resolve isn't running or scripting is unavailable, the Resolve step reports "skipped: Resolve unavailable" and the ingest still counts as a success. Pipeline steps are independent and re-runnable.
 6. **Cancellation:** Copy and verification runs are cancellable. A failed or cancelled copy removes its partial file, so nothing half-written is left under a final name.
 7. **Destination checks:** Before any folder is created and again before each copy, the destination must resolve (symlinks resolved through the nearest existing ancestor) to inside the work folder, must not be on a card, and must not have a file where a folder should be (`ShootPlanner.checkDestination` / `createDirectories`). Path containment is lexical. Dangling symlinks are rejected, and the work folder itself is never created: if it is missing (drive unplugged), New Shoot and Copy stop with an error.
+8. **Shoot folders:** `ShootFolders` applies the same rules. The chosen parent must exist and is never created, each folder is made with an exclusive mkdir, and the sidecar is written with `O_EXCL` and `RENAME_EXCL` through a directory fd, after a card check. An existing folder is adopted only through the explicit "Use this folder". Forgetting a shoot removes its registry entry only. A corrupt registry is kept as `shoots.json.corrupt-<ts>`, never overwritten.
 
 ---
 
