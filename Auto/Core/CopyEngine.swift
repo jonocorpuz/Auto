@@ -16,8 +16,20 @@ nonisolated struct CopyProgress: Sendable {
     var fraction: Double { bytesTotal > 0 ? Double(bytesDone) / Double(bytesTotal) : 0 }
 }
 
+/// A card file that is now on the destination, proven identical by checksum.
+nonisolated struct CopiedFile: Sendable, Equatable {
+    let file: MediaFile
+    /// Final destination file (after any unique renaming).
+    let destination: URL
+    /// Destination mtime read right after verification, for `VerificationCache`.
+    let destinationModified: Date?
+    /// An identical file was already there, so nothing was written.
+    let preexisting: Bool
+}
+
 nonisolated struct CopyOutcome: Sendable {
-    var copiedKeys: [String] = []
+    var copied: [CopiedFile] = []
+    var copiedKeys: [String] { copied.map(\.file.key) }
     var failures: [(name: String, reason: String)] = []
     var cancelled = false
 }
@@ -81,11 +93,11 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             let startBytes = progress.bytesDone
             do {
                 try FileManager.default.createDirectory(at: job.destDir, withIntermediateDirectories: true)
-                try copyVerified(job) { written in
+                let copied = try copyVerified(job) { written in
                     progress.bytesDone = startBytes + written
                     report(false)
                 }
-                outcome.copiedKeys.append(job.file.key)
+                outcome.copied.append(copied)
             } catch CopyError.cancelled {
                 outcome.cancelled = true
                 break
@@ -113,7 +125,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         }
     }
 
-    private func copyVerified(_ job: CopyJob, onBytes: (Int64) -> Void) throws {
+    private func copyVerified(_ job: CopyJob, onBytes: (Int64) -> Void) throws -> CopiedFile {
         let fm = FileManager.default
         let source = job.file.url
         var dest = job.destDir.appendingPathComponent(job.file.name)
@@ -121,9 +133,10 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         // Already there from an earlier run? Keep it if it's byte-identical.
         if fm.fileExists(atPath: dest.path) {
             let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? -1
-            if size == job.file.size, try hash(source) == hash(dest) {
+            let mtime = VerificationCache.modificationDate(dest)
+            if size == job.file.size, try hash(source) == hash(dest, bypassCache: true) {
                 onBytes(job.file.size)
-                return
+                return CopiedFile(file: job.file, destination: dest, destinationModified: mtime, preexisting: true)
             }
             dest = Self.uniqueURL(for: dest)
         }
@@ -162,7 +175,8 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             if let created = attrs?[.creationDate] { keep[.creationDate] = created }
             if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
             try? fm.setAttributes(keep, ofItemAtPath: partial.path)
-            _ = try Self.moveWithoutOverwriting(partial, to: dest)
+            let final = try Self.moveWithoutOverwriting(partial, to: dest)
+            return CopiedFile(file: job.file, destination: final, destinationModified: VerificationCache.modificationDate(final), preexisting: false)
         } catch {
             // Any failure after the partial exists (I/O, cancel, verify, rename) removes it.
             try? fm.removeItem(at: partial)

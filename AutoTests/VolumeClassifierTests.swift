@@ -106,3 +106,32 @@ struct VolumeClassifierTests {
         #expect(calls == [true]) // stale one dropped, its mount announcement carried over
     }
 }
+
+struct CardDestinationTests {
+    @Test func rejectsTheCardItselfAndFoldersInside() throws {
+        let card = try FixtureCard()
+        defer { card.cleanup() }
+        #expect(VolumeClassifier.isOnCard(card.root, cards: [card.root]))
+        #expect(VolumeClassifier.isOnCard(card.dcim, cards: [card.root]))
+        #expect(VolumeClassifier.isOnCard(card.root.appendingPathComponent("New/Folder"), cards: [card.root]))
+        // Trailing slash, different case, and ".." that resolve onto the card are still the card.
+        #expect(VolumeClassifier.isOnCard(URL(fileURLWithPath: card.root.path.uppercased() + "/"), cards: [card.root]))
+        #expect(VolumeClassifier.isOnCard(card.dcim.appendingPathComponent("../.."), cards: [card.root]))
+    }
+
+    @Test func rejectsAnyConnectedCardNotJustTheSource() throws {
+        let a = try FixtureCard(), b = try FixtureCard()
+        defer { a.cleanup(); b.cleanup() }
+        #expect(VolumeClassifier.isOnCard(b.dcim, cards: [a.root, b.root]))
+    }
+
+    @Test func allowsFoldersOffTheCard() throws {
+        let card = try FixtureCard()
+        let drive = try FixtureCard.makeTempDir("Drive")
+        defer { card.cleanup(); try? FileManager.default.removeItem(at: drive) }
+        #expect(!VolumeClassifier.isOnCard(drive, cards: [card.root]))
+        // A sibling whose name merely starts with the card's name is not inside it.
+        let sibling = URL(fileURLWithPath: card.root.path + "-backup")
+        #expect(!VolumeClassifier.isOnCard(sibling, cards: [card.root]))
+    }
+}

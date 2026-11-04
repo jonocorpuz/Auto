@@ -36,6 +36,8 @@ struct CopyEngineTests {
         #expect(outcome.failures.isEmpty)
         #expect(outcome.copiedKeys == [file.key])
         let copy = f.dst.appendingPathComponent("A.MP4")
+        #expect(outcome.copied.first?.destination == copy)
+        #expect(outcome.copied.first?.preexisting == false)
         #expect(try md5(copy) == md5(file.url))
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: f.dst.path).filter { $0.hasSuffix(".auto-partial") }
         #expect(leftovers.isEmpty)
@@ -61,6 +63,7 @@ struct CopyEngineTests {
         #expect(try md5(existing) == before)
         let renamed = f.dst.appendingPathComponent("A 2.MP4")
         #expect(FileManager.default.fileExists(atPath: renamed.path))
+        #expect(outcome.copied.first?.destination == renamed)
         #expect(try md5(renamed) == md5(file.url))
     }
 
@@ -71,6 +74,8 @@ struct CopyEngineTests {
 
         let outcome = await CopyEngine().run([CopyJob(file: file, destDir: f.dst)]) { _ in }
         #expect(outcome.copiedKeys == [file.key])
+        #expect(outcome.copied.first?.preexisting == true)
+        #expect(outcome.copied.first?.destination == f.dst.appendingPathComponent("A.MP4"))
         #expect(outcome.failures.isEmpty)
         let names = try FileManager.default.contentsOfDirectory(atPath: f.dst.path)
         #expect(names == ["A.MP4"])

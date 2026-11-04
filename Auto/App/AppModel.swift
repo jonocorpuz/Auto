@@ -73,8 +73,11 @@ final class AppModel {
 
     @ObservationIgnored private var index: [String: [URL]] = [:]
     @ObservationIgnored private let verifications = VerificationCache()
-    @ObservationIgnored private var copiedThisSession = Set<String>()
+    /// Files CopyEngine copied and verified this session, with their exact destinations.
+    @ObservationIgnored private var sessionCopies: [CopiedFile] = []
     @ObservationIgnored private var indexGeneration = 0
+    /// Identity of the working volume the current index was built for (nil: none).
+    @ObservationIgnored private var indexedVolumeID: String?
     @ObservationIgnored private lazy var watcher = VolumeWatcher(workingVolume: { [weak self] in self?.workingVolume })
 
     init() {
@@ -136,19 +139,25 @@ final class AppModel {
     private func volumesChanged(cards found: [URL], drives found2: [DriveVolume], mountedNew: Bool) {
         drives = found2
 
-        let gone = cards.filter { card in !found.contains(card.volume) }
+        // Match by identity, not URL: a fast swap to another card with the same volume name
+        // drops the old Card (and its backed state) and scans the new one from scratch.
+        let identified = found.map { (url: $0, identity: VolumeIdentity.of($0)) }
+        let gone = cards.filter { card in !identified.contains { $0.identity == card.identity } }
         for card in gone { card.engine?.cancel(); card.verifier?.cancel() }
         if let editing = editingShoot, gone.contains(where: { $0 === editing }) { editingShoot = nil }
         cards.removeAll { card in gone.contains { $0 === card } }
 
         var added = false
-        for url in found where !cards.contains(where: { $0.volume == url }) {
-            let card = Card(volume: url, name: Self.volumeName(url))
+        for (url, identity) in identified where !cards.contains(where: { $0.identity == identity }) {
+            let card = Card(volume: url, name: Self.volumeName(url), identity: identity)
             cards.append(card)
             scan(card)
             added = true
         }
         if added && mountedNew && autoOpen { openMainWindow() }
+
+        // The work drive was plugged in, unplugged or swapped: the index is stale.
+        if workingVolume.map(VolumeIdentity.of) != indexedVolumeID { rebuildIndex() }
     }
 
     // MARK: Scanning
@@ -160,13 +169,24 @@ final class AppModel {
             card.files = result.files
             card.cameras = result.cameras
             card.shootDate = result.shootDate
+            card.scanError = result.error
             recompute(card)
         }
+    }
+
+    /// Scan the card again (e.g. after an unreadable result).
+    func rescan(_ card: Card) {
+        guard card.engine == nil else { return }
+        card.verifier?.cancel()
+        card.verifier = nil
+        card.plan = nil
+        scan(card)
     }
 
     func rebuildIndex() {
         indexGeneration += 1
         let generation = indexGeneration
+        indexedVolumeID = workingVolume.map(VolumeIdentity.of)
         guard let volume = workingVolume else {
             index = [:]
             indexing = false
@@ -187,20 +207,38 @@ final class AppModel {
     /// Name+size hits are just candidates; `BackupVerifier` hashes them off the main actor.
     private func recompute(_ card: Card) {
         if case .copying = card.phase { return }
-        card.verifier?.cancel()
-        card.verifier = nil
+        stopVerifier(card)
 
-        let driveReady = workingVolume != nil
-        if indexing && driveReady && card.files.contains(where: { !copiedThisSession.contains($0.key) }) {
-            card.phase = .scanning
+        // No media, or a scan error: never verify, never backed.
+        if let phase = CardPhase.afterScan(fileCount: card.files.count, error: card.scanError) {
+            card.missing = card.files
+            card.plan = nil
+            card.phase = phase
             return
         }
 
-        let triage = BackupVerifier.triage(
-            files: card.files,
-            candidates: driveReady ? index : [:],
-            alreadyVerified: copiedThisSession,
-            cache: verifications)
+        let driveReady = workingVolume != nil
+        // Session copy destinations count wherever they are (work drive or a chosen folder),
+        // but only through the cache entry for that exact card file, or a fresh checksum.
+        let candidates = BackupVerifier.addingCandidates(sessionCopies, to: driveReady ? index : [:])
+        let generation = card.recomputeGeneration
+        // Never leave a stale green up while re-checking.
+        if card.phase == .backed { card.phase = .scanning }
+        Task {
+            // Triage stats every candidate on disk, so it runs off the main actor.
+            let triage = await BackupVerifier.triageOffMain(files: card.files, candidates: candidates, cache: verifications)
+            // Superseded by a copy, a new plan, a rescan or a newer recompute.
+            guard card.recomputeGeneration == generation, card.engine == nil, card.phase != .copying else { return }
+            settle(card, triage: triage, candidates: candidates, driveReady: driveReady)
+        }
+    }
+
+    private func settle(_ card: Card, triage: (settled: [URL: VerifyResult], toVerify: [MediaFile]), candidates: [String: [URL]], driveReady: Bool) {
+        let allVerified = triage.toVerify.isEmpty && card.files.allSatisfy { triage.settled[$0.url]?.isVerified == true }
+        if indexing && driveReady && !allVerified {
+            card.phase = .scanning
+            return
+        }
 
         if triage.toVerify.isEmpty {
             finishRecompute(card, results: triage.settled)
@@ -216,21 +254,28 @@ final class AppModel {
         card.verifier = verifier
         card.verifyProgress = CopyProgress(filesTotal: triage.toVerify.count, bytesTotal: triage.toVerify.reduce(0) { $0 + $1.size })
         card.phase = .verifying
-        let candidates = index
         Task {
             let outcome = await verifier.run(triage.toVerify, candidates: candidates, cache: verifications) { progress in
                 card.verifyProgress = progress
             }
-            // Superseded by a newer recompute, or the card went away.
+            // Superseded by a newer recompute, a copy/plan that took over, or the card went away.
             guard !outcome.cancelled, card.verifier === verifier else { return }
             card.verifier = nil
+            guard card.phase == .verifying else { return }
             finishRecompute(card, results: triage.settled.merging(outcome.results) { $1 })
         }
     }
 
+    /// Cancels any verify, and any triage still in flight, for this card.
+    private func stopVerifier(_ card: Card) {
+        card.verifier?.cancel()
+        card.verifier = nil
+        card.recomputeGeneration += 1
+    }
+
     private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {
         card.missing = BackupVerifier.missing(files: card.files, results: results)
-        if card.missing.isEmpty {
+        if card.missing.isEmpty && !card.files.isEmpty {
             card.phase = .backed
             card.plan = nil
         } else if card.plan != nil {
@@ -258,15 +303,25 @@ final class AppModel {
     }
 
     func shootFolderExists(client: String, date: Date, name: String) -> Bool {
-        guard let root = workRoot else { return false }
-        return FileManager.default.fileExists(
-            atPath: ShootPlanner.shootURL(root: root, client: client, date: date, name: name, dateFormat: dateFormat).path)
+        guard let root = workRoot,
+              let shoot = try? ShootPlanner.shootURL(root: root, client: client, date: date, name: name, dateFormat: dateFormat) else { return false }
+        return FileManager.default.fileExists(atPath: shoot.path)
+    }
+
+    /// Whether `client` can be used as a client folder name.
+    func isValidClientName(_ client: String) -> Bool {
+        ShootPlanner.safeComponent(client) != nil
     }
 
     func createShoot(card: Card, client: String, shootName: String, date: Date, cameras: [Camera]) throws {
         guard let root = workRoot else { return }
-        let shoot = ShootPlanner.shootURL(root: root, client: client, date: date, name: shootName, dateFormat: dateFormat)
+        let shoot = try ShootPlanner.shootURL(root: root, client: client, date: date, name: shootName, dateFormat: dateFormat)
+        // Copies onto a card never count as a backup (e.g. the work folder was set on a card).
+        if isOnCard(shoot) { throw CardDestinationError() }
+        guard card.engine == nil else { return }
+        stopVerifier(card)
         let jobs = ShootPlanner.jobs(missing: card.missing, shoot: shoot, cameras: cameras, fallback: card.name)
+        guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: shoot) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
 
         let fm = FileManager.default
         try fm.createDirectory(at: shoot.appendingPathComponent("Project"), withIntermediateDirectories: true)
@@ -288,8 +343,22 @@ final class AppModel {
         panel.directoryURL = workRoot
         NSApp.activate()
         guard panel.runModal() == .OK, let dir = panel.url else { return }
+        if isOnCard(dir) {
+            let alert = NSAlert()
+            alert.messageText = "Can't copy to a camera card"
+            alert.informativeText = CardDestinationError().localizedDescription
+            alert.runModal()
+            return
+        }
+        guard card.engine == nil else { return }
+        stopVerifier(card)
         card.plan = ShootPlanner.flatPlan(missing: card.missing, into: dir)
         card.phase = .ready
+    }
+
+    /// Whether `url` is on any connected card (the source card included).
+    private func isOnCard(_ url: URL) -> Bool {
+        VolumeClassifier.isOnCard(url, cards: cards.map(\.volume))
     }
 
     func setWorkRoot() {
@@ -305,6 +374,7 @@ final class AppModel {
     }
 
     func discardPlan(_ card: Card) {
+        guard card.engine == nil else { return }
         card.plan = nil
         recompute(card)
     }
@@ -318,7 +388,13 @@ final class AppModel {
     // MARK: Copying
 
     func copy(_ card: Card) {
-        guard let plan = card.plan else { return }
+        // One engine per card; a running verifier yields to the copy.
+        guard let plan = card.plan, card.engine == nil, card.phase != .copying else { return }
+        stopVerifier(card)
+        if isOnCard(plan.destinationRoot) {
+            card.phase = .failed(CardDestinationError().localizedDescription)
+            return
+        }
         let values = try? plan.destinationRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         if let free = values?.volumeAvailableCapacityForImportantUsage, free < plan.bytes {
             card.phase = .failed("Not enough space: needs \(Format.bytes(plan.bytes)), \(Format.bytes(free)) free.")
@@ -333,10 +409,11 @@ final class AppModel {
         Task {
             let outcome = await engine.run(plan.jobs) { progress in card.progress = progress }
             card.engine = nil
-            copiedThisSession.formUnion(outcome.copiedKeys)
-            
-            let done = Set(outcome.copiedKeys)
-            card.plan?.jobs.removeAll { done.contains($0.file.key) }
+            sessionCopies.append(contentsOf: outcome.copied)
+            verifications.record(outcome.copied)
+
+            let done = Set(outcome.copied.map(\.file.url))
+            card.plan?.jobs.removeAll { done.contains($0.file.url) }
             if card.plan?.jobs.isEmpty == true { card.plan = nil }
             card.backedTo = plan.destinationRoot.path.hasPrefix(workingVolume?.path ?? "\u{0}") ? workingDriveName : plan.destinationLabel
 
@@ -355,21 +432,34 @@ final class AppModel {
         card.engine?.cancel()
     }
 
+    /// Retries the copy if there is a plan, otherwise re-checks the card. Never both at once.
     func retry(_ card: Card) {
-        card.phase = .needsBackup
-        recompute(card)
-        if card.plan != nil { copy(card) }
+        guard card.engine == nil else { return }
+        if card.plan != nil {
+            copy(card)
+        } else {
+            card.phase = .needsBackup
+            recompute(card)
+        }
+    }
+
+    /// Only a verified-backed, idle card can be ejected from Auto.
+    func canEject(_ card: Card) -> Bool {
+        card.phase == .backed && card.engine == nil && card.verifier == nil && !card.ejecting
     }
 
     func eject(_ card: Card) {
+        guard canEject(card) else { return }
         card.ejecting = true
+        card.ejectError = nil
         let volume = card.volume
         Task {
             let error = await Task.detached { () -> Error? in
                 do { try NSWorkspace.shared.unmountAndEjectDevice(at: volume); return nil } catch { return error }
             }.value
             card.ejecting = false
-            if let error { card.phase = .failed("Couldn't eject: \(error.localizedDescription)") }
+            // Shown beside the card; never replaces whatever phase the card is in now.
+            if let error { card.ejectError = "Couldn't eject: \(error.localizedDescription)" }
         }
     }
 }

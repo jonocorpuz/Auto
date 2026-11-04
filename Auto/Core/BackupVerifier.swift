@@ -13,13 +13,14 @@ nonisolated enum VerifyResult: Sendable, Equatable {
 }
 
 /// Session-lifetime record of drive copies already proven identical to a card file.
-/// Keyed by card file key + drive path + drive mtime, so an edited drive file is re-hashed.
+/// Keyed by card file identity (card volume + full path + size + mtime) + drive path + drive mtime,
+/// so another card's same-name file never matches and an edited drive file is re-hashed.
 nonisolated final class VerificationCache: @unchecked Sendable {
     private let lock = NSLock()
     private var entries = Set<String>()
 
     private static func entry(_ file: MediaFile, _ candidate: URL, _ mtime: Date) -> String {
-        "\(file.key)|\(file.date.timeIntervalSince1970)|\(candidate.path)|\(mtime.timeIntervalSince1970)"
+        "\(file.identity)|\(candidate.standardizedFileURL.path)|\(mtime.timeIntervalSince1970)"
     }
 
     static func modificationDate(_ url: URL) -> Date? {
@@ -29,6 +30,13 @@ nonisolated final class VerificationCache: @unchecked Sendable {
 
     func record(_ file: MediaFile, candidate: URL, mtime: Date) {
         lock.lock(); entries.insert(Self.entry(file, candidate, mtime)); lock.unlock()
+    }
+
+    /// Records files CopyEngine just copied and checksum-verified, against their exact destination.
+    func record(_ copied: [CopiedFile]) {
+        for c in copied {
+            if let mtime = c.destinationModified { record(c.file, candidate: c.destination, mtime: mtime) }
+        }
     }
 
     /// The first candidate that is still recorded as identical (and unchanged since).
@@ -69,12 +77,11 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
     private static let chunk = 8 << 20
 
     /// Splits card files before any hashing: files with no candidate are missing, cached ones are
-    /// verified, the rest need a checksum pass. Files in `alreadyVerified` (copied and hash-checked
-    /// by CopyEngine this session) count as verified without a drive candidate.
+    /// verified, the rest need a checksum pass. There is no name+size shortcut: a file only counts
+    /// as verified through a checksum, either now or recorded in `cache` for this exact card file.
     static func triage(
         files: [MediaFile],
         candidates: [String: [URL]],
-        alreadyVerified: Set<String> = [],
         cache: VerificationCache? = nil
     ) -> (settled: [URL: VerifyResult], toVerify: [MediaFile]) {
         var settled: [URL: VerifyResult] = [:]
@@ -83,8 +90,6 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
             let list = candidates[file.key] ?? []
             if let hit = cache?.verifiedCandidate(for: file, in: list) {
                 settled[file.url] = .verified(hit)
-            } else if alreadyVerified.contains(file.key) {
-                settled[file.url] = .verified(list.first ?? file.url)
             } else if list.isEmpty {
                 settled[file.url] = .missing
             } else {
@@ -92,6 +97,15 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
             }
         }
         return (settled, toVerify)
+    }
+
+    /// `triage` without blocking the caller: the cache lookup stats every candidate on disk.
+    @concurrent static func triageOffMain(
+        files: [MediaFile],
+        candidates: [String: [URL]],
+        cache: VerificationCache?
+    ) async -> (settled: [URL: VerifyResult], toVerify: [MediaFile]) {
+        triage(files: files, candidates: candidates, cache: cache)
     }
 
     /// Hashes each card file once, then candidates in order until one matches. Runs off the main
@@ -195,6 +209,18 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
             onChunkHashed?(read)
         }
         return Data(md5.finalize())
+    }
+
+    /// Adds copy destinations to a name+size candidate index (no duplicates). They are still only
+    /// candidates; the cache or a checksum pass decides whether they count.
+    static func addingCandidates(_ copied: [CopiedFile], to candidates: [String: [URL]]) -> [String: [URL]] {
+        var result = candidates
+        for c in copied {
+            // The card file's key, not the destination name: a renamed copy ("A001 2.ARW") still counts.
+            let key = c.file.key
+            if !(result[key] ?? []).contains(c.destination) { result[key, default: []].append(c.destination) }
+        }
+        return result
     }
 
     /// Card files that still need copying: everything not verified.
