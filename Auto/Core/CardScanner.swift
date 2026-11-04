@@ -15,6 +15,7 @@ nonisolated enum CardScanner {
             return Result(files: [], cameras: [], shootDate: nil)
         }
 
+        let cardID = VolumeIdentity.of(volume)
         var files: [MediaFile] = []
         var camerasByDir: [String: Camera] = [:]
         var cameras: [String: Camera] = [:]
@@ -38,7 +39,7 @@ nonisolated enum CardScanner {
             cameras[camera.id] = cameras[camera.id] ?? camera
 
             let date = values.contentModificationDate ?? values.creationDate ?? Date()
-            files.append(MediaFile(url: url, size: Int64(values.fileSize ?? 0), date: date, kind: kind, cameraID: camera.id))
+            files.append(MediaFile(url: url, size: Int64(values.fileSize ?? 0), date: date, kind: kind, cameraID: camera.id, cardID: cardID))
         }
 
         let shootDate = files.map(\.date).min()

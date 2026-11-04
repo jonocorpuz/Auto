@@ -73,7 +73,8 @@ final class AppModel {
 
     @ObservationIgnored private var index: [String: [URL]] = [:]
     @ObservationIgnored private let verifications = VerificationCache()
-    @ObservationIgnored private var copiedThisSession = Set<String>()
+    /// Files CopyEngine copied and verified this session, with their exact destinations.
+    @ObservationIgnored private var sessionCopies: [CopiedFile] = []
     @ObservationIgnored private var indexGeneration = 0
     @ObservationIgnored private lazy var watcher = VolumeWatcher(workingVolume: { [weak self] in self?.workingVolume })
 
@@ -191,16 +192,16 @@ final class AppModel {
         card.verifier = nil
 
         let driveReady = workingVolume != nil
-        if indexing && driveReady && card.files.contains(where: { !copiedThisSession.contains($0.key) }) {
+        // Session copy destinations count wherever they are (work drive or a chosen folder),
+        // but only through the cache entry for that exact card file, or a fresh checksum.
+        let candidates = BackupVerifier.addingCandidates(sessionCopies, to: driveReady ? index : [:])
+        let triage = BackupVerifier.triage(files: card.files, candidates: candidates, cache: verifications)
+
+        let allVerified = triage.toVerify.isEmpty && card.files.allSatisfy { triage.settled[$0.url]?.isVerified == true }
+        if indexing && driveReady && !allVerified {
             card.phase = .scanning
             return
         }
-
-        let triage = BackupVerifier.triage(
-            files: card.files,
-            candidates: driveReady ? index : [:],
-            alreadyVerified: copiedThisSession,
-            cache: verifications)
 
         if triage.toVerify.isEmpty {
             finishRecompute(card, results: triage.settled)
@@ -216,7 +217,6 @@ final class AppModel {
         card.verifier = verifier
         card.verifyProgress = CopyProgress(filesTotal: triage.toVerify.count, bytesTotal: triage.toVerify.reduce(0) { $0 + $1.size })
         card.phase = .verifying
-        let candidates = index
         Task {
             let outcome = await verifier.run(triage.toVerify, candidates: candidates, cache: verifications) { progress in
                 card.verifyProgress = progress
@@ -333,10 +333,11 @@ final class AppModel {
         Task {
             let outcome = await engine.run(plan.jobs) { progress in card.progress = progress }
             card.engine = nil
-            copiedThisSession.formUnion(outcome.copiedKeys)
-            
-            let done = Set(outcome.copiedKeys)
-            card.plan?.jobs.removeAll { done.contains($0.file.key) }
+            sessionCopies.append(contentsOf: outcome.copied)
+            verifications.record(outcome.copied)
+
+            let done = Set(outcome.copied.map(\.file.url))
+            card.plan?.jobs.removeAll { done.contains($0.file.url) }
             if card.plan?.jobs.isEmpty == true { card.plan = nil }
             card.backedTo = plan.destinationRoot.path.hasPrefix(workingVolume?.path ?? "\u{0}") ? workingDriveName : plan.destinationLabel
 
