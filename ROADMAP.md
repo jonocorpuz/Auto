@@ -27,7 +27,7 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 ## Phase 1: Foundation ✅
 
 - [x] Xcode project `Auto`, macOS 26, menu bar only (`LSUIElement`)
-- [x] `MenuBarExtra` popover + `Settings` scene
+- [x] Menu bar shell + `Settings` (MenuBarExtra popover, later replaced by a status item that opens the main window)
 - [x] `AppModel` with status + persisted work folder
 - [x] Swift Testing target `AutoTests` + shared scheme
 - [x] CLAUDE.md, ARCHITECTURE.md, ROADMAP.md, skills, routed subagents
