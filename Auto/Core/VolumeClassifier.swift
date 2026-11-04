@@ -40,6 +40,39 @@ nonisolated enum VolumeClassifier {
         return p
     }
 
+    /// Lowercased, symlink-resolved, normalized path (card file systems are usually case-insensitive).
+    private static func comparablePath(_ url: URL) -> String {
+        normalizedPath(url.resolvingSymlinksInPath()).lowercased()
+    }
+
+    /// True when `url` is a card root or anything inside one. Pure path check (symlinks resolved).
+    static func isInside(_ url: URL, anyOf roots: [URL]) -> Bool {
+        let p = comparablePath(url)
+        return roots.contains { root in
+            let r = comparablePath(root)
+            return p == r || p.hasPrefix(r == "/" ? "/" : r + "/")
+        }
+    }
+
+    /// True when `destination` would land on any of `cards`: inside a card folder, or on the same
+    /// volume as a card that is a volume root (compared by volume identifier, not just path).
+    static func isOnCard(_ destination: URL, cards: [URL]) -> Bool {
+        if isInside(destination, anyOf: cards) { return true }
+        let keys: Set<URLResourceKey> = [.volumeURLKey, .volumeIdentifierKey]
+        // Walk up to the nearest existing ancestor so a not-yet-created folder still resolves.
+        var probe = destination.standardizedFileURL
+        while !FileManager.default.fileExists(atPath: probe.path) && probe.path != "/" { probe.deleteLastPathComponent() }
+        guard let dest = try? URL(fileURLWithPath: probe.path).resourceValues(forKeys: keys),
+              let destID = dest.volumeIdentifier else { return false }
+        for card in cards {
+            guard let values = try? URL(fileURLWithPath: card.path).resourceValues(forKeys: keys),
+                  let root = values.volume, normalizedPath(root) == normalizedPath(card),
+                  let cardID = values.volumeIdentifier else { continue }
+            if destID.isEqual(cardID) { return true }
+        }
+        return false
+    }
+
     static func classify(_ volumes: [VolumeDescriptor], workingVolume: URL?) -> VolumeClassification {
         let working = workingVolume.map(normalizedPath)
         var cards: [URL] = []
@@ -59,5 +92,12 @@ nonisolated enum VolumeClassifier {
             return aw != bw ? aw : a.name < b.name
         }
         return VolumeClassification(cards: cards, drives: drives)
+    }
+}
+
+/// A copy destination that is on a camera card. Copies there never count as a backup.
+nonisolated struct CardDestinationError: LocalizedError, Equatable {
+    var errorDescription: String? {
+        "That folder is on a camera card. Choose a folder on your work drive or another drive."
     }
 }

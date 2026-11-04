@@ -266,6 +266,8 @@ final class AppModel {
     func createShoot(card: Card, client: String, shootName: String, date: Date, cameras: [Camera]) throws {
         guard let root = workRoot else { return }
         let shoot = ShootPlanner.shootURL(root: root, client: client, date: date, name: shootName, dateFormat: dateFormat)
+        // Copies onto a card never count as a backup (e.g. the work folder was set on a card).
+        if isOnCard(shoot) { throw CardDestinationError() }
         let jobs = ShootPlanner.jobs(missing: card.missing, shoot: shoot, cameras: cameras, fallback: card.name)
 
         let fm = FileManager.default
@@ -288,8 +290,20 @@ final class AppModel {
         panel.directoryURL = workRoot
         NSApp.activate()
         guard panel.runModal() == .OK, let dir = panel.url else { return }
+        if isOnCard(dir) {
+            let alert = NSAlert()
+            alert.messageText = "Can't copy to a camera card"
+            alert.informativeText = CardDestinationError().localizedDescription
+            alert.runModal()
+            return
+        }
         card.plan = ShootPlanner.flatPlan(missing: card.missing, into: dir)
         card.phase = .ready
+    }
+
+    /// Whether `url` is on any connected card (the source card included).
+    private func isOnCard(_ url: URL) -> Bool {
+        VolumeClassifier.isOnCard(url, cards: cards.map(\.volume))
     }
 
     func setWorkRoot() {
@@ -319,6 +333,10 @@ final class AppModel {
 
     func copy(_ card: Card) {
         guard let plan = card.plan else { return }
+        if isOnCard(plan.destinationRoot) {
+            card.phase = .failed(CardDestinationError().localizedDescription)
+            return
+        }
         let values = try? plan.destinationRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         if let free = values?.volumeAvailableCapacityForImportantUsage, free < plan.bytes {
             card.phase = .failed("Not enough space: needs \(Format.bytes(plan.bytes)), \(Format.bytes(free)) free.")
