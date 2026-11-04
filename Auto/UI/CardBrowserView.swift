@@ -18,6 +18,10 @@ struct CardBrowserView: View {
         if case .group(let kind)? = place { kind } else { nil }
     }
     @State private var selection = Set<MediaFile.ID>()
+    /// Anchor/cursor bookkeeping for icon-view clicks and keys; `selection` stays the source of truth.
+    @State private var grid = GridSelection<MediaFile.ID>()
+    @State private var gridWidth: Double = 600
+    @FocusState private var gridFocused: Bool
     @AppStorage("cardBrowserMode") private var mode: Mode = .icons
     @AppStorage("cardBrowserIconSize") private var iconSize: Double = 110
     @State private var adding = false
@@ -47,7 +51,12 @@ struct CardBrowserView: View {
         .onChange(of: place) { selection = [] }
         .onChange(of: card.files) { _, files in
             let present = Set(files.map(\.id))
+            grid.prune(keeping: present)
             selection = selection.filter(present.contains)
+        }
+        // Keep the grid's anchor/cursor in step with outside changes (Esc, list mode, place changes).
+        .onChange(of: selection) { _, new in
+            if grid.selected != new { grid = GridSelection(selected: new) }
         }
         .alert("Couldn't add to shoot", isPresented: Binding(
             get: { actionError != nil },
@@ -172,31 +181,94 @@ struct CardBrowserView: View {
     }
 
     private func iconGrid(_ groups: [CardBrowser.Group]) -> some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: iconSize + 16), spacing: 6)], alignment: .leading,
-                      spacing: 10, pinnedViews: .sectionHeaders) {
-                ForEach(groups) { group in
-                    Section {
-                        ForEach(group.files) { file in
-                            FileIcon(file: file, size: iconSize, selected: selection.contains(file.id))
-                                .onTapGesture { select(file, extend: NSEvent.modifierFlags.contains(.command)) }
-                                .simultaneousGesture(TapGesture(count: 2).onEnded {
-                                    selection = [file.id]
-                                    quickLook([file])
-                                })
-                                .contextMenu { fileMenu(targets(for: file, in: groups), groups: groups) }
+        let spacing = 6.0
+        return ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: iconSize + 16), spacing: spacing)], alignment: .leading,
+                          spacing: 10, pinnedViews: .sectionHeaders) {
+                    ForEach(groups) { group in
+                        Section {
+                            ForEach(group.files) { file in
+                                FileIcon(file: file, size: iconSize, selected: selection.contains(file.id))
+                                    .id(file.id)
+                                    .onTapGesture {
+                                        gridFocused = true
+                                        clickIcon(file, groups: groups)
+                                    }
+                                    .simultaneousGesture(TapGesture(count: 2).onEnded {
+                                        grid.click(file.id)
+                                        selection = grid.selected
+                                        quickLook([file])
+                                    })
+                                    .contextMenu { fileMenu(targets(for: file, in: groups), groups: groups) }
+                            }
+                        } header: {
+                            GroupHeader(group: group)
                         }
-                    } header: {
-                        GroupHeader(group: group)
                     }
                 }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
+            .onGeometryChange(for: Double.self) { $0.size.width } action: { gridWidth = $0 }
+            .background(Theme.surface)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                gridFocused = true
+                grid.clear()
+                selection = []
+            }
+            .focusable()
+            .focusEffectDisabled()
+            .focused($gridFocused)
+            .onAppear { gridFocused = true }
+            .onKeyPress(phases: [.down, .repeat]) { press in
+                handleKey(press, groups: groups, proxy: proxy, spacing: spacing)
+            }
         }
-        .background(Theme.surface)
-        .contentShape(Rectangle())
-        .onTapGesture { selection = [] }
+    }
+
+    private func gridLayout(_ groups: [CardBrowser.Group], spacing: Double) -> GridLayout<MediaFile.ID> {
+        let columns = GridLayout<MediaFile.ID>.columnCount(
+            width: gridWidth, itemMinimum: iconSize + 16, spacing: spacing, padding: 12)
+        return GridLayout(sections: groups.map { $0.files.map(\.id) }, columns: columns)
+    }
+
+    private func clickIcon(_ file: MediaFile, groups: [CardBrowser.Group]) {
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.command) {
+            grid.toggle(file.id)
+        } else if flags.contains(.shift) {
+            grid.extend(to: file.id, in: gridLayout(groups, spacing: 6))
+        } else {
+            grid.click(file.id)
+        }
+        selection = grid.selected
+    }
+
+    private func handleKey(_ press: KeyPress, groups: [CardBrowser.Group], proxy: ScrollViewProxy,
+                           spacing: Double) -> KeyPress.Result {
+        let layout = gridLayout(groups, spacing: spacing)
+        if press.modifiers.contains(.command) {
+            guard press.characters == "a", !press.modifiers.contains(.shift) else { return .ignored }
+            grid.selectAll(in: layout)
+            selection = grid.selected
+            return .handled
+        }
+        let direction: GridSelection<MediaFile.ID>.Direction
+        switch press.key {
+        case .leftArrow: direction = .left
+        case .rightArrow: direction = .right
+        case .upArrow: direction = .up
+        case .downArrow: direction = .down
+        case .home: direction = .home
+        case .end: direction = .end
+        default: return .ignored
+        }
+        grid.move(direction, extend: press.modifiers.contains(.shift), in: layout)
+        selection = grid.selected
+        if let cursor = grid.cursor { proxy.scrollTo(cursor) }
+        return .handled
     }
 
     private func listView(_ groups: [CardBrowser.Group]) -> some View {
@@ -343,14 +415,6 @@ struct CardBrowserView: View {
             .frame(maxWidth: .infinity)
             .frame(height: 26)
             .background(Theme.surface)
-    }
-
-    private func select(_ file: MediaFile, extend: Bool) {
-        if extend {
-            if selection.remove(file.id) == nil { selection.insert(file.id) }
-        } else {
-            selection = [file.id]
-        }
     }
 
     static func symbol(_ kind: MediaKind) -> String {
