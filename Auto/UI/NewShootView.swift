@@ -10,25 +10,45 @@ struct NewShootView: View {
     @State private var cameras: [Camera] = []
     @State private var error: String?
     @State private var selection: ShootSelection?
+    @State private var days: [String: [ShootDay]] = [:]
     @FocusState private var nameFocused: Bool
 
     private var currentSelection: ShootSelection {
         selection ?? ShootSelection(missing: card.missing, cameras: card.cameras, calendar: model.calendar)
     }
     private var isValid: Bool { model.isValidShootName(shootName) }
-    private var folders: [PlannedFolder] { model.shootPreview(card: card, name: shootName, cameras: cameras, selection: currentSelection).folders }
+    private var preview: ShootPreview {
+        model.shootPreview(card: card, name: shootName, cameras: cameras, selection: currentSelection)
+    }
+
+    /// Applies a change to the selection, writing it back to state.
+    private func mutate(_ change: (inout ShootSelection) -> Void) {
+        var sel = currentSelection
+        change(&sel)
+        selection = sel
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        let preview = preview
+        let sel = currentSelection
+        let canCreate = isValid && !sel.isEmpty && preview.problem == nil
+        return VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("New Shoot").font(.system(size: 20, weight: .semibold))
                 Text("Creates folders in \(model.workRootBreadcrumb)")
                     .font(.callout).foregroundStyle(.secondary)
             }
 
-            nameCard
-            if !card.cameras.isEmpty { camerasSection }
-            foldersSection
+            nameCard(preview)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    if !card.cameras.isEmpty { camerasSection(preview, sel) }
+                    foldersSection(preview, sel)
+                }
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: 420)
 
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
@@ -43,7 +63,7 @@ struct NewShootView: View {
                     .buttonStyle(PrimaryPillButtonStyle())
                     .frame(width: 160)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!isValid)
+                    .disabled(!canCreate)
             }
         }
         .padding(24)
@@ -51,13 +71,15 @@ struct NewShootView: View {
         .background(Theme.panel)
         .onAppear {
             cameras = card.cameras
+            days = ShootSelection.days(missing: card.missing, cameras: card.cameras, calendar: model.calendar)
+            selection = ShootSelection(missing: card.missing, cameras: card.cameras, calendar: model.calendar)
             nameFocused = true
         }
     }
 
     // MARK: Name
 
-    private var nameCard: some View {
+    private func nameCard(_ preview: ShootPreview) -> some View {
         SurfaceCard {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Shoot name").font(.system(size: 13, weight: .medium))
@@ -67,15 +89,19 @@ struct NewShootView: View {
                     .inputStyle(focused: nameFocused)
                     .focused($nameFocused)
                     .onSubmit { if isValid { create() } }
-                Text(nameCaption).font(.caption).foregroundStyle(.secondary)
+                if let problem = preview.problem {
+                    Text(problem).font(.caption).foregroundStyle(.red)
+                } else {
+                    Text(nameCaption(preview)).font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }
 
-    private var nameCaption: String {
+    private func nameCaption(_ preview: ShootPreview) -> String {
         if shootName.trimmingCharacters(in: .whitespaces).isEmpty { return "The shoot folder is named after this." }
         guard isValid else { return "Not a usable folder name." }
-        if let shoot = folders.first, shoot.exists {
+        if let shoot = preview.folders.first, shoot.exists {
             return "Adds to the existing “\(shoot.name)” folder. Nothing in it is overwritten."
         }
         return "Creates a new folder."
@@ -83,32 +109,40 @@ struct NewShootView: View {
 
     // MARK: Cameras
 
-    private var camerasSection: some View {
+    private func camerasSection(_ preview: ShootPreview, _ sel: ShootSelection) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeader(title: "Cameras") {
-                Text("\(card.missing.count) files").font(.caption).foregroundStyle(.secondary)
+                Text(selectedSummary(preview)).font(.caption).foregroundStyle(.secondary)
             }
             SurfaceCard(padding: 12) {
                 VStack(spacing: 0) {
                     ForEach(Array($cameras.enumerated()), id: \.element.id) { index, $cam in
-                        if index > 0 {
-                            Rectangle().fill(Theme.border).frame(height: 1).padding(.vertical, 10)
-                        }
-                        HStack(spacing: 12) {
+                        if index > 0 { divider }
+                        groupBlock(id: cam.id, sel: sel) {
                             Image(systemName: "video")
-                                .foregroundStyle(.secondary)
-                                .frame(width: 28, height: 28)
-                                .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: 8))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(cam.label).lineLimit(1)
-                                Text("\(fileCount(cam)) files").font(.caption).foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        } title: {
+                            Text(cam.label)
+                        } caption: {
+                            Text(selectedCaption(cam.id, sel))
+                        } trailing: {
                             TextField("Folder", text: $cam.folderName)
                                 .labelsHidden()
                                 .textFieldStyle(.plain)
                                 .inputStyle(focused: false)
                                 .frame(width: 160)
+                                .disabled(!sel.isIncluded(camera: cam.id))
+                        }
+                    }
+                    if let other = days[ShootSelection.otherID], !other.isEmpty {
+                        if !cameras.isEmpty { divider }
+                        groupBlock(id: ShootSelection.otherID, sel: sel) {
+                            Image(systemName: "doc")
+                        } title: {
+                            Text("Other files")
+                        } caption: {
+                            Text("Goes in “\(card.name)”")
+                        } trailing: {
+                            EmptyView()
                         }
                     }
                 }
@@ -116,22 +150,95 @@ struct NewShootView: View {
         }
     }
 
-    private func fileCount(_ camera: Camera) -> Int {
-        card.missing.filter { $0.cameraID == camera.id }.count
+    private var divider: some View {
+        Rectangle().fill(Theme.border).frame(height: 1).padding(.vertical, 10)
+    }
+
+    private func groupBlock<Icon: View, Title: View, Caption: View, Trailing: View>(
+        id: String, sel: ShootSelection,
+        @ViewBuilder icon: () -> Icon, @ViewBuilder title: () -> Title,
+        @ViewBuilder caption: () -> Caption, @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        let on = sel.isIncluded(camera: id)
+        let groupDays = days[id] ?? []
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Toggle("", isOn: Binding(
+                    get: { on },
+                    set: { value in
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            mutate { $0.setCamera(id, included: value, days: groupDays.map(\.start)) }
+                        }
+                    }
+                ))
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                icon()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    title().lineLimit(1)
+                    caption().font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                trailing()
+            }
+            .opacity(on ? 1 : 0.5)
+
+            if on {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(groupDays, id: \.start) { day in
+                        HStack(spacing: 8) {
+                            Toggle("", isOn: Binding(
+                                get: { sel.isIncluded(camera: id, day: day.start) },
+                                set: { value in
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        mutate { $0.set(camera: id, day: day.start, included: value) }
+                                    }
+                                }
+                            ))
+                            .toggleStyle(.checkbox)
+                            .labelsHidden()
+                            DayChip(day: day, calendar: model.calendar)
+                            Spacer()
+                        }
+                    }
+                }
+                .padding(.leading, 40)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .clipped()
+    }
+
+    private func selectedCaption(_ id: String, _ sel: ShootSelection) -> String {
+        let n = (days[id] ?? []).filter { sel.isIncluded(camera: id, day: $0.start) }.reduce(0) { $0 + $1.fileCount }
+        return Format.count(n, "file", "files")
+    }
+
+    private func selectedSummary(_ preview: ShootPreview) -> String {
+        if preview.videoCount > 0 && preview.photoCount > 0 {
+            return "\(Format.count(preview.videoCount, "video", "videos")) · \(Format.count(preview.photoCount, "photo", "photos"))"
+        }
+        if preview.photoCount > 0 { return Format.count(preview.photoCount, "photo", "photos") }
+        return Format.count(preview.videoCount, "file", "files")
     }
 
     // MARK: Folders
 
-    private var foldersSection: some View {
-        let rows = folders
-        return VStack(alignment: .leading, spacing: 8) {
+    private func foldersSection(_ preview: ShootPreview, _ sel: ShootSelection) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             SectionHeader("Folders")
             SurfaceCard {
-                if rows.isEmpty {
-                    Text("Enter a shoot name to preview the folders.").foregroundStyle(.secondary)
+                if preview.folders.isEmpty {
+                    Text(shootName.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? "Enter a shoot name to preview the folders."
+                         : "Select at least one camera day.")
+                        .foregroundStyle(.secondary)
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(rows) { folderRow($0) }
+                        ForEach(preview.folders) { folderRow($0) }
                     }
                 }
             }
@@ -150,7 +257,8 @@ struct NewShootView: View {
                 .background(Capsule().fill(folder.exists ? Theme.surfaceMuted : Theme.accent.opacity(0.12)))
             Spacer()
             if folder.fileCount > 0 {
-                Text("\(folder.fileCount) \(folder.isPhoto ? "photos" : "files")")
+                Text(folder.isPhoto ? Format.count(folder.fileCount, "photo", "photos")
+                                    : Format.count(folder.fileCount, "file", "files"))
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
