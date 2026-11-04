@@ -7,8 +7,15 @@ struct CardBrowserView: View {
     let card: Card
 
     enum Mode: String { case icons, list }
+    enum Place: Hashable {
+        case all
+        case group(CardBrowser.GroupKind)
+    }
+    @State private var place: Place? = .all
     /// nil: every group.
-    @State private var location: CardBrowser.GroupKind?
+    private var location: CardBrowser.GroupKind? {
+        if case .group(let kind)? = place { kind } else { nil }
+    }
     @State private var selection = Set<MediaFile.ID>()
     @AppStorage("cardBrowserMode") private var mode: Mode = .icons
     @AppStorage("cardBrowserIconSize") private var iconSize: Double = 110
@@ -32,7 +39,7 @@ struct CardBrowserView: View {
             }
         }
         .onChange(of: groups.map(\.kind)) { _, kinds in
-            if let location, !kinds.contains(location) { self.location = nil }
+            if let location, !kinds.contains(location) { place = .all }
         }
         .onKeyPress(.escape) {
             if selection.isEmpty { model.browsingCardID = nil } else { selection = [] }
@@ -86,14 +93,14 @@ struct CardBrowserView: View {
     // MARK: Locations sidebar
 
     private func locations(_ groups: [CardBrowser.Group]) -> some View {
-        List(selection: $location) {
+        List(selection: $place) {
             Section(card.name) {
                 LocationRow(title: "All Files", symbol: "sdcard", tint: .secondary, count: card.files.count)
-                    .tag(nil as CardBrowser.GroupKind?)
+                    .tag(Place.all)
                 ForEach(groups.filter { $0.kind == .notBackedUp }) { group in
                     LocationRow(title: group.title, symbol: "exclamationmark.circle.fill",
                                 tint: Color(nsColor: AppModel.Status.unbacked.tint), count: group.files.count)
-                        .tag(group.kind as CardBrowser.GroupKind?)
+                        .tag(Place.group(group.kind))
                 }
             }
             let backed = groups.filter { $0.kind != .notBackedUp }
@@ -103,7 +110,7 @@ struct CardBrowserView: View {
                         LocationRow(title: group.title,
                                     symbol: group.kind == .elsewhere ? "externaldrive.fill" : "folder.fill",
                                     tint: Theme.accent, count: group.files.count)
-                            .tag(group.kind as CardBrowser.GroupKind?)
+                            .tag(Place.group(group.kind))
                     }
                 }
             }
@@ -157,19 +164,19 @@ struct CardBrowserView: View {
                     Text(file.name)
                 }
             }
-            .width(min: 180, ideal: 260)
+            .width(min: 140, ideal: 220)
             TableColumn("Date Recorded") { file in
                 Text(file.date.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(.secondary)
             }
-            .width(min: 120, ideal: 160)
+            .width(min: 110, ideal: 150)
             TableColumn("Size") { file in
                 Text(Format.bytes(file.size)).foregroundStyle(.secondary).monospacedDigit()
             }
-            .width(min: 60, ideal: 80)
+            .width(min: 55, ideal: 70)
             TableColumn("Kind") { file in
                 Text(Self.kindLabel(file)).foregroundStyle(.secondary)
             }
-            .width(min: 80, ideal: 120)
+            .width(min: 60, ideal: 90)
         } rows: {
             ForEach(groups) { group in
                 Section(group.title) {
