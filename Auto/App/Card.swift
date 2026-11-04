@@ -15,6 +15,8 @@ final class Card: Identifiable {
     var missing: [MediaFile] = []
     var cameras: [Camera] = []
     var shootDate: Date?
+    /// Set when the last scan hit a read error (see `CardScanner.Result.error`).
+    var scanError: String?
     var plan: CopyPlan?
     var progress = CopyProgress()
     var verifyProgress = CopyProgress()

@@ -166,8 +166,18 @@ final class AppModel {
             card.files = result.files
             card.cameras = result.cameras
             card.shootDate = result.shootDate
+            card.scanError = result.error
             recompute(card)
         }
+    }
+
+    /// Scan the card again (e.g. after an unreadable result).
+    func rescan(_ card: Card) {
+        guard card.engine == nil else { return }
+        card.verifier?.cancel()
+        card.verifier = nil
+        card.plan = nil
+        scan(card)
     }
 
     func rebuildIndex() {
@@ -196,6 +206,14 @@ final class AppModel {
         if case .copying = card.phase { return }
         card.verifier?.cancel()
         card.verifier = nil
+
+        // No media, or a scan error: never verify, never backed.
+        if let phase = CardPhase.afterScan(fileCount: card.files.count, error: card.scanError) {
+            card.missing = card.files
+            card.plan = nil
+            card.phase = phase
+            return
+        }
 
         let driveReady = workingVolume != nil
         // Session copy destinations count wherever they are (work drive or a chosen folder),
@@ -236,7 +254,7 @@ final class AppModel {
 
     private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {
         card.missing = BackupVerifier.missing(files: card.files, results: results)
-        if card.missing.isEmpty {
+        if card.missing.isEmpty && !card.files.isEmpty {
             card.phase = .backed
             card.plan = nil
         } else if card.plan != nil {

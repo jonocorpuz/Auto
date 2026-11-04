@@ -33,11 +33,11 @@ struct CardRow: View {
 
     private var tint: Color {
         switch card.phase {
-        case .scanning, .verifying: Color(nsColor: AppModel.Status.idle.tint)
+        case .scanning, .verifying, .empty: Color(nsColor: AppModel.Status.idle.tint)
         case .copying: Color(nsColor: AppModel.Status.copying.tint)
         case .backed: Color(nsColor: AppModel.Status.backed.tint)
         case .needsBackup, .ready: Color(nsColor: AppModel.Status.unbacked.tint)
-        case .failed: Color(nsColor: AppModel.Status.error.tint)
+        case .failed, .unreadable: Color(nsColor: AppModel.Status.error.tint)
         }
     }
 
@@ -50,6 +50,8 @@ struct CardRow: View {
         case .copying: "Copying…"
         case .backed: "Backed up"
         case .failed: "Failed"
+        case .empty: "No media"
+        case .unreadable: "Can't read"
         }
     }
 
@@ -164,6 +166,27 @@ struct CardRow: View {
                 Button(card.ejecting ? "Ejecting…" : "Eject") { model.eject(card) }
                     .buttonStyle(.borderedProminent)
                     .disabled(card.ejecting)
+            }
+
+        case .empty:
+            Text("No media found on this card. Check it in Finder before you format it.")
+                .font(.callout).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Show in Finder") { model.openInFinder(card) }
+            }
+
+        case .unreadable(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red).font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Auto couldn't read everything on this card, so it can't tell if it's backed up. Don't format.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Show in Finder") { model.openInFinder(card) }
+                Spacer()
+                Button("Scan again") { model.rescan(card) }
+                    .buttonStyle(.borderedProminent)
             }
 
         case .failed(let message):

@@ -47,4 +47,29 @@ struct CardScannerTests {
         let shoot = try #require(result.shootDate)
         #expect(abs(shoot.timeIntervalSince(FixtureCard.clipDate)) < 1)
     }
+
+    @Test func cleanScanHasNoError() async throws {
+        let card = try FixtureCard()
+        defer { card.cleanup() }
+        #expect(await CardScanner.scan(card.root, volumeName: "NO NAME").error == nil)
+    }
+
+    @Test func unreadableFolderIsReportedNotSilentlySkipped() async throws {
+        let card = try FixtureCard()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: card.clip.path)
+            card.cleanup()
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: card.clip.path)
+        let result = await CardScanner.scan(card.root, volumeName: "NO NAME")
+        #expect(result.error != nil)
+        #expect(CardPhase.afterScan(fileCount: result.files.count, error: result.error) != nil)
+    }
+
+    @Test func missingVolumeIsAnErrorNotAnEmptyCard() async throws {
+        let gone = FileManager.default.temporaryDirectory.appendingPathComponent("AutoGone-\(UUID().uuidString)")
+        let result = await CardScanner.scan(gone, volumeName: "X")
+        #expect(result.files.isEmpty)
+        #expect(result.error != nil)
+    }
 }

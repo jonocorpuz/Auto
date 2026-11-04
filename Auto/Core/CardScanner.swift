@@ -7,14 +7,25 @@ nonisolated enum CardScanner {
         var files: [MediaFile]
         var cameras: [Camera]
         var shootDate: Date?
+        /// First read error (unreadable folder, permission denied). Any error means the file
+        /// list may be incomplete, so the card must not be treated as backed up.
+        var error: String? = nil
     }
+
+    private final class ErrorBox: @unchecked Sendable { var first: String? }
 
     /// `@concurrent` so the walk never runs on the caller's (main) actor.
     @concurrent static func scan(_ volume: URL, volumeName: String) async -> Result {
         MainThreadProbe.shared.mark("CardScanner.scan")
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey]
-        guard let walker = FileManager.default.enumerator(at: volume, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
-            return Result(files: [], cameras: [], shootDate: nil)
+        let errors = ErrorBox()
+        guard let walker = FileManager.default.enumerator(
+            at: volume, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { url, error in
+                if errors.first == nil { errors.first = "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)" }
+                return true
+            }) else {
+            return Result(files: [], cameras: [], shootDate: nil, error: "Couldn't read \(volume.lastPathComponent).")
         }
 
         let cardID = VolumeIdentity.of(volume)
@@ -23,7 +34,11 @@ nonisolated enum CardScanner {
         var cameras: [String: Camera] = [:]
 
         while let url = walker.nextObject() as? URL {
-            guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
+            let values: URLResourceValues
+            do { values = try url.resourceValues(forKeys: Set(keys)) } catch {
+                if errors.first == nil { errors.first = "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)" }
+                continue
+            }
             if values.isDirectory == true {
                 if MediaTypes.skippedFolders.contains(url.lastPathComponent.lowercased()) { walker.skipDescendants() }
                 continue
@@ -46,7 +61,7 @@ nonisolated enum CardScanner {
 
         let shootDate = files.map(\.date).min()
         let sortedCameras = cameras.values.sorted { $0.model < $1.model }
-        return Result(files: files.sorted { $0.url.path < $1.url.path }, cameras: sortedCameras, shootDate: shootDate)
+        return Result(files: files.sorted { $0.url.path < $1.url.path }, cameras: sortedCameras, shootDate: shootDate, error: errors.first)
     }
 
     // MARK: Camera detection

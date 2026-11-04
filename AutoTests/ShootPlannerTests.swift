@@ -61,4 +61,20 @@ struct ShootPlannerTests {
         #expect(S.aggregate([.backed, .verifying]) == .idle)
         #expect(S.aggregate([.needsBackup, .verifying]) == .unbacked)
     }
+
+    @Test func emptyAndUnreadableCardsAreNeverBacked() {
+        typealias S = StatusAggregator
+        #expect(S.aggregate([.empty]) == .idle)
+        #expect(S.aggregate([.backed, .empty]) == .idle)
+        #expect(S.aggregate([.unreadable("x")]) == .error)
+        #expect(S.aggregate([.backed, .unreadable("x")]) == .error)
+        #expect(S.aggregate([.needsBackup, .empty]) == .unbacked)
+    }
+
+    @Test func afterScanPhase() {
+        #expect(CardPhase.afterScan(fileCount: 0, error: nil) == .empty)
+        #expect(CardPhase.afterScan(fileCount: 3, error: "denied") == .unreadable("denied"))
+        #expect(CardPhase.afterScan(fileCount: 0, error: "denied") == .unreadable("denied"))
+        #expect(CardPhase.afterScan(fileCount: 3, error: nil) == nil)
+    }
 }
