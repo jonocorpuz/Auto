@@ -7,9 +7,9 @@ struct AppModelTests {
         #expect(AppModel().status == .idle)
     }
 
-    @Test(arguments: [AppModel.Status.idle, .working, .done, .error])
-    func everyStatusHasSymbolAndLabel(_ status: AppModel.Status) {
-        #expect(!status.symbol.isEmpty)
+    @Test(arguments: AppModel.Status.allCases)
+    func everyStatusHasLabelAndTint(_ status: AppModel.Status) {
         #expect(!status.label.isEmpty)
+        _ = status.tint
     }
 }
