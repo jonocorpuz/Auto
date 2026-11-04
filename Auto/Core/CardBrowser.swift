@@ -25,10 +25,14 @@ nonisolated enum CardBrowser {
         let folder: URL
     }
 
-    /// `backups`: card file URL -> verified copy. Files missing from it count as not backed up.
-    /// A copy inside nested shoot folders belongs to the deepest one. Empty groups are dropped,
-    /// except "Not backed up" which is omitted only when every file is backed up.
-    static func group(files: [MediaFile], backups: [URL: URL], shoots: [ShootRef]) -> [Group] {
+    /// `backups`: card file URL -> verified copy. `missing`: card files whose copy failed re-verification.
+    /// A file with no copy, or in `missing`, is "Not Backed Up" and appears nowhere else.
+    /// Otherwise it appears under every shoot whose `memberships` entry contains it (a checksum-verified
+    /// result). A shoot with no entry yet falls back to where the `backups` copy lexically lives (the
+    /// deepest shoot wins). Backed up but in no shoot: "Backed Up Elsewhere". Groups follow `shoots` order;
+    /// empty groups are dropped; membership ids that match no shoot are ignored.
+    static func group(files: [MediaFile], backups: [URL: URL], missing: Set<URL>,
+                      shoots: [ShootRef], memberships: [UUID: Set<URL>]) -> [Group] {
         // Deepest folder first so nested shoots win over their parents.
         let ordered = shoots
             .map { (ref: $0, path: canonical($0.folder)) }
@@ -38,13 +42,19 @@ nonisolated enum CardBrowser {
         var elsewhere: [MediaFile] = []
         var byShoot: [UUID: [MediaFile]] = [:]
         for file in files {
-            guard let copy = backups[file.url] else { notBacked.append(file); continue }
-            let path = canonical(copy)
-            if let match = ordered.first(where: { path.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") }) {
-                byShoot[match.ref.id, default: []].append(file)
-            } else {
-                elsewhere.append(file)
+            guard let copy = backups[file.url], !missing.contains(file.url) else { notBacked.append(file); continue }
+            var placed = false
+            for ref in shoots where memberships[ref.id]?.contains(file.url) == true {
+                byShoot[ref.id, default: []].append(file)
+                placed = true
             }
+            let path = canonical(copy)
+            if let match = ordered.first(where: { path.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") }),
+               memberships[match.ref.id] == nil {
+                byShoot[match.ref.id, default: []].append(file)
+                placed = true
+            }
+            if !placed { elsewhere.append(file) }
         }
 
         var groups: [Group] = []
@@ -55,6 +65,12 @@ nonisolated enum CardBrowser {
         }
         if !elsewhere.isEmpty { groups.append(Group(kind: .elsewhere, title: "Backed Up Elsewhere", files: sorted(elsewhere))) }
         return groups
+    }
+
+    /// Every file once, in on-screen order: the first occurrence wins when a file is in several groups.
+    static func uniqueFiles(_ groups: [Group]) -> [MediaFile] {
+        var seen = Set<MediaFile.ID>()
+        return groups.flatMap(\.files).filter { seen.insert($0.id).inserted }
     }
 
     private static func sorted(_ files: [MediaFile]) -> [MediaFile] {

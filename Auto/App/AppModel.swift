@@ -102,9 +102,11 @@ final class AppModel {
             else { folder = URL(fileURLWithPath: item.record.path, isDirectory: true) }
             return CardBrowser.ShootRef(id: item.id, name: item.record.name, folder: folder)
         }
-        let key = BrowserKey(cardID: card.id, files: card.files, backups: card.backups, shoots: refs)
+        let key = BrowserKey(cardID: card.id, files: card.files, backups: card.backups,
+                             missing: Set(card.missing.map(\.url)), shoots: refs)
         if let browserCache, browserCache.key == key { return browserCache.groups }
-        let groups = CardBrowser.group(files: card.files, backups: card.backups, shoots: refs)
+        let groups = CardBrowser.group(files: card.files, backups: card.backups, missing: key.missing,
+                                       shoots: refs, memberships: [:])
         browserCache = (key, groups)
         return groups
     }
@@ -113,6 +115,7 @@ final class AppModel {
         let cardID: Card.ID
         let files: [MediaFile]
         let backups: [URL: URL]
+        let missing: Set<URL>
         let shoots: [CardBrowser.ShootRef]
     }
 
