@@ -42,6 +42,8 @@ final class AppModel {
     private(set) var shoots: [ShootItem] = []
     private(set) var registry = ShootRegistry()
     private(set) var indexing = false
+    /// Per (shoot, card) coverage checks for the Add Footage sheet.
+    private(set) var coverage: [CoverageKey: CoverageState] = [:]
     /// Calendar used to split recordings into days (scan and New Shoot selection).
     let calendar = Calendar.current
 
@@ -111,6 +113,13 @@ final class AppModel {
     @ObservationIgnored let thumbnails: any ThumbnailProvider
     @ObservationIgnored private var thumbnailCache: [String: CGImage] = [:]
     @ObservationIgnored private var shootsGeneration = 0
+    @ObservationIgnored private var coverageTasks: [CoverageKey: Task<Void, Never>] = [:]
+    @ObservationIgnored private var coverageGenerations: [CoverageKey: Int] = [:]
+    @ObservationIgnored private var coverageCounter = 0
+    /// Card id -> shoot a pending add-footage plan copies into.
+    @ObservationIgnored private var addTargets: [Card.ID: UUID] = [:]
+    /// Online shoot folders the current backup verification considered (to detect changes).
+    @ObservationIgnored private var backupShootFolders: Set<String> = []
 
     init(registryURL: URL = ShootStore.defaultURL(),
          thumbnails: any ThumbnailProvider = QLThumbnailProvider(),
@@ -215,7 +224,11 @@ final class AppModel {
         // drops the old Card (and its backed state) and scans the new one from scratch.
         let identified = found.map { (url: $0, identity: VolumeIdentity.of($0)) }
         let gone = cards.filter { card in !identified.contains { $0.identity == card.identity } }
-        for card in gone { card.engine?.cancel(); card.verifier?.cancel() }
+        for card in gone {
+            card.engine?.cancel(); card.verifier?.cancel()
+            cancelCoverage { $0.cardID == card.id }
+            addTargets[card.id] = nil
+        }
         if let shown = shootSheetCard, gone.contains(where: { $0 === shown }) {
             shootSheetCard = nil
             if shootSheet == .create { shootSheet = nil }
@@ -241,6 +254,8 @@ final class AppModel {
 
     private func scan(_ card: Card) {
         card.phase = .scanning
+        // The file list is about to change: any coverage computed from it is stale.
+        cancelCoverage { $0.cardID == card.id }
         Task {
             let result = await CardScanner.scan(card.volume, volumeName: card.name)
             card.files = result.files
@@ -300,9 +315,17 @@ final class AppModel {
         // but only through the cache entry for that exact card file, or a fresh checksum.
         let candidates = BackupVerifier.addingCandidates(sessionCopies, to: driveReady ? index : [:])
         let generation = card.recomputeGeneration
+        let shootFolders = onlineShootFolders()
+        backupShootFolders = Set(shootFolders.map(\.path))
+        let cardVolumes = cards.map(\.volume)
+        let workVolume = driveReady ? workingVolume : nil
         // Never leave a stale green up while re-checking.
         if card.phase == .backed { card.phase = .scanning }
         Task {
+            // Any registered, online shoot counts as a backup location ("any shoot counts"). Built off
+            // main; card files never count as candidates for themselves.
+            let candidates = await Self.backupCandidates(base: candidates, shootFolders: shootFolders,
+                                                         cardVolumes: cardVolumes, workVolume: workVolume)
             // Triage stats every candidate on disk, so it runs off the main actor.
             let triage = await BackupVerifier.triageOffMain(files: card.files, candidates: candidates, cache: verifications)
             // Superseded by a copy, a new plan, a rescan or a newer recompute.
@@ -344,6 +367,38 @@ final class AppModel {
         }
     }
 
+    /// Folders of every registered shoot that is currently online (no I/O).
+    private func onlineShootFolders() -> [URL] {
+        shoots.compactMap { item -> URL? in
+            if case .online(let shoot)? = item.availability { return shoot.folder.standardizedFileURL }
+            return nil
+        }
+    }
+
+    /// Merges the work-drive candidates with an index of each online shoot folder, deduplicated by path.
+    /// Skips shoot folders on the work volume (already indexed, compared by volume identity), on a card,
+    /// or containing a card; drops any candidate that lives on a card.
+    @concurrent private static func backupCandidates(base: [String: [URL]], shootFolders: [URL],
+                                                     cardVolumes: [URL], workVolume: URL?) async -> [String: [URL]] {
+        let workID = workVolume.flatMap { try? $0.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier }
+        var merged: [String: [URL]] = [:]
+        var seen = Set<String>()
+        func add(_ key: String, _ url: URL) {
+            guard !VolumeClassifier.isInside(url, anyOf: cardVolumes),
+                  seen.insert(url.standardizedFileURL.path).inserted else { return }
+            merged[key, default: []].append(url)
+        }
+        for (key, urls) in base { for url in urls { add(key, url) } }
+        for folder in shootFolders {
+            if cardVolumes.contains(where: { VolumeClassifier.isInside($0, anyOf: [folder]) }) { continue }
+            if VolumeClassifier.isOnCard(folder, cards: cardVolumes) { continue }
+            if let workID, let id = try? folder.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier,
+               workID.isEqual(id) { continue }
+            for (key, urls) in await DriveIndex.build(folder) { for url in urls { add(key, url) } }
+        }
+        return merged
+    }
+
     /// Cancels any verify, and any triage still in flight, for this card.
     private func stopVerifier(_ card: Card) {
         card.verifier?.cancel()
@@ -355,7 +410,14 @@ final class AppModel {
         card.missing = BackupVerifier.missing(files: card.files, results: results)
         guard let phase = CardPhase.afterVerify(fileCount: card.files.count, missingCount: card.missing.count,
                                                 hasPlan: card.plan != nil, current: card.phase) else { return }
-        if phase == .backed { card.plan = nil }
+        if phase == .backed {
+            // A pending add-footage plan (extra copies into another shoot) survives a backed verdict.
+            if addTargets[card.id] != nil, card.plan != nil {
+                card.phase = .ready
+                return
+            }
+            card.plan = nil
+        }
         card.phase = phase
     }
 
@@ -419,6 +481,7 @@ final class AppModel {
         try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobs), root: root, cardVolumes: volumes(including: card))
         stopVerifier(card)
         card.plan = ShootPlanner.plan(jobs: jobs, shoot: shoot, workRoot: root)
+        addTargets[card.id] = nil
         card.phase = .ready
         shootSheet = nil
         shootSheetCard = nil
@@ -449,6 +512,7 @@ final class AppModel {
         guard card.engine == nil else { return }
         stopVerifier(card)
         card.plan = ShootPlanner.flatPlan(missing: card.missing, into: dir)
+        addTargets[card.id] = nil
         card.phase = .ready
     }
 
@@ -478,6 +542,7 @@ final class AppModel {
     func discardPlan(_ card: Card) {
         guard card.engine == nil else { return }
         card.plan = nil
+        addTargets[card.id] = nil
         recompute(card)
     }
 
@@ -517,8 +582,21 @@ final class AppModel {
         card.engine = engine
         card.progress = CopyProgress(filesTotal: plan.jobs.count, bytesTotal: plan.bytes)
         card.phase = .copying
+        let addShootID = addTargets[card.id]
+        let planWorkRoot = plan.workRoot
 
         Task {
+            // Off main: the destination folder must still exist, and an add-footage target must still
+            // carry the shoot's id, before a single byte is written.
+            do {
+                try await Task.detached { try Self.preflight(workRoot: planWorkRoot, shootID: addShootID) }.value
+            } catch {
+                guard card.engine === engine else { return }
+                card.engine = nil
+                card.phase = .failed(error.localizedDescription)
+                return
+            }
+            guard card.engine === engine else { return }
             let outcome = await engine.run(plan.jobs) { progress in card.progress = progress }
             card.engine = nil
             sessionCopies.append(contentsOf: outcome.copied)
@@ -529,6 +607,8 @@ final class AppModel {
             // Just-copied files must not be selectable again while they re-verify.
             card.missing.removeAll { done.contains($0.url) }
             if card.plan?.jobs.isEmpty == true { card.plan = nil }
+            // The add target lives as long as the plan does (partial failures retry into the same shoot).
+            if card.plan == nil { addTargets[card.id] = nil }
             card.backedTo = plan.destinationRoot.path.hasPrefix(workingVolume?.path ?? "\u{0}") ? workingDriveName : plan.destinationLabel
 
             if let first = outcome.failures.first {
@@ -538,7 +618,25 @@ final class AppModel {
                 card.phase = .needsBackup
             }
             recompute(card)
+            // Anything that landed inside a registered shoot changes that shoot's coverage.
+            let landed = shoots.filter { item in
+                if case .online(let shoot)? = item.availability { return ShootPlanner.isInside(plan.destinationRoot, root: shoot.folder) }
+                return false
+            }
+            for item in landed { checkCoverage(shootID: item.id, cardID: card.id) }
+            if !landed.isEmpty { await refreshShoots() }
             if !outcome.cancelled { openMainWindow() }
+        }
+    }
+
+    nonisolated private static func preflight(workRoot: URL?, shootID: UUID?) throws {
+        guard let root = workRoot else { return }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else {
+            throw ShootPlanner.PathError.workFolderMissing
+        }
+        if let shootID {
+            guard try ShootFolders.readSidecar(in: root)?.id == shootID else { throw ShootError.sidecarMismatch }
         }
     }
 
@@ -634,6 +732,14 @@ extension AppModel {
             let id = shoots[i].id
             shoots[i].availability = availability[id]
             if case .online? = availability[id] {} else { shoots[i].summary = nil; shoots[i].thumbnail = nil }
+        }
+        // The set of shoots that count as backup locations changed: re-verify the cards.
+        for item in shoots {
+            if case .online? = item.availability { continue }
+            discardAddPlans(forShoot: item.id)
+        }
+        if Set(onlineShootFolders().map(\.path)) != backupShootFolders {
+            cards.forEach { recompute($0) }
         }
 
         let online: [(UUID, URL)] = shoots.compactMap { item in
@@ -754,10 +860,163 @@ extension AppModel {
 
     /// Removes the shoot from Auto's list. Files on disk are never touched.
     func forgetShoot(id: UUID) async {
+        cancelCoverage { $0.shootID == id }
+        discardAddPlans(forShoot: id)
         registry.remove(id: id)
         await saveRegistry()
         await refreshShoots()
     }
+}
+
+extension AppModel {
+    // MARK: Add footage
+
+    private struct UnknownTargetError: LocalizedError {
+        var errorDescription: String? { "That shoot or card isn't available any more." }
+    }
+
+    private func cancelCoverage(where match: (CoverageKey) -> Bool) {
+        for key in coverageTasks.keys where match(key) { coverageTasks[key]?.cancel(); coverageTasks[key] = nil }
+        for key in coverage.keys where match(key) { coverage[key] = nil; coverageGenerations[key] = nil }
+    }
+
+    /// Checks (off the main actor) which of the card's files are already verified inside the shoot.
+    func checkCoverage(shootID: UUID, cardID: Card.ID) {
+        let key = CoverageKey(shootID: shootID, cardID: cardID)
+        guard let card = cards.first(where: { $0.id == cardID }),
+              let item = shoots.first(where: { $0.id == shootID }),
+              case .online(let shoot)? = item.availability else {
+            cancelCoverage { $0 == key }
+            return
+        }
+        startCoverage(key: key, files: card.files, folder: shoot.folder, day: item.date)
+    }
+
+    /// Core of `checkCoverage` with explicit inputs. Returns the task so callers can await it.
+    @discardableResult
+    func startCoverage(key: CoverageKey, files: [MediaFile], folder: URL, day: Date) -> Task<Void, Never> {
+        coverageTasks[key]?.cancel()
+        coverageCounter += 1
+        let generation = coverageCounter
+        coverageGenerations[key] = generation
+        coverage[key] = .checking(CopyProgress())
+        let copies = sessionCopies
+        let cache = verifications
+        let calendar = calendar
+        let cardVolumes = cards.map(\.volume)
+        let task = Task {
+            let (stream, continuation) = AsyncStream<CopyProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            let consumer = Task {
+                for await progress in stream {
+                    if coverageGenerations[key] == generation, case .checking? = coverage[key] { coverage[key] = .checking(progress) }
+                }
+            }
+            let result = await ShootCoverageChecker.run(files: files, shootFolder: folder, sessionCopies: copies, cache: cache,
+                                                        cardVolumes: cardVolumes) { continuation.yield($0) }
+            continuation.finish()
+            await consumer.value
+            // Superseded, forgotten or ejected: never store a partial result.
+            guard coverageGenerations[key] == generation else { return }
+            coverageTasks[key] = nil
+            if let failure = result.failure {
+                coverage[key] = .failed(failure)
+            } else if Task.isCancelled || result.cancelled {
+                coverage[key] = nil
+            } else {
+                coverage[key] = .done(ShootCoverage.compute(files: files, day: day, calendar: calendar, inShoot: result.verified))
+            }
+        }
+        coverageTasks[key] = task
+        return task
+    }
+
+    /// Selection the sheet starts with in add mode: only the shoot's own day.
+    func shootSheetDefaults(shootID: UUID, cardID: Card.ID) -> ShootSelection {
+        let card = cards.first { $0.id == cardID }
+        let day = shoots.first { $0.id == shootID }?.date ?? .distantPast
+        return ShootSelection(files: card?.files ?? [], cameras: card?.cameras ?? [], calendar: calendar, onlyDay: day)
+    }
+
+    private struct CoverageUnavailableError: LocalizedError {
+        var errorDescription: String? { "Auto couldn't finish checking what this shoot already has. Try again in a moment." }
+    }
+
+    /// Add-footage doesn't depend on the backup verdict: a backed-up card can still feed another shoot.
+    private func canAddFootage(_ card: Card) -> Bool {
+        switch card.phase {
+        case .backed, .verifying, .needsBackup, .ready, .failed: card.engine == nil
+        default: false
+        }
+    }
+
+    /// Drops pending (not yet running) add-footage plans aimed at `shootID`.
+    private func discardAddPlans(forShoot shootID: UUID) {
+        for (cardID, target) in addTargets where target == shootID {
+            guard let card = cards.first(where: { $0.id == cardID }) else { addTargets[cardID] = nil; continue }
+            guard card.engine == nil else { continue }
+            addTargets[cardID] = nil
+            card.plan = nil
+            if card.phase == .ready { recompute(card) }
+        }
+    }
+
+    /// Plans a copy of the selected files that are not yet verified inside the shoot into the shoot folder
+    /// (Video/Photo/<camera>). Re-reads the sidecar and runs a fresh coverage check first, so it never
+    /// plans from a stale snapshot. The user then starts it with `copy(_:)`.
+    func addFootage(shootID: UUID, cardID: Card.ID, cameras: [Camera], selection: ShootSelection) async throws {
+        guard let item = shoots.first(where: { $0.id == shootID }), let card = cards.first(where: { $0.id == cardID }) else {
+            throw UnknownTargetError()
+        }
+        guard case .online(let shoot)? = item.availability else { throw ShootError.shootOffline }
+        guard canAddFootage(card) else { throw PhaseError() }
+        let folder = shoot.folder
+        let sidecar = try await Task.detached { try ShootFolders.readSidecar(in: folder) }.value
+        guard sidecar?.id == shootID else {
+            await refreshShoots()
+            throw ShootError.sidecarMismatch
+        }
+        // State may have changed while the sidecar was read.
+        guard case .online(let again)? = shoots.first(where: { $0.id == shootID })?.availability, again.folder == folder else {
+            throw ShootError.shootOffline
+        }
+        guard cards.contains(where: { $0 === card }), canAddFootage(card) else { throw PhaseError() }
+        if isOnCard(folder) { throw CardDestinationError() }
+
+        // Fresh coverage for exactly the files on the card right now.
+        let key = CoverageKey(shootID: shootID, cardID: cardID)
+        let snapshot = card.files
+        let task = startCoverage(key: key, files: snapshot, folder: folder, day: item.date)
+        await task.value
+        guard case .done(let covered)? = coverage[key] else {
+            if case .failed(let reason)? = coverage[key] { throw ShootCoverageError(reason: reason) }
+            throw CoverageUnavailableError()
+        }
+        guard cards.contains(where: { $0 === card }), card.files == snapshot, canAddFootage(card),
+              case .online(let latest)? = shoots.first(where: { $0.id == shootID })?.availability, latest.folder == folder else {
+            throw CoverageUnavailableError()
+        }
+
+        let jobs = ShootPlanner.jobs(missing: selection.filter(covered.notInShoot), shoot: folder, cameras: cameras, fallback: card.name)
+        guard !jobs.isEmpty else { throw EmptySelectionError() }
+        guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: folder) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
+
+        try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobs), root: folder, cardVolumes: volumes(including: card))
+        stopVerifier(card)
+        card.plan = ShootPlanner.plan(jobs: jobs, shoot: folder, workRoot: folder)
+        addTargets[cardID] = shootID
+        card.phase = .ready
+        shootSheet = nil
+        shootSheetCard = nil
+    }
+
+    struct ShootCoverageError: LocalizedError {
+        let reason: String
+        var errorDescription: String? { reason }
+    }
+
+    #if DEBUG
+    func _testInsert(card: Card) { cards.append(card) }
+    #endif
 }
 
 enum Format {
