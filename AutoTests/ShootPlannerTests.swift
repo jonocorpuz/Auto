@@ -145,4 +145,38 @@ struct ShootPlannerTests {
         #expect(CardPhase.afterScan(fileCount: 0, error: "denied") == .unreadable("denied"))
         #expect(CardPhase.afterScan(fileCount: 3, error: nil) == nil)
     }
+
+    @Test func shootURLUnderPrivateTmpRoot() throws {
+        let fm = FileManager.default
+        let base = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+        let root = fm.isWritableFile(atPath: base.path)
+            ? base.appendingPathComponent("AutoRoot-\(UUID().uuidString)", isDirectory: true)
+            : fm.temporaryDirectory.appendingPathComponent("AutoRoot-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let shoot = try ShootPlanner.shootURL(root: root, name: "New Shoot")
+        #expect(ShootPlanner.isInside(shoot, root: root))
+        let jobs = ShootPlanner.jobs(missing: [file("a.MP4", kind: .video, camera: "a")], shoot: shoot, cameras: [], fallback: "Card")
+        #expect(!ShootPlanner.folders(for: jobs, shoot: shoot, root: root).isEmpty)
+    }
+
+    @Test func foldersMatchWhenRootSpellingDiffers() throws {
+        func rows(_ prefix: String) throws -> [[String]] {
+            let root = URL(fileURLWithPath: "\(prefix)/x", isDirectory: true)
+            let shoot = try ShootPlanner.shootURL(root: root, name: "S")
+            let jobs = ShootPlanner.jobs(missing: [file("a.MP4", kind: .video, camera: "a")], shoot: shoot, cameras: [], fallback: "Card")
+            return ShootPlanner.folders(for: jobs, shoot: shoot, root: root).map { $0.components.filter { $0 != "private" } }
+        }
+        let a = try rows("/tmp"), b = try rows("/private/tmp")
+        #expect(!a.isEmpty)
+        #expect(a.map(\.count) == b.map(\.count))
+        #expect(a.map { $0.suffix(1) } == b.map { $0.suffix(1) })
+    }
+
+    @Test func afterVerifyPhase() {
+        #expect(CardPhase.afterVerify(fileCount: 3, missingCount: 0, hasPlan: false, current: .verifying) == .backed)
+        #expect(CardPhase.afterVerify(fileCount: 3, missingCount: 1, hasPlan: false, current: .verifying) == .needsBackup)
+        #expect(CardPhase.afterVerify(fileCount: 3, missingCount: 1, hasPlan: true, current: .verifying) == .ready)
+        #expect(CardPhase.afterVerify(fileCount: 3, missingCount: 1, hasPlan: false, current: .failed("x")) == nil)
+    }
 }
