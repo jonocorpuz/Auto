@@ -8,7 +8,7 @@ See also: [CLAUDE.md](CLAUDE.md), [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Vision
 
-Plug in a card and Auto does the rest: it backs the footage up safely, files it under the right client and shoot, makes proxies, and opens a ready-to-cut DaVinci Resolve project.
+Plug in a card and Auto does the rest: it backs the footage up safely, files it under the right shoot, makes proxies, and opens a ready-to-cut DaVinci Resolve project.
 
 ## Backed → Auto: what "better" means
 
@@ -41,17 +41,23 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - [x] `DriveIndex`: what already exists in the work folder (name + size keys)
 - [x] `CopyEngine`: streamed copy, temp name + atomic rename, size + hash verify, unique names, cancel
 - [x] `VolumeWatcher`: detect card mount/unmount, ignore non-card volumes
-- [x] New Shoot flow: client autocomplete → shoot name → folder preview (`Client/YYYY-MM-DD Shoot/Camera/`)
+- [x] New Shoot flow: shoot name → folder preview (`<work folder>/<shoot name>/{Video,Photo}/<camera>/`)
 - [x] Status item: click opens the main app window (no dropdown/popover); right-click menu for Settings / Quit
 - [x] Status icon states: idle / unbacked / copying / backed / error (static "a." with tinted dot, no animation)
 - [x] `-AutoFixtureCard <path>` launch argument for manual testing
 - [x] Backup status is checksum-verified (`BackupVerifier`): green only when every card file matches a drive copy by hash
 - [x] Copy hardening: unique `O_EXCL` partials, `renamex_np` `RENAME_EXCL`, `F_FULLFSYNC` + uncached read-back
-- [ ] Manual end-to-end test with a real card + real work drive (copy, eject, auto-open on mount)
+- [x] New Shoot has no client or date: shoot name only (required), layout `<work folder>/<shoot name>/{Video,Photo}/<camera>/`, "Footage" renamed "Video", no "Project" folder
+- [x] Existing shoot folder: Auto adds into it (`CopyEngine` never overwrites); preview marks folders "already there"
+- [x] New Shoot preview rows come from `ShootPlanner.folders(for:shoot:root:)`, built from the same copy jobs `createShoot` uses
+- [x] Date format setting and client helpers/suggestions removed; Settings has no "Shoots" section
+- [x] `ShootDays.byCamera`: recording days per camera; CardRow shows day chips per camera (e.g. "Mar 22 · 120", "2 days") so two shoots on one card are obvious
+- [x] Camera labels never include the serial; same-model bodies get letter suffixes ("FX3 A", "FX3 B") applied to label and folder name (`Camera.disambiguated`)
+- [x] New Shoot sheet themed (Theme tokens, `SurfaceCard`), labels above full-width fields
 - [x] Safety review fixes: verified copies keyed by card-file identity, refuse card destinations, empty/unreadable phases, path sanitizing, card identity by volume UUID, scans/indexing off main
-- [ ] Move remaining main-thread disk touches out of views (`workingVolume`, `existingClients`, `shootFolderExists`)
+- [ ] Move remaining main-thread disk touches out of views (`workingVolume`, the stat calls in `shootFolders`)
 - [ ] Detect a work folder that is itself on a camera card
-- [ ] New Shoot preview should show sanitized camera folder names
+- [x] New Shoot preview shows sanitized camera folder names
 - [ ] AppModel test harness (fake VolumeWatcher) to cover card lifecycle wiring
 
 ## Phase 3: Editing pipeline
@@ -102,3 +108,4 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 | 2026-11-03 | Drop Backed's animated `OrbView` | Developer found it cheesy; status is shown with a static tinted dot |
 | 2026-11-03 | Settings is a tab in the main window, not a separate window | One window, sidebar navigation; Cmd-comma selects the tab |
 | 2026-11-03 | Backed status requires checksum verification, not name+size | Same-name/same-size RAWs from different bodies could falsely show as backed |
+| 2026-11-03 | Shoots are `<work folder>/<name>`, no client or date folders | Developer files shoots by name only; `Video`/`Photo` per camera |

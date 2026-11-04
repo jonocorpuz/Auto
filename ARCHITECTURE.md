@@ -37,7 +37,7 @@ flowchart TD
         Index["DriveIndex\nwork folder, name+size keys"]
         Verifier["BackupVerifier\nhash-compares card files"]
         Copy["CopyEngine\nverified copy"]
-        Planner["ShootPlanner\nfolder names, copy jobs, status"]
+        Planner["ShootPlanner\nfolder layout, copy jobs, status"]
     end
 
     subgraph Integrations ["Integrations (Auto/Integrations), planned"]
@@ -47,7 +47,7 @@ flowchart TD
 
     subgraph External ["Outside the app"]
         Cards[("Camera cards\n/Volumes/*")]
-        Work[("Work folder\nClient/Shoot/...")]
+        Work[("Work folder\nShoot/Video|Photo/Camera/...")]
         DR["DaVinci Resolve"]
     end
 
@@ -106,8 +106,8 @@ Auto/                         # repo root
 │   │   ├── MediaView.swift   #   Media tab: stats, cards, recent shoots (placeholder), drives
 │   │   ├── EditPlaceholderView.swift # empty Video Edit / Photo Edit tabs
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
-│   │   ├── CardRow.swift     #   per-card header, phase content and actions; static StatusDot
-│   │   ├── NewShootView.swift#   sheet: client, shoot name, date, camera folders, live preview
+│   │   ├── CardRow.swift     #   per-card header, phase content and actions, per-camera day chips; static StatusDot
+│   │   ├── NewShootView.swift#   sheet: shoot name, cameras, live folder preview (Theme tokens)
 │   │   └── SettingsView.swift#   Settings tab; "Soon" rows persist values nothing reads yet
 │   ├── Core/                 # pure, testable engines, no SwiftUI
 │   │   ├── VolumeWatcher.swift     #   NSWorkspace mount notifications, refresh off main
@@ -118,7 +118,8 @@ Auto/                         # repo root
 │   │   ├── DriveIndex.swift        #   work-folder media grouped by name+size
 │   │   ├── BackupVerifier.swift    #   checksum-compares card files with drive candidates
 │   │   ├── CopyEngine.swift        #   verified copy with cancel
-│   │   └── ShootPlanner.swift      #   shoot folder naming, copy jobs, CardPhase, StatusAggregator
+│   │   ├── ShootDays.swift         #   recording days per camera (ShootDays.byCamera)
+│   │   └── ShootPlanner.swift      #   shoot folder naming, planned folder rows, copy jobs, CardPhase, StatusAggregator
 │   ├── Integrations/         # (planned, Phase 3) Resolve / transcoder adapters behind protocols
 │   └── Assets.xcassets
 ├── AutoTests/                # Swift Testing target (hosted in Auto.app)
@@ -170,8 +171,8 @@ sequenceDiagram
         Model->>UI: Status = backed (green)
     else files missing
         Model->>UI: Status = unbacked, offer New Shoot
-        User->>UI: Pick / create Client → Shoot
-        UI->>Model: createShoot(client, name, date, cameras)
+        User->>UI: Enter shoot name, pick cameras
+        UI->>Model: createShoot(name, cameras)
         Model->>Model: ShootPlanner builds copy jobs
         Model->>Copy: run(jobs)
         loop each file
@@ -203,7 +204,7 @@ The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet
 | Proxies | AVFoundation export (ffmpeg optional) | No bundled dependency for the default path. |
 | Resolve | DaVinci Resolve scripting API via `Process` (Python) | Same API the `davinci-resolve` MCP uses. Studio for external scripting. |
 | Tests | Swift Testing | Parameterized tests, clean `#expect` diagnostics. |
-| Persistence | `UserDefaults` for settings (work folder, date format, auto-open); the drive index is rebuilt by scanning the work folder | Simple, no database. A persisted, resumable index is Phase 4. |
+| Persistence | `UserDefaults` for settings (work folder, auto-open, appearance); the drive index is rebuilt by scanning the work folder | Simple, no database. A persisted, resumable index is Phase 4. |
 
 ---
 
@@ -225,6 +226,6 @@ The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet
 Phases and their checklists live in [ROADMAP.md](ROADMAP.md). In summary:
 
 - **Phase 1: Foundation.** Menu bar shell, settings, work folder, test target. *(done)*
-- **Phase 2: Ingest parity with Backed.** Card detection, scanning, verified copy, client/shoot folders. *(engines and app wiring landed; manual end-to-end test pending)*
+- **Phase 2: Ingest parity with Backed.** Card detection, scanning, verified copy, shoot folders. *(engines and app wiring landed; manual end-to-end test pending)*
 - **Phase 3: Editing pipeline.** Organize, proxies, Resolve project setup.
 - **Phase 4: Polish & release.** Notifications, history, signing/notarization.
