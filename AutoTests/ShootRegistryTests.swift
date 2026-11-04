@@ -125,4 +125,35 @@ struct ShootRegistryTests {
         let found = await ShootStore.discover(under: dir, calendar: Calendar(identifier: .gregorian))
         #expect(found.map(\.id) == [a])
     }
+
+    @Test func corruptFileIsQuarantinedNotDeleted() async throws {
+        let dir = try tempDir()
+        let url = dir.appendingPathComponent("shoots.json")
+        let bytes = Data("{ not json".utf8)
+        try bytes.write(to: url)
+        #expect(await ShootStore.load(from: url) == ShootRegistry())
+        let backups = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("shoots.json.corrupt-") }
+        #expect(backups.count == 1)
+        #expect(try Data(contentsOf: dir.appendingPathComponent(backups[0])) == bytes)
+    }
+
+    @Test func missingFileMakesNoBackup() async throws {
+        let dir = try tempDir()
+        _ = await ShootStore.load(from: dir.appendingPathComponent("shoots.json"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)
+    }
+
+    @Test func rapidSavesLeaveTheLaterSnapshot() async throws {
+        let url = try tempDir().appendingPathComponent("shoots.json")
+        var first = ShootRegistry(); first.add(record(path: "/tmp/one"))
+        var second = first; second.add(record(path: "/tmp/two"))
+        try await ShootStore.save(first, to: url)
+        try await ShootStore.save(second, to: url)
+        #expect(await ShootStore.load(from: url) == second)
+        // A stale ticket arriving late is dropped.
+        let saver = ShootRegistrySaver()
+        try await saver.save(second, to: url, ticket: 10)
+        try await saver.save(first, to: url, ticket: 9)
+        #expect(await ShootStore.load(from: url) == second)
+    }
 }

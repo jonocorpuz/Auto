@@ -69,23 +69,49 @@ nonisolated enum ShootStore {
     }
 
     @concurrent static func load(from url: URL) async -> ShootRegistry {
-        guard let data = try? Data(contentsOf: url) else { return ShootRegistry() }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            if (error as NSError).code != NSFileReadNoSuchFileError {
+                NSLog("Auto: shoots.json unreadable: \(error)")
+                quarantine(url)
+            }
+            return ShootRegistry()
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         do {
             return try decoder.decode(ShootRegistry.self, from: data)
         } catch {
-            NSLog("Auto: shoots.json unreadable, starting empty: \(error)")
+            NSLog("Auto: shoots.json undecodable, backing up and starting empty: \(error)")
+            quarantine(url)
             return ShootRegistry()
         }
     }
 
+    /// Renames a bad registry to `shoots.json.corrupt-<timestamp>` next to it. Never deletes.
+    private nonisolated static func quarantine(_ url: URL) {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        let stamp = f.string(from: Date())
+        let fm = FileManager.default
+        var target = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".corrupt-" + stamp)
+        var n = 1
+        while fm.fileExists(atPath: target.path) {
+            target = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".corrupt-" + stamp + "-\(n)")
+            n += 1
+        }
+        do { try fm.moveItem(at: url, to: target) } catch { NSLog("Auto: could not back up corrupt registry: \(error)") }
+    }
+
+    /// Hands out call-order tickets so a slow earlier save can never overwrite a later one.
+    private static let tickets = TicketCounter()
+
     @concurrent static func save(_ r: ShootRegistry, to url: URL) async throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(r).write(to: url, options: .atomic)
+        let ticket = tickets.next()
+        try await ShootRegistrySaver.shared.save(r, to: url, ticket: ticket)
     }
 
     /// The `/Volumes/<name>` mount point a path lives under, if any.
@@ -95,11 +121,23 @@ nonisolated enum ShootStore {
         return "/Volumes/" + parts[2]
     }
 
+    /// True for a real mount (or a symlink such as "Macintosh HD"). A leftover empty directory in
+    /// /Volumes shares the identifier of /Volumes itself and counts as not mounted.
+    private nonisolated static func isMounted(_ root: String) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: root) else { return false }
+        if (try? fm.destinationOfSymbolicLink(atPath: root)) != nil { return true }
+        let keys: Set<URLResourceKey> = [.volumeIdentifierKey]
+        guard let a = try? URL(fileURLWithPath: root).resourceValues(forKeys: keys).volumeIdentifier as? NSObject,
+              let b = try? URL(fileURLWithPath: "/Volumes").resourceValues(forKeys: keys).volumeIdentifier as? NSObject else { return true }
+        return !a.isEqual(b)
+    }
+
     @concurrent static func resolve(_ records: [ShootRecord], calendar: Calendar, cardVolumes: [URL]) async -> [UUID: ShootAvailability] {
         let fm = FileManager.default
         var result: [UUID: ShootAvailability] = [:]
         for record in records {
-            if let root = volumeRoot(of: record.path), !fm.fileExists(atPath: root) {
+            if let root = volumeRoot(of: record.path), !isMounted(root) {
                 result[record.id] = .offline
                 continue
             }
@@ -134,5 +172,28 @@ nonisolated enum ShootStore {
                                      path: child.standardizedFileURL.path, lastSeen: Date()))
         }
         return found
+    }
+}
+
+nonisolated final class TicketCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func next() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+}
+
+/// Serializes registry writes and drops any snapshot older than one already written.
+actor ShootRegistrySaver {
+    static let shared = ShootRegistrySaver()
+    private var lastTicket: [String: Int] = [:]
+
+    func save(_ r: ShootRegistry, to url: URL, ticket: Int) throws {
+        let key = url.standardizedFileURL.path
+        if let last = lastTicket[key], last > ticket { return }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(r).write(to: url, options: .atomic)
+        lastTicket[key] = ticket
     }
 }
