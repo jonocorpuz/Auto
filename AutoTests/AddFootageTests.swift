@@ -194,6 +194,58 @@ struct AddFootageTests {
         #expect(card.phase == .needsBackup)
     }
 
+    @Test func addFilesCopiesChosenFilesIntoShoot() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let cardDir = env.dir.appendingPathComponent("cardfiles", isDirectory: true)
+        try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 100).write(to: cardDir.appendingPathComponent("A.MP4"))
+        try Data(repeating: 2, count: 150).write(to: cardDir.appendingPathComponent("B.MP4"))
+        let a = file(cardDir.appendingPathComponent("A.MP4"), size: 100, date: shoot.date)
+        let b = file(cardDir.appendingPathComponent("B.MP4"), size: 150, date: shoot.date)
+        let card = insertCard(env, files: [a, b])
+
+        try await env.model.addFiles([b.url], from: card.id, toShoot: shoot.id)
+        for _ in 0..<200 where card.phase == .copying || card.engine != nil {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let copied = try FileManager.default.subpathsOfDirectory(atPath: shoot.folder.path)
+            .filter { $0.hasSuffix(".MP4") }.map { ($0 as NSString).lastPathComponent }
+        #expect(copied == ["B.MP4"])
+        // The card itself is untouched.
+        #expect(try FileManager.default.contentsOfDirectory(atPath: cardDir.path).sorted() == ["A.MP4", "B.MP4"])
+    }
+
+    @Test func addFilesRefusesWhenAPlanIsPending() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let other = try await env.model.createShoot(name: "T", date: day, parent: env.parent)
+        let cardDir = env.dir.appendingPathComponent("cardfiles", isDirectory: true)
+        try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 100).write(to: cardDir.appendingPathComponent("A.MP4"))
+        let a = file(cardDir.appendingPathComponent("A.MP4"), size: 100, date: shoot.date)
+        let card = insertCard(env, files: [a])
+        let selection = env.model.shootSheetDefaults(shootID: shoot.id, cardID: card.id)
+        try await env.model.addFootage(shootID: shoot.id, cardID: card.id, cameras: [], selection: selection)
+        let pending = try #require(card.plan)
+
+        await #expect(throws: (any Error).self) {
+            try await env.model.addFiles([a.url], from: card.id, toShoot: other.id)
+        }
+        #expect(card.plan?.jobs.map(\.destDir) == pending.jobs.map(\.destDir))
+        #expect(card.phase == .ready)
+    }
+
+    @Test func fileThumbnailsAreKeyedByFileIdentity() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let url = URL(fileURLWithPath: "/Volumes/Untitled/DCIM/C0001.MP4")
+        var first = file(url, size: 10, date: day); first.cardID = "card-1"
+        var second = file(url, size: 10, date: day); second.cardID = "card-2"
+        #expect(first.identity != second.identity)
+        #expect(await env.model.fileThumbnail(for: first) != nil)
+        #expect(await env.model.fileThumbnail(for: second) != nil)
+    }
+
     @Test func backedCardCanAddToAnotherShoot() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
         let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)

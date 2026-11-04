@@ -78,19 +78,42 @@ final class AppModel {
         didSet { if selectedTab != .media { browsingCardID = nil } }
     }
     /// Card open in the Media tab's file browser; nil shows the overview.
-    var browsingCardID: Card.ID?
+    var browsingCardID: Card.ID? {
+        didSet {
+            guard browsingCardID != oldValue else { return }
+            fileThumbnails.removeAll()
+            missingThumbnails.removeAll()
+            browserCache = nil
+        }
+    }
 
     var browsingCard: Card? {
         browsingCardID.flatMap { id in cards.first { $0.id == id } }
     }
 
     /// The browsed card's files grouped into "Not Backed Up", then by the shoot holding their copy.
+    /// Memoized on its inputs, so selection clicks and copy-progress ticks don't regroup the card.
     func browserGroups(for card: Card) -> [CardBrowser.Group] {
-        let refs = shoots.compactMap { item -> CardBrowser.ShootRef? in
-            guard case .online(let shoot)? = item.availability else { return nil }
-            return CardBrowser.ShootRef(id: item.id, name: item.record.name, folder: shoot.folder)
+        // Every registered shoot, online or not: a copy in a shoot that just went offline still belongs
+        // to it until the re-verify drops it, rather than falling into "Backed Up Elsewhere".
+        let refs = shoots.map { item -> CardBrowser.ShootRef in
+            let folder: URL
+            if case .online(let shoot)? = item.availability { folder = shoot.folder }
+            else { folder = URL(fileURLWithPath: item.record.path, isDirectory: true) }
+            return CardBrowser.ShootRef(id: item.id, name: item.record.name, folder: folder)
         }
-        return CardBrowser.group(files: card.files, backups: card.backups, shoots: refs)
+        let key = BrowserKey(cardID: card.id, files: card.files, backups: card.backups, shoots: refs)
+        if let browserCache, browserCache.key == key { return browserCache.groups }
+        let groups = CardBrowser.group(files: card.files, backups: card.backups, shoots: refs)
+        browserCache = (key, groups)
+        return groups
+    }
+
+    private struct BrowserKey: Equatable {
+        let cardID: Card.ID
+        let files: [MediaFile]
+        let backups: [URL: URL]
+        let shoots: [CardBrowser.ShootRef]
     }
 
     /// Light/dark preference, applied app-wide.
@@ -131,6 +154,9 @@ final class AppModel {
     @ObservationIgnored private var thumbnailCache: [String: CGImage] = [:]
     /// Card browser previews, keyed by file path. Cleared wholesale when it grows large.
     @ObservationIgnored private var fileThumbnails: [String: CGImage] = [:]
+    /// Files QuickLook couldn't preview, so they aren't retried on every scroll.
+    @ObservationIgnored private var missingThumbnails: Set<String> = []
+    @ObservationIgnored private var browserCache: (key: BrowserKey, groups: [CardBrowser.Group])?
     @ObservationIgnored private var shootsGeneration = 0
     @ObservationIgnored private var coverageTasks: [CoverageKey: Task<Void, Never>] = [:]
     @ObservationIgnored private var coverageGenerations: [CoverageKey: Int] = [:]
@@ -268,6 +294,7 @@ final class AppModel {
 
     private func scan(_ card: Card) {
         card.phase = .scanning
+        card.backups = [:]
         // The file list is about to change: any coverage computed from it is stale.
         cancelCoverage { $0.cardID == card.id }
         Task {
@@ -334,8 +361,8 @@ final class AppModel {
         backupShootFolders = Set(shootFolders.map(\.path))
         let cardVolumes = cards.map(\.volume)
         let workVolume = driveReady ? workingVolume : nil
-        // Never leave a stale green up while re-checking.
-        if card.phase == .backed { card.phase = .scanning }
+        // Never leave a stale green up while re-checking (in the header or the card browser).
+        if card.phase == .backed { card.phase = .scanning; card.backups = [:] }
         Task {
             // Any registered, online shoot counts as a backup location ("any shoot counts"). Built off
             // main; card files never count as candidates for themselves.
@@ -353,6 +380,7 @@ final class AppModel {
         let allVerified = triage.toVerify.isEmpty && card.files.allSatisfy { triage.settled[$0.url]?.isVerified == true }
         if indexing && driveReady && !allVerified {
             card.phase = .scanning
+            card.backups = [:]
             return
         }
 
@@ -989,11 +1017,21 @@ extension AppModel {
     /// shoot) into the shoot, through the same checks as the Add Footage sheet.
     func addFiles(_ urls: Set<URL>, from cardID: Card.ID, toShoot shootID: UUID) async throws {
         guard let card = cards.first(where: { $0.id == cardID }) else { throw UnknownTargetError() }
+        // Never replace a copy the user already has waiting on this card.
+        guard card.plan == nil else { throw PendingPlanError() }
         let chosen = card.files.filter { urls.contains($0.url) }
         guard !chosen.isEmpty else { throw EmptySelectionError() }
         let selection = ShootSelection(missing: chosen, cameras: card.cameras, calendar: calendar)
+        // addFootage closes the sheets for its own flow; an unrelated open sheet should survive this one.
+        let sheet = shootSheet, sheetCard = shootSheetCard
         try await addFootage(shootID: shootID, cardID: cardID, cameras: card.cameras, selection: selection, onlyFiles: urls)
+        shootSheet = sheet
+        shootSheetCard = sheetCard
         copy(card)
+    }
+
+    private struct PendingPlanError: LocalizedError {
+        var errorDescription: String? { "This card already has a copy waiting. Copy or discard it first." }
     }
 
     /// Shows files in Finder (read-only).
@@ -1002,10 +1040,10 @@ extension AppModel {
         NSWorkspace.shared.activateFileViewerSelecting(urls)
     }
 
-    /// Opens the Quick Look panel on `urls`, starting at `index` (read-only).
-    /// Space toggles: a second press while the panel is up closes it, like Finder.
-    func quickLook(_ urls: [URL], at index: Int = 0) {
-        if QuickLookPreviewer.shared.isVisible {
+    /// Opens the Quick Look panel on `urls`, starting at `index` (read-only). With `toggle` (Space),
+    /// a press while the panel is up closes it, like Finder; explicit opens always switch to `urls`.
+    func quickLook(_ urls: [URL], at index: Int = 0, toggle: Bool = false) {
+        if toggle, QuickLookPreviewer.shared.isVisible {
             QuickLookPreviewer.shared.close()
         } else {
             QuickLookPreviewer.shared.show(urls, at: index)
@@ -1013,11 +1051,20 @@ extension AppModel {
     }
 
     /// Preview for one file in the card browser (read-only QuickLook; nil when none can be made).
-    func fileThumbnail(for url: URL) async -> CGImage? {
-        let key = url.standardizedFileURL.path
+    /// Keyed by file identity (card + path + size + mtime), so a different card with the same volume
+    /// name and file names never shows this card's pictures.
+    func fileThumbnail(for file: MediaFile) async -> CGImage? {
+        let key = file.identity
         if let cached = fileThumbnails[key] { return cached }
-        guard let image = try? await thumbnails.thumbnail(for: url, maxPixels: 320) else { return nil }
-        if fileThumbnails.count > 600 { fileThumbnails.removeAll() }
+        if missingThumbnails.contains(key) { return nil }
+        let image: CGImage
+        do {
+            image = try await thumbnails.thumbnail(for: file.url, maxPixels: 320)
+        } catch {
+            if !(error is CancellationError) && !Task.isCancelled { missingThumbnails.insert(key) }
+            return nil
+        }
+        if fileThumbnails.count >= 300 { fileThumbnails.removeAll() }
         fileThumbnails[key] = image
         return image
     }
