@@ -931,7 +931,9 @@ extension AppModel {
     /// Plans a copy of the selected files that are not yet verified inside the shoot into the shoot folder
     /// (Video/Photo/<camera>). Re-reads the sidecar and runs a fresh coverage check first, so it never
     /// plans from a stale snapshot. The user then starts it with `copy(_:)`.
-    func addFootage(shootID: UUID, cardID: Card.ID, cameras: [Camera], selection: ShootSelection) async throws {
+    /// `onlyFiles`: when set, only these card files (by URL) are considered, on top of `selection`.
+    func addFootage(shootID: UUID, cardID: Card.ID, cameras: [Camera], selection: ShootSelection,
+                    onlyFiles: Set<URL>? = nil) async throws {
         guard let item = shoots.first(where: { $0.id == shootID }), let card = cards.first(where: { $0.id == cardID }) else {
             throw UnknownTargetError()
         }
@@ -964,7 +966,8 @@ extension AppModel {
             throw CoverageUnavailableError()
         }
 
-        let jobs = ShootPlanner.jobs(missing: selection.filter(covered.notInShoot), shoot: folder, cameras: cameras, fallback: card.name)
+        let wanted = selection.filter(covered.notInShoot).filter { onlyFiles?.contains($0.url) ?? true }
+        let jobs = ShootPlanner.jobs(missing: wanted, shoot: folder, cameras: cameras, fallback: card.name)
         guard !jobs.isEmpty else { throw EmptySelectionError() }
         guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: folder) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
 
@@ -980,6 +983,33 @@ extension AppModel {
     struct ShootCoverageError: LocalizedError {
         let reason: String
         var errorDescription: String? { reason }
+    }
+
+    /// Card browser: plans and starts a copy of exactly `urls` (minus anything already verified in the
+    /// shoot) into the shoot, through the same checks as the Add Footage sheet.
+    func addFiles(_ urls: Set<URL>, from cardID: Card.ID, toShoot shootID: UUID) async throws {
+        guard let card = cards.first(where: { $0.id == cardID }) else { throw UnknownTargetError() }
+        let chosen = card.files.filter { urls.contains($0.url) }
+        guard !chosen.isEmpty else { throw EmptySelectionError() }
+        let selection = ShootSelection(missing: chosen, cameras: card.cameras, calendar: calendar)
+        try await addFootage(shootID: shootID, cardID: cardID, cameras: card.cameras, selection: selection, onlyFiles: urls)
+        copy(card)
+    }
+
+    /// Shows files in Finder (read-only).
+    func revealInFinder(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting(urls)
+    }
+
+    /// Opens the Quick Look panel on `urls`, starting at `index` (read-only).
+    /// Space toggles: a second press while the panel is up closes it, like Finder.
+    func quickLook(_ urls: [URL], at index: Int = 0) {
+        if QuickLookPreviewer.shared.isVisible {
+            QuickLookPreviewer.shared.close()
+        } else {
+            QuickLookPreviewer.shared.show(urls, at: index)
+        }
     }
 
     /// Preview for one file in the card browser (read-only QuickLook; nil when none can be made).
