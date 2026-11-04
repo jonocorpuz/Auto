@@ -77,7 +77,10 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - [x] `NewShootView` create mode (name, date, location, collision line + "Use this folder"); `AddFootageSheet` (card picker, date auto-selection, completeness banner, "Add N files"); CardRow "Add to Shoot" menu with date-matched shoots first
 - [x] Card-first shoot flow removed (`createShoot(card:…)`, `shootPreview`, `ingestCandidate`); shoot-first flow is the only one
 - [x] Card browser: clicking a card opens a read-only, Finder-style page (icon grid with QuickLook thumbnails or list, locations sidebar, status bar). Files are grouped by `CardBrowser.group` into "Not Backed Up", one group per online shoot holding the verified copy, and "Backed Up Elsewhere"; `Card.backups` records each file's verified copy
-- [ ] Card browser actions (Quick Look on space, Show in Finder, add selection to a shoot); the browser is view-only for now
+- [x] Card browser actions: Quick Look (Space toggles, double-click opens), Show in Finder / Show Backup in Finder, Add to Shoot for the selection (`AppModel.addFiles` → `addFootage(onlyFiles:)` → `copy`; refuses when a plan is already pending). Groups are memoized; thumbnails keyed by file identity with a negative cache
+- [ ] Card browser: a file verified in two shoots shows only under the copy the verifier picked (`Card.backups` holds one copy per file); keep all copies if this matters
+- [ ] Card browser: grid has no keyboard navigation (arrows, ⌘A, shift-range); Quick Look panel has no responder-chain controller (works, but QL logs a warning)
+- [ ] Card browser: verify on screen (Quick Look, context menus, Add to Shoot, CardRow buttons still working with the row tap)
 - [ ] Shoot flows are untested on the card-lifecycle paths: card removal clearing coverage, `addFootage` before coverage finishes, copy completion re-running coverage, recompute with a card inside a shoot, `mkdir` EEXIST race. Needs a card-source injection seam instead of `#if DEBUG _testInsert`
 - [ ] Verify the Shoots grid and New Shoot / Add Footage sheets visually (launch the app, check the window); not yet done
 - [ ] Per-root `DriveIndex` caching across recomputes
