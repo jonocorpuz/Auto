@@ -205,7 +205,7 @@ struct CardBrowserView: View {
                         Section {
                             ForEach(group.files) { file in
                                 FileIcon(file: file, size: iconSize, selected: selection.contains(file.id))
-                                    .id(file.id)
+                                    .id(IconID(kind: group.kind, file: file.id))
                                     .onTapGesture {
                                         gridFocused = true
                                         clickIcon(file, groups: groups)
@@ -241,6 +241,23 @@ struct CardBrowserView: View {
                 handleKey(press, groups: groups, proxy: proxy, spacing: spacing)
             }
         }
+    }
+
+    /// Icon identity for `ScrollViewReader`: a file shown in two groups has two icons.
+    private struct IconID: Hashable {
+        let kind: CardBrowser.GroupKind
+        let file: MediaFile.ID
+    }
+
+    /// One list row. A file in two groups has two rows, so rows need ids of their own.
+    private struct Row: Identifiable {
+        struct ID: Hashable {
+            let kind: CardBrowser.GroupKind
+            let file: MediaFile.ID
+        }
+        let kind: CardBrowser.GroupKind
+        let file: MediaFile
+        var id: ID { ID(kind: kind, file: file.id) }
     }
 
     private func gridLayout(_ groups: [CardBrowser.Group], spacing: Double) -> GridLayout<MediaFile.ID> {
@@ -282,51 +299,75 @@ struct CardBrowserView: View {
         }
         grid.move(direction, extend: press.modifiers.contains(.shift), in: layout)
         selection = grid.selected
-        if let cursor = grid.cursor { proxy.scrollTo(cursor) }
+        // A file can sit in several groups; the grid resolves the cursor to its first occurrence.
+        if let cursor = grid.cursor, let group = groups.first(where: { $0.files.contains { $0.id == cursor } }) {
+            proxy.scrollTo(IconID(kind: group.kind, file: cursor))
+        }
         return .handled
     }
 
     private func listView(_ groups: [CardBrowser.Group]) -> some View {
-        Table(of: MediaFile.self, selection: $selection) {
-            TableColumn("Name") { file in
+        Table(of: Row.self, selection: rowSelection(groups)) {
+            TableColumn("Name") { row in
+                let file = row.file
                 HStack(spacing: 6) {
                     Image(systemName: Self.symbol(file.kind)).foregroundStyle(.secondary).frame(width: 16)
                     Text(file.name)
                 }
             }
             .width(min: 140, ideal: 220)
-            TableColumn("Date Recorded") { file in
+            TableColumn("Date Recorded") { row in
+                let file = row.file
                 Text(file.date.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(.secondary)
             }
             .width(min: 110, ideal: 150)
-            TableColumn("Size") { file in
+            TableColumn("Size") { row in
+                let file = row.file
                 Text(Format.bytes(file.size)).foregroundStyle(.secondary).monospacedDigit()
             }
             .width(min: 55, ideal: 70)
-            TableColumn("Kind") { file in
+            TableColumn("Kind") { row in
+                let file = row.file
                 Text(Self.kindLabel(file)).foregroundStyle(.secondary)
             }
             .width(min: 60, ideal: 90)
         } rows: {
             ForEach(groups) { group in
                 Section(group.title) {
-                    ForEach(group.files) { TableRow($0) }
+                    ForEach(group.files.map { Row(kind: group.kind, file: $0) }) { TableRow($0) }
                 }
             }
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
-        .contextMenu(forSelectionType: MediaFile.ID.self) { ids in
-            let files = orderedFiles(groups).filter { ids.contains($0.id) }
+        .contextMenu(forSelectionType: Row.ID.self) { ids in
+            let files = files(for: ids, groups)
             if !files.isEmpty { fileMenu(files, groups: groups) }
         } primaryAction: { ids in
-            quickLook(orderedFiles(groups).filter { ids.contains($0.id) })
+            quickLook(files(for: ids, groups))
         }
+    }
+
+    /// Table selection is per row; the browser selects files. Selecting a row selects its file, and
+    /// every row of a selected file shows selected.
+    private func rowSelection(_ groups: [CardBrowser.Group]) -> Binding<Set<Row.ID>> {
+        Binding {
+            Set(groups.flatMap { group in
+                group.files.filter { selection.contains($0.id) }.map { Row.ID(kind: group.kind, file: $0.id) }
+            })
+        } set: { rows in
+            selection = Set(rows.map(\.file))
+        }
+    }
+
+    private func files(for rows: Set<Row.ID>, _ groups: [CardBrowser.Group]) -> [MediaFile] {
+        let ids = Set(rows.map(\.file))
+        return orderedFiles(groups).filter { ids.contains($0.id) }
     }
 
     // MARK: Actions
 
     private func orderedFiles(_ groups: [CardBrowser.Group]) -> [MediaFile] {
-        groups.flatMap(\.files)
+        CardBrowser.uniqueFiles(groups)
     }
 
     /// Selected files in on-screen order.
@@ -414,8 +455,9 @@ struct CardBrowserView: View {
     }
 
     private func statusBar(_ groups: [CardBrowser.Group]) -> some View {
-        let count = groups.reduce(0) { $0 + $1.files.count }
-        let bytes = groups.reduce(Int64(0)) { $0 + $1.bytes }
+        let unique = orderedFiles(groups)
+        let count = unique.count
+        let bytes = unique.reduce(Int64(0)) { $0 + $1.size }
         var text = "\(Format.count(count, "item", "items")) · \(Format.bytes(bytes))"
         if !selection.isEmpty { text = "\(selection.count) of " + text + " selected" }
         if card.phase == .scanning || card.phase == .verifying {
