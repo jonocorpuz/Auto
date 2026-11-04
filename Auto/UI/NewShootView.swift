@@ -96,7 +96,7 @@ struct NewShootView: View {
                                 .frame(width: 28, height: 28)
                                 .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: 8))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(cam.model).lineLimit(1)
+                                Text(cam.label).lineLimit(1)
                                 Text("\(fileCount(cam)) files").font(.caption).foregroundStyle(.secondary)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
