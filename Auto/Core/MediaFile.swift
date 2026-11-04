@@ -28,11 +28,35 @@ nonisolated struct MediaFile: Identifiable, Sendable, Hashable {
 nonisolated struct Camera: Identifiable, Hashable, Sendable {
     let id: String
     let model: String
+    /// Part of identity (`id`) only; never shown in `label` or used in `folderName`.
     let serial: String?
     var folderName: String
+    var label: String
 
-    var label: String {
-        guard let serial, serial.count >= 4 else { return model }
-        return "\(model) · serial ...\(serial.suffix(4))"
+    init(id: String, model: String, serial: String?, folderName: String, label: String? = nil) {
+        self.id = id
+        self.model = model
+        self.serial = serial
+        self.folderName = folderName
+        self.label = label ?? model
+    }
+
+    /// Cameras sharing a model get letter suffixes ("FX3 A", "FX3 B", ..., then numbers after Z),
+    /// assigned in `id` order so they are stable across scans. Output keeps the input order.
+    static func disambiguated(_ cameras: [Camera]) -> [Camera] {
+        let groups = Dictionary(grouping: cameras, by: \.model)
+        var suffix: [String: String] = [:]
+        for (_, group) in groups where group.count > 1 {
+            for (i, cam) in group.sorted(by: { $0.id < $1.id }).enumerated() {
+                suffix[cam.id] = i < 26 ? String(UnicodeScalar(UInt8(65 + i))) : String(i - 25)
+            }
+        }
+        return cameras.map { cam in
+            guard let s = suffix[cam.id] else { return cam }
+            var out = cam
+            out.label = "\(cam.label) \(s)"
+            out.folderName = "\(cam.folderName) \(s)"
+            return out
+        }
     }
 }

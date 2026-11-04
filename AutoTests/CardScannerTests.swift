@@ -33,7 +33,7 @@ struct CardScannerTests {
 
         let fx3 = try #require(result.cameras.first { $0.model == "FX3" })
         #expect(fx3.serial == "1234567")
-        #expect(fx3.label == "FX3 · serial ...4567")
+        #expect(fx3.label == "FX3")
         let clip = try #require(result.files.first { $0.name == "C0001.MP4" })
         #expect(clip.cameraID == fx3.id)
         // Photos have no EXIF, so they fall back to the volume name.
@@ -71,5 +71,35 @@ struct CardScannerTests {
         let result = await CardScanner.scan(gone, volumeName: "X")
         #expect(result.files.isEmpty)
         #expect(result.error != nil)
+    }
+
+    @Test func labelNeverContainsSerial() async throws {
+        let card = try FixtureCard()
+        defer { card.cleanup() }
+        let result = await CardScanner.scan(card.root, volumeName: "NO NAME")
+        for cam in result.cameras {
+            #expect(!cam.label.contains("serial"))
+            #expect(!cam.label.contains("4567"))
+            #expect(!cam.folderName.contains("4567"))
+        }
+    }
+
+    @Test func sameModelBodiesGetLetterSuffixes() {
+        let a = Camera(id: "FX3|111", model: "FX3", serial: "111", folderName: "FX3")
+        let b = Camera(id: "FX3|222", model: "FX3", serial: "222", folderName: "FX3")
+        let solo = Camera(id: "A7|9", model: "A7", serial: "9", folderName: "A7")
+        let forward = Camera.disambiguated([a, b, solo])
+        let shuffled = Camera.disambiguated([solo, b, a])
+        for out in [forward, shuffled] {
+            let byID = Dictionary(uniqueKeysWithValues: out.map { ($0.id, $0) })
+            #expect(byID["FX3|111"]?.label == "FX3 A")
+            #expect(byID["FX3|111"]?.folderName == "FX3 A")
+            #expect(byID["FX3|222"]?.label == "FX3 B")
+            #expect(byID["FX3|222"]?.folderName == "FX3 B")
+            #expect(byID["A7|9"]?.label == "A7")
+            #expect(byID["A7|9"]?.folderName == "A7")
+        }
+        #expect(forward.map(\.id) == ["FX3|111", "FX3|222", "A7|9"])
+        #expect(shuffled.map(\.id) == ["A7|9", "FX3|222", "FX3|111"])
     }
 }

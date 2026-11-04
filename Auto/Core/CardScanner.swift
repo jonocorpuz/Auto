@@ -60,7 +60,7 @@ nonisolated enum CardScanner {
         }
 
         let shootDate = files.map(\.date).min()
-        let sortedCameras = cameras.values.sorted { $0.model < $1.model }
+        let sortedCameras = Camera.disambiguated(cameras.values.sorted { ($0.model, $0.id) < ($1.model, $1.id) })
         return Result(files: files.sorted { $0.url.path < $1.url.path }, cameras: sortedCameras, shootDate: shootDate, error: errors.first)
     }
 
