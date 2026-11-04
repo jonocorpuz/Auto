@@ -38,7 +38,7 @@ struct ShootMembershipTests {
         func add(_ id: UUID, _ o: ShootMembership.Outcome) { results[id] = o; order.append(id) }
     }
 
-    private final class Counter: @unchecked Sendable {
+    private nonisolated final class Counter: @unchecked Sendable {
         private let lock = NSLock()
         private var n = 0
         func bump() { lock.lock(); n += 1; lock.unlock() }
@@ -123,6 +123,37 @@ struct ShootMembershipTests {
             return v
         })
         #expect(s.order.isEmpty)
+    }
+
+    @MainActor private final class TaskBox { var task: Task<Void, Never>? }
+
+    @Test @MainActor func cancelInsideFirstResultReportsOnlyFirstShoot() async throws {
+        let e = try env(); defer { e.cleanup() }
+        let a = try card(e, "A.MP4", 1)
+        try put(1, "A.MP4", in: e.shoot("S1")); try put(1, "A.MP4", in: e.shoot("S2"))
+        let t1 = ShootMembership.Target(id: UUID(), folder: e.shoot("S1"))
+        let t2 = ShootMembership.Target(id: UUID(), folder: e.shoot("S2"))
+        let sink = Sink()
+        let box = TaskBox()
+        let task = Task {
+            await ShootMembership.run(files: [a], targets: [t1, t2], sessionCopies: [], cache: VerificationCache(), cardVolumes: []) { id, o in
+                sink.add(id, o)
+                box.task?.cancel()
+            }
+        }
+        box.task = task
+        await task.value
+        #expect(sink.order == [t1.id])
+    }
+
+    @Test func nestedResolvesSymlinks() throws {
+        let e = try env(); defer { e.cleanup() }
+        let real = e.shoot("Real/Child")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let link = e.base.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: e.shoot("Real"))
+        // A child reached through a symlink to the parent is still nested in the parent.
+        #expect(ShootMembership.nested(in: e.shoot("Real"), among: [link.appendingPathComponent("Child")]).count == 1)
     }
 
     @Test @MainActor func secondRunIsCacheHitNoHashing() async throws {

@@ -190,4 +190,143 @@ struct BrowserMembershipTests {
         #expect(cov.dayInShoot == 1)
         #expect(isDone(env.model.browserMembership[s1.id]))
     }
+
+    // MARK: Generation guard (superseded runs that still deliver)
+
+    @MainActor private final class Gate {
+        var open = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
+        var finished = 0
+        func wait() async {
+            if open { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        func release() { open = true; waiters.forEach { $0.resume() }; waiters = [] }
+        func markFinished() { finished += 1 }
+    }
+
+    /// A runner that ignores cancellation: it waits on the gate, then reports every file as a member.
+    private func gatedRunner(_ gate: Gate) -> AppModel.MembershipRunner {
+        { files, targets, onResult in
+            await gate.wait()
+            for t in targets { await onResult(t.id, .verified(Set(files.map(\.url)), copies: [:])) }
+            await gate.markFinished()
+        }
+    }
+
+    private func waitUntil(_ cond: @MainActor () -> Bool) async throws {
+        for _ in 0..<1000 where !cond() { try await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    @Test func supersededRunDeliveringLateIsIgnored() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
+        let b = try makeFile(env, "B.MP4", byte: 5, copiedTo: [])
+        let first = insertCard(env, files: [a])
+        let second = insertCard(env, files: [b])
+        let gate = Gate()
+        env.model._testSetMembershipRunner(gatedRunner(gate))
+
+        env.model.browsingCardID = first.id
+        env.model.browserAppeared(first.id)
+        env.model.browsingCardID = second.id
+        env.model.browserAppeared(second.id)
+        gate.release()
+        try await waitUntil { gate.finished == 2 }
+        await env.model._testBrowserMembershipIdle()
+
+        #expect(gate.finished == 2)
+        guard case .done(let urls, _)? = env.model.browserMembership[s1.id] else { Issue.record("expected done"); return }
+        #expect(urls == [b.url])
+    }
+
+    @Test func closedBrowserRunDeliveringLateIsIgnored() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
+        let card = insertCard(env, files: [a])
+        let gate = Gate()
+        env.model._testSetMembershipRunner(gatedRunner(gate))
+        env.model.browsingCardID = card.id
+        env.model.browserAppeared(card.id)
+        env.model.browserDisappeared(card.id)
+        gate.release()
+        try await waitUntil { gate.finished == 1 }
+        #expect(gate.finished == 1)
+        #expect(env.model.browserMembership.isEmpty)
+    }
+
+    // MARK: Settling paths
+
+    @Test func recomputeInvalidatesAndFinishRestarts() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
+        let card = insertCard(env, files: [a], backups: [a.url: s1.folder.appendingPathComponent("Video/A.MP4")])
+        env.model.browsingCardID = card.id
+        env.model.browserAppeared(card.id)
+        await env.model._testBrowserMembershipIdle()
+        #expect(isDone(env.model.browserMembership[s1.id]))
+
+        env.model.discardPlan(card)   // recompute(card)
+        #expect(env.model.browserMembership[s1.id] == .checking)
+        // The triage Task is in flight: verifier is nil but the card is not settled, so no run starts.
+        env.model.refreshBrowserMembership()
+        #expect(env.model.browserMembership[s1.id] == .checking)
+
+        try await waitUntil { isDone(env.model.browserMembership[s1.id]) }
+        #expect(isDone(env.model.browserMembership[s1.id]))
+        #expect(card.phase == .backed)
+    }
+
+    @Test func addFootageSettlingLeavesCheckingState() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [])
+        let card = insertCard(env, files: [a], phase: .verifying)
+        card.verifier = BackupVerifier()
+        env.model.browsingCardID = card.id
+        env.model.browserAppeared(card.id)
+        #expect(env.model.browserMembership[s1.id] == .checking)
+
+        let selection = ShootSelection(missing: card.files, cameras: [], calendar: env.model.calendar)
+        try await env.model.addFootage(shootID: s1.id, cardID: card.id, cameras: [], selection: selection)
+        #expect(card.phase == .ready)
+        await env.model._testBrowserMembershipIdle()
+        #expect(isDone(env.model.browserMembership[s1.id]))
+    }
+
+    @Test func copyEarlyFailureLeavesCheckingState() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
+        let card = insertCard(env, files: [a], phase: .ready)
+        card.verifier = BackupVerifier()
+        card.plan = CopyPlan(jobs: [], destinationLabel: "card", destinationRoot: env.cardDir, workRoot: nil)
+        env.model.browsingCardID = card.id
+        env.model.browserAppeared(card.id)
+        #expect(env.model.browserMembership[s1.id] == .checking)
+
+        env.model.copy(card)   // destination is on the card: refused
+        guard case .failed = card.phase else { Issue.record("expected failed phase"); return }
+        await env.model._testBrowserMembershipIdle()
+        #expect(isDone(env.model.browserMembership[s1.id]))
+    }
+
+    @Test func hiddenWindowStopsMembershipAndShowingRestarts() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
+        let card = insertCard(env, files: [a])
+        env.model.browsingCardID = card.id
+        env.model.browserAppeared(card.id)
+        env.model.mainWindowVisible = false
+        await env.model._testBrowserMembershipIdle()
+        #expect(env.model.browserMembership.isEmpty)
+
+        env.model.mainWindowVisible = true
+        await env.model._testBrowserMembershipIdle()
+        #expect(isDone(env.model.browserMembership[s1.id]))
+    }
 }
