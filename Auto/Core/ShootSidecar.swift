@@ -10,6 +10,7 @@ nonisolated enum ShootError: LocalizedError, Equatable {
     case notAFolder(String)
     case sidecarMismatch
     case shootOffline
+    case invalidName
 
     var errorDescription: String? {
         switch self {
@@ -31,6 +32,8 @@ nonisolated enum ShootError: LocalizedError, Equatable {
             return "The shoot folder doesn't match its saved info."
         case .shootOffline:
             return "This shoot's drive isn't connected."
+        case .invalidName:
+            return "Enter a shoot name that works as a folder name."
         }
     }
 }
