@@ -76,6 +76,8 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - [x] Sidebar "Ingest" renamed "New Shoot"; Media "Recent shoots" replaced by a "Shoots" grid (thumbnail, counts, offline/missing dimmed, Locate…, Remove from Auto)
 - [x] `NewShootView` create mode (name, date, location, collision line + "Use this folder"); `AddFootageSheet` (card picker, date auto-selection, completeness banner, "Add N files"); CardRow "Add to Shoot" menu with date-matched shoots first
 - [x] Card-first shoot flow removed (`createShoot(card:…)`, `shootPreview`, `ingestCandidate`); shoot-first flow is the only one
+- [x] Card browser: clicking a card opens a read-only, Finder-style page (icon grid with QuickLook thumbnails or list, locations sidebar, status bar). Files are grouped by `CardBrowser.group` into "Not Backed Up", one group per online shoot holding the verified copy, and "Backed Up Elsewhere"; `Card.backups` records each file's verified copy
+- [ ] Card browser actions (Quick Look on space, Show in Finder, add selection to a shoot); the browser is view-only for now
 - [ ] Shoot flows are untested on the card-lifecycle paths: card removal clearing coverage, `addFootage` before coverage finishes, copy completion re-running coverage, recompute with a card inside a shoot, `mkdir` EEXIST race. Needs a card-source injection seam instead of `#if DEBUG _testInsert`
 - [ ] Verify the Shoots grid and New Shoot / Add Footage sheets visually (launch the app, check the window); not yet done
 - [ ] Per-root `DriveIndex` caching across recomputes
