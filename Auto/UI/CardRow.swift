@@ -165,7 +165,12 @@ struct CardRow: View {
                 Button("Show in Finder") { model.openInFinder(card) }
                 Button(card.ejecting ? "Ejecting…" : "Eject") { model.eject(card) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(card.ejecting)
+                    .disabled(!model.canEject(card))
+            }
+            if let ejectError = card.ejectError {
+                Label(ejectError, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red).font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
         case .empty:

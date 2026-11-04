@@ -421,15 +421,23 @@ final class AppModel {
         }
     }
 
+    /// Only a verified-backed, idle card can be ejected from Auto.
+    func canEject(_ card: Card) -> Bool {
+        card.phase == .backed && card.engine == nil && card.verifier == nil && !card.ejecting
+    }
+
     func eject(_ card: Card) {
+        guard canEject(card) else { return }
         card.ejecting = true
+        card.ejectError = nil
         let volume = card.volume
         Task {
             let error = await Task.detached { () -> Error? in
                 do { try NSWorkspace.shared.unmountAndEjectDevice(at: volume); return nil } catch { return error }
             }.value
             card.ejecting = false
-            if let error { card.phase = .failed("Couldn't eject: \(error.localizedDescription)") }
+            // Shown beside the card; never replaces whatever phase the card is in now.
+            if let error { card.ejectError = "Couldn't eject: \(error.localizedDescription)" }
         }
     }
 }

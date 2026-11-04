@@ -22,6 +22,7 @@ final class Card: Identifiable {
     var verifyProgress = CopyProgress()
     var backedTo: String?
     var ejecting = false
+    var ejectError: String?
     @ObservationIgnored var engine: CopyEngine?
     @ObservationIgnored var verifier: BackupVerifier?
 
