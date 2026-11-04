@@ -162,4 +162,22 @@ struct GridSelectionTests {
         s.selectAll(in: empty)
         #expect(s.selected.isEmpty)
     }
+
+    /// An ID in two sections ([0 1 2] and [2 3]) resolves to its first occurrence everywhere.
+    @Test func duplicatedIDResolvesToFirstOccurrence() {
+        let dup = GridLayout(sections: [[0, 1, 2], [2, 3]], columns: 3)
+        #expect(dup.flat == [0, 1, 2, 3])
+        #expect(dup.position(of: 2)! == (section: 0, index: 2))
+        var s = clicked(2)
+        s.move(.right, extend: false, in: dup)
+        #expect(s.cursor == 3)
+        s.click(2)
+        s.move(.down, extend: false, in: dup)
+        #expect(s.cursor == 3)
+        s.click(0)
+        s.extend(to: 3, in: dup)
+        #expect(s.selected == [0, 1, 2, 3])
+        s.selectAll(in: dup)
+        #expect(s.selected == [0, 1, 2, 3])
+    }
 }

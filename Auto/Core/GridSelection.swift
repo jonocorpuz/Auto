@@ -11,8 +11,12 @@ nonisolated struct GridLayout<ID: Hashable> {
         self.columns = max(1, columns)
     }
 
-    /// Items in on-screen (reading) order.
-    var flat: [ID] { sections.flatMap { $0 } }
+    /// Items in on-screen (reading) order. An ID shown in several sections (a file in two groups) counts
+    /// once, at its first occurrence, which is also where `position(of:)` and navigation resolve it.
+    var flat: [ID] {
+        var seen = Set<ID>()
+        return sections.flatMap { $0 }.filter { seen.insert($0).inserted }
+    }
 
     /// Columns SwiftUI fits for `GridItem(.adaptive(minimum:), spacing:)` in `width` with horizontal padding.
     static func columnCount(width: Double, itemMinimum: Double, spacing: Double, padding: Double) -> Int {
