@@ -45,14 +45,23 @@ nonisolated final class CopyEngine: @unchecked Sendable {
     private static let chunk = 8 << 20
 
     func run(_ jobs: [CopyJob], onProgress: @escaping @MainActor @Sendable (CopyProgress) -> Void) async -> CopyOutcome {
-        await withCheckedContinuation { continuation in
+        // Progress flows through a stream consumed on the main actor; `run` awaits the
+        // consumer after finishing it, so no callback is delivered after `run` returns.
+        let (stream, yield) = AsyncStream<CopyProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let consumer = Task { @MainActor in
+            for await p in stream { onProgress(p) }
+        }
+        let outcome: CopyOutcome = await withCheckedContinuation { continuation in
             Thread.detachNewThread {
-                continuation.resume(returning: self.runSync(jobs, onProgress: onProgress))
+                continuation.resume(returning: self.runSync(jobs) { _ = yield.yield($0) })
             }
         }
+        yield.finish()
+        await consumer.value
+        return outcome
     }
 
-    private func runSync(_ jobs: [CopyJob], onProgress: @escaping @MainActor @Sendable (CopyProgress) -> Void) -> CopyOutcome {
+    private func runSync(_ jobs: [CopyJob], onProgress: @escaping @Sendable (CopyProgress) -> Void) -> CopyOutcome {
         var progress = CopyProgress(filesTotal: jobs.count, bytesTotal: jobs.reduce(0) { $0 + $1.file.size })
         var outcome = CopyOutcome()
         var lastReport = Date.distantPast
@@ -61,8 +70,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             let now = Date()
             if force || now.timeIntervalSince(lastReport) > 0.1 {
                 lastReport = now
-                let snapshot = progress
-                Task { @MainActor in onProgress(snapshot) }
+                onProgress(progress)
             }
         }
 

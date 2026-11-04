@@ -138,6 +138,17 @@ struct CopyEngineTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: f.dst.path).isEmpty)
     }
 
+    @Test func noProgressDeliveredAfterRunReturns() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let files = try (0..<5).map { try makeFile(in: f.src, "F\($0).MP4", bytes: 20_000) }
+        let box = ProgressBox()
+        _ = await CopyEngine().run(files.map { CopyJob(file: $0, destDir: f.dst) }) { _ in box.count += 1 }
+        let atReturn = box.count
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(atReturn > 0)
+        #expect(box.count == atReturn)
+    }
+
     @Test func reportsFinalProgress() async throws {
         let f = try fixture(); defer { f.cleanup() }
         let file = try makeFile(in: f.src, "A.MP4", bytes: 5_000)
@@ -149,4 +160,4 @@ struct CopyEngineTests {
     }
 }
 
-@MainActor final class ProgressBox { var last: CopyProgress? }
+@MainActor final class ProgressBox { var last: CopyProgress?; var count = 0 }
