@@ -35,16 +35,19 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 
 ## Phase 2: Ingest parity with Backed
 
-- [ ] Fixture card builder for tests (DCIM + Sony `PRIVATE/M4ROOT` layouts)
-- [ ] `MediaTypes` / `MediaKind` classification (video, photo, audio)
-- [ ] `CardScanner`: enumerate media, detect camera (EXIF, QuickTime, Sony XML sidecar), shoot date
-- [ ] `DriveIndex`: what already exists in the work folder (name + size keys)
-- [ ] `CopyEngine`: streamed copy, temp name + atomic rename, size + hash verify, unique names, cancel
-- [ ] `VolumeWatcher`: detect card mount/unmount, ignore non-card volumes
-- [ ] New Shoot flow: client autocomplete → shoot name → folder preview (`Client/YYYY-MM-DD Shoot/Camera/`)
-- [ ] Status item: click opens the main app window (no dropdown/popover); right-click menu for Settings / Quit
-- [ ] Status icon states: idle / unbacked / copying / backed / error (static "a." with tinted dot, no animation)
-- [ ] `-AutoFixtureCard <path>` launch argument for manual testing
+- [x] Fixture card builder for tests (DCIM + Sony `PRIVATE/M4ROOT` layouts)
+- [x] `MediaTypes` / `MediaKind` classification (video, photo, audio)
+- [x] `CardScanner`: enumerate media, detect camera (EXIF, QuickTime, Sony XML sidecar), shoot date
+- [x] `DriveIndex`: what already exists in the work folder (name + size keys)
+- [x] `CopyEngine`: streamed copy, temp name + atomic rename, size + hash verify, unique names, cancel
+- [x] `VolumeWatcher`: detect card mount/unmount, ignore non-card volumes
+- [x] New Shoot flow: client autocomplete → shoot name → folder preview (`Client/YYYY-MM-DD Shoot/Camera/`)
+- [x] Status item: click opens the main app window (no dropdown/popover); right-click menu for Settings / Quit
+- [x] Status icon states: idle / unbacked / copying / backed / error (static "a." with tinted dot, no animation)
+- [x] `-AutoFixtureCard <path>` launch argument for manual testing
+- [x] Backup status is checksum-verified (`BackupVerifier`): green only when every card file matches a drive copy by hash
+- [x] Copy hardening: unique `O_EXCL` partials, `renamex_np` `RENAME_EXCL`, `F_FULLFSYNC` + uncached read-back
+- [ ] Manual end-to-end test with a real card + real work drive (copy, eject, auto-open on mount)
 
 ## Phase 3: Editing pipeline
 
@@ -71,6 +74,7 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 
 - xxHash for faster verification on large cards
 - Proxy generation in Resolve instead of AVFoundation
+- Investigate one-off Media Library (Apple Music) TCC prompt seen on a fresh build; likely stale TCC grant after re-signing
 
 ## Key Decisions
 
@@ -84,3 +88,4 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 | 2026-11-03 | Micro-commits, no AI co-author, never auto-push | Developer preference |
 | 2026-11-03 | No menu bar dropdown: the status item opens the main window | Developer wants the app to live in the menu bar but open as a real window |
 | 2026-11-03 | Drop Backed's animated `OrbView` | Developer found it cheesy; status is shown with a static tinted dot |
+| 2026-11-03 | Backed status requires checksum verification, not name+size | Same-name/same-size RAWs from different bodies could falsely show as backed |
