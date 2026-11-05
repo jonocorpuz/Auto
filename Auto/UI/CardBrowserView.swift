@@ -26,6 +26,18 @@ struct CardBrowserView: View {
     @AppStorage("cardBrowserIconSize") private var iconSize: Double = 110
     @State private var adding = false
     @State private var actionError: String?
+    @State private var pendingAdd: PendingAdd?
+
+    /// An Add to Shoot request that found duplicates and is waiting for the user's call.
+    private struct PendingAdd {
+        let files: [MediaFile]
+        let shootID: UUID
+        let duplicateCount: Int
+        let places: String
+        /// Set when every selected file is already inside the target shoot.
+        var inShootName: String?
+        var allDuplicates: Bool { duplicateCount >= files.count }
+    }
 
     var body: some View {
         let groups = model.browserGroups(for: card)
@@ -61,6 +73,27 @@ struct CardBrowserView: View {
         // Keep the grid's anchor/cursor in step with outside changes (Esc, list mode, place changes).
         .onChange(of: selection) { _, new in
             if grid.selected != new { grid = GridSelection(selected: new) }
+        }
+        .confirmationDialog(
+            pendingAdd.map(dialogTitle) ?? "",
+            isPresented: Binding(get: { pendingAdd != nil }, set: { if !$0 { pendingAdd = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingAdd
+        ) { pending in
+            if pending.inShootName != nil {
+                Button("OK", role: .cancel) {}
+            } else if pending.allDuplicates {
+                Button("Copy Anyway") { start(pending.files, to: pending.shootID, includeDuplicates: true) }
+            } else {
+                let rest = pending.files.count - pending.duplicateCount
+                Button("Copy \(Format.count(rest, "File", "Files"))") {
+                    start(pending.files, to: pending.shootID, includeDuplicates: false)
+                }
+                Button("Copy All \(pending.files.count)") {
+                    start(pending.files, to: pending.shootID, includeDuplicates: true)
+                }
+            }
+            if pending.inShootName == nil { Button("Cancel", role: .cancel) {} }
         }
         .alert("Couldn't add to shoot", isPresented: Binding(
             get: { actionError != nil },
@@ -494,13 +527,45 @@ struct CardBrowserView: View {
         return Set(groups.first { $0.kind == .shoot(shootID) }?.files.map(\.id) ?? [])
     }
 
-    private func add(_ files: [MediaFile], to shootID: UUID) {
+    private func dialogTitle(_ pending: PendingAdd) -> String {
+        if let name = pending.inShootName { return "All selected files are already in \(name)." }
+        if pending.allDuplicates { return "All selected files are already backed up." }
+        let location = pending.places.isEmpty ? "" : " (\(pending.places))"
+        return "\(pending.duplicateCount) of \(pending.files.count) selected files are already backed up\(location). "
+            + "Copy the other \(pending.files.count - pending.duplicateCount)?"
+    }
+
+    /// Asks first when the selection holds files that already have a verified copy elsewhere.
+    private func add(_ selected: [MediaFile], to shootID: UUID) {
+        // Once coverage is known, files already verified inside the shoot are not part of the count.
+        var files = selected
+        if case .done(let covered)? = model.coverage[CoverageKey(shootID: shootID, cardID: card.id)] {
+            let notIn = Set(covered.notInShoot.map(\.url))
+            files = selected.filter { notIn.contains($0.url) }
+            if files.isEmpty {
+                let name = model.shoots.first { $0.id == shootID }?.record.name ?? "this shoot"
+                pendingAdd = PendingAdd(files: selected, shootID: shootID, duplicateCount: 0, places: "", inShootName: name)
+                return
+            }
+        }
+        let report = model.duplicates(shootID: shootID, cardID: card.id, candidates: files)
+        if report.isEmpty {
+            start(files, to: shootID, includeDuplicates: false)
+            return
+        }
+        let titles = report.byPlace.prefix(3).map { "in \($0.place.title)" }
+        let more = report.byPlace.count > 3 ? ", and elsewhere" : ""
+        pendingAdd = PendingAdd(files: files, shootID: shootID, duplicateCount: report.count,
+                                places: titles.joined(separator: ", ") + more)
+    }
+
+    private func start(_ files: [MediaFile], to shootID: UUID, includeDuplicates: Bool) {
         adding = true
         let urls = Set(files.map(\.url))
         Task {
             defer { adding = false }
             do {
-                try await model.addFiles(urls, from: card.id, toShoot: shootID)
+                try await model.addFiles(urls, from: card.id, toShoot: shootID, includeDuplicates: includeDuplicates)
             } catch {
                 actionError = error.localizedDescription
             }
