@@ -654,3 +654,257 @@ extension MirrorShootsTests {
         #expect(mp4s(sc.shoot.folder) == ["Video/CARD1/A.MP4", "Video/CARD1/B.MP4"])
     }
 }
+
+// MARK: Review follow-ups
+
+extension MirrorShootsTests {
+    private func twoCopyShoot(_ env: Env) async throws -> (shoot: Shoot, mirror: URL) {
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        return (shoot, try #require(shoot.mirrors.first))
+    }
+
+    private func pending(_ env: Env, _ id: UUID) throws -> [String] { try record(env, id).pendingSync }
+
+    @Test func fileVerifiedOnlyInMirrorPrunedAtCopyTimeMarksThePrimary() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1)])
+        try await plan(env, card, into: shoot)
+        // The footage turns up in a hand-made copy on the other drive, which then becomes a mirror.
+        let existing = env.volB.appendingPathComponent("S/Video/CARD", isDirectory: true)
+        try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 100).write(to: existing.appendingPathComponent("A.MP4"))
+        try await env.model.addMirror(shootID: shoot.id, parent: env.volB, adopt: true)
+        let url = card.files[0].url
+        try await waitUntil { card.backups[url] != nil && card.verifier == nil && card.phase != .scanning }
+        env.model.copy(card)
+        try await waitUntil { settled(card) && card.plan == nil }
+        #expect(mp4s(shoot.folder).isEmpty)
+        #expect(try pending(env, shoot.id).contains(shoot.folder.standardizedFileURL.path))
+        #expect(card.mirrorNote != nil)
+    }
+
+    @Test func staleMirrorRootInAPlanIsDroppedAtCopyTime() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let (shoot, mirror) = try await twoCopyShoot(env)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1)])
+        try await plan(env, card, into: shoot)
+        #expect(card.plan?.copyRoots.count == 2)
+        var reg = env.model.registry
+        try reg.removeCopy(id: shoot.id, path: mirror.standardizedFileURL.path)
+        try await ShootStore.save(reg, to: env.model.registryURL)
+        await env.model.loadShoots()
+        env.model.copy(card)
+        try await waitUntil { settled(card) && card.plan == nil }
+        #expect(mp4s(shoot.folder) == ["Video/CARD/A.MP4"])
+        #expect(mp4s(mirror).isEmpty)
+    }
+
+    @Test func removingACopyDropsIdlePlansAndIsRefusedWhileQueuedOrCopying() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let (shoot, mirror) = try await twoCopyShoot(env)
+        let card1 = try ingestCard(env, "CARD1", [("A.MP4", 1)])
+        let card2 = try ingestCard(env, "CARD2", [("B.MP4", 2)])
+        try await plan(env, card1, into: shoot)
+        try await plan(env, card2, into: shoot)
+        env.model.copy(card1)
+        env.model.copy(card2)
+        #expect(card2.queuedBehind != nil)
+        await #expect(throws: AppModel.ShootBusyError.self) {
+            try await env.model.removeCopy(shootID: shoot.id, path: mirror.path)
+        }
+        try await waitUntil { settled(card1) && card2.queuedBehind == nil && settled(card2) && card2.plan == nil }
+        // Idle plans carry the copy as a root, so removing it drops them.
+        let card3 = try ingestCard(env, "CARD3", [("C.MP4", 3)])
+        try await plan(env, card3, into: shoot)
+        #expect(card3.plan != nil)
+        try await env.model.removeCopy(shootID: shoot.id, path: mirror.path)
+        #expect(card3.plan == nil)
+    }
+
+    @Test func checksumFailureOnOneCopyKeepsTheFileAndFailsTheCard() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let (shoot, mirror) = try await twoCopyShoot(env)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1)])
+        try await plan(env, card, into: shoot)
+        let dir = mirror.appendingPathComponent("Video/CARD", isDirectory: true)
+        env.model._testEngineHook = { engine in
+            engine.onChunkWritten = { _ in
+                for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".auto-partial") {
+                    if let handle = try? FileHandle(forWritingTo: dir.appendingPathComponent(name)) {
+                        try? handle.write(contentsOf: Data([0xFF]))
+                        try? handle.close()
+                    }
+                }
+            }
+        }
+        env.model.copy(card)
+        try await waitUntil { settled(card) }
+        if case .failed = card.phase {} else { Issue.record("expected failed, got \(card.phase)") }
+        #expect(card.plan?.jobs.count == 2)
+        #expect(mp4s(mirror).isEmpty)
+        #expect(card.missing.count == 1)
+    }
+
+    @Test func differingChecksumsAcrossCopiesBlockTheFile() {
+        let file = MediaFile(url: URL(fileURLWithPath: "/c/A.MP4"), size: 1, date: day, kind: .video, cameraID: "cam")
+        let other = MediaFile(url: URL(fileURLWithPath: "/c/B.MP4"), size: 1, date: day, kind: .video, cameraID: "cam")
+        func copied(_ f: MediaFile, _ root: String, _ sum: UInt8) -> CopiedFile {
+            CopiedFile(file: f, destination: URL(fileURLWithPath: "/\(root)/\(f.url.lastPathComponent)"), destinationModified: nil,
+                       preexisting: false, checksum: Data([sum]))
+        }
+        var outcome = CopyOutcome()
+        outcome.copied = [copied(file, "a", 1), copied(file, "b", 2), copied(other, "a", 3), copied(other, "b", 3)]
+        #expect(AppModel.integrityBlocked(outcome) == [file.url])
+        outcome.failures = [.init(name: "B.MP4", reason: "x", file: other.url, root: nil, kind: .destination)]
+        #expect(AppModel.integrityBlocked(outcome) == [file.url])
+        outcome.failures.append(.init(name: "B.MP4", reason: "x", file: other.url, root: nil, kind: .integrity))
+        #expect(AppModel.integrityBlocked(outcome) == [file.url, other.url])
+    }
+
+    @Test func mirrorGoneMidRunStillLeavesTheCardBackedAndMarksSync() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let (shoot, mirror) = try await twoCopyShoot(env)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1), ("B.MP4", 2)])
+        try await plan(env, card, into: shoot)
+        env.model._testEngineHook = { engine in
+            engine.onChunkWritten = { _ in try? FileManager.default.removeItem(at: mirror) }
+        }
+        env.model.copy(card)
+        try await waitUntil { settled(card) && card.phase == .backed }
+        #expect(card.phase == .backed && card.plan == nil)
+        #expect(mp4s(shoot.folder) == ["Video/CARD/A.MP4", "Video/CARD/B.MP4"])
+        #expect(!FileManager.default.fileExists(atPath: mirror.path))
+        #expect(try pending(env, shoot.id) == [mirror.standardizedFileURL.path])
+        #expect(card.mirrorNote != nil)
+    }
+
+    @Test func fileFailingOnEveryCopyFailsTheCardAndKeepsItsJobs() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let (shoot, mirror) = try await twoCopyShoot(env)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1), ("B.MP4", 2)])
+        try await plan(env, card, into: shoot)
+        let primary = shoot.folder
+        env.model._testEngineHook = { engine in
+            engine.onChunkWritten = { _ in
+                try? FileManager.default.removeItem(at: mirror)
+                try? FileManager.default.removeItem(at: primary)
+            }
+        }
+        env.model.copy(card)
+        try await waitUntil { settled(card) }
+        if case .failed = card.phase {} else { Issue.record("expected failed, got \(card.phase)") }
+        #expect(card.plan?.jobs.count == 4)
+        #expect(card.missing.count == 2)
+    }
+
+    @Test func cardQueuedBehindAFailingCardIsReleased() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let sc = try await queueScenario(env)
+        let folder = sc.shoot.folder
+        env.model._testEngineHook = { engine in
+            engine.onChunkWritten = { _ in try? FileManager.default.removeItem(at: folder) }
+        }
+        env.model.copy(sc.card1)
+        env.model.copy(sc.card2)
+        #expect(sc.card2.queuedBehind == sc.card1.id)
+        try await waitUntil { settled(sc.card1) && sc.card2.queuedBehind == nil }
+        #expect(sc.card2.queuedBehind == nil && sc.card2.queueNote == nil)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(sc.card2.phase != .copying && sc.card2.engine == nil)
+    }
+
+    @Test func removingAQueuedCardLeavesNothingToStart() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let sc = try await queueScenario(env)
+        env.model.copy(sc.card1)
+        env.model.copy(sc.card2)
+        #expect(sc.card2.queuedBehind != nil)
+        env.model._testVolumesChanged(cards: [])
+        #expect(sc.card2.queuedBehind == nil && sc.card2.queueNote == nil)
+        try await waitUntil { sc.card1.engine == nil }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(sc.card2.engine == nil)
+        #expect(!mp4s(sc.shoot.folder).contains { $0.contains("CARD2") })
+    }
+
+    @Test func discardingOrReplanningAQueuedCardNeverAutoStarts() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let sc = try await queueScenario(env)
+        // Hold card 1's copy open while card 2 is re-planned.
+        env.model._testEngineHook = { engine in engine.onChunkWritten = { _ in Thread.sleep(forTimeInterval: 0.5) } }
+        env.model.copy(sc.card1)
+        env.model.copy(sc.card2)
+        env.model.discardPlan(sc.card2)
+        #expect(sc.card2.queuedBehind == nil && sc.card2.plan == nil)
+        // Plan again while card 1 still copies, queue, then re-plan over the queued plan.
+        try await plan(env, sc.card2, into: sc.shoot)
+        env.model.copy(sc.card2)
+        #expect(sc.card2.queuedBehind != nil)
+        try await plan(env, sc.card2, into: sc.shoot)
+        #expect(sc.card2.queuedBehind == nil && sc.card2.queueNote == nil)
+        try await waitUntil { settled(sc.card1) }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(sc.card2.engine == nil && sc.card2.phase != .copying)
+        #expect(!mp4s(sc.shoot.folder).contains { $0.contains("CARD2") })
+    }
+
+    @Test func queuedCardsNeverRunConcurrently() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let cards = try [("CARD1", "A.MP4", UInt8(1)), ("CARD2", "B.MP4", 2), ("CARD3", "C.MP4", 3)].map {
+            try ingestCard(env, $0.0, [($0.1, $0.2)])
+        }
+        for card in cards { try await plan(env, card, into: shoot) }
+        for card in cards { env.model.copy(card) }
+        var maxRunning = 0
+        for _ in 0..<600 {
+            maxRunning = max(maxRunning, cards.filter { $0.engine != nil }.count)
+            if cards.allSatisfy({ $0.plan == nil && $0.engine == nil && $0.queuedBehind == nil }) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(maxRunning == 1)
+        #expect(mp4s(shoot.folder) == ["Video/CARD1/A.MP4", "Video/CARD2/B.MP4", "Video/CARD3/C.MP4"])
+    }
+
+    @Test func aCopyWithoutSpaceIsDroppedWhileAnotherTakesTheFiles() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let (shoot, mirror) = try await twoCopyShoot(env)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1)])
+        try await plan(env, card, into: shoot)
+        env.model._testFreeSpace = { url in url.pathComponents.contains("volB") ? 10 : nil }
+        env.model.copy(card)
+        try await waitUntil { settled(card) && card.plan == nil }
+        #expect(mp4s(shoot.folder) == ["Video/CARD/A.MP4"])
+        #expect(mp4s(mirror).isEmpty)
+        #expect(try pending(env, shoot.id) == [mirror.standardizedFileURL.path])
+        #expect(card.mirrorNote != nil)
+    }
+
+    @Test func checksumsAreWrittenToDisk() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1)])
+        try await plan(env, card, into: shoot)
+        env.model.copy(card)
+        let file = env.dir.appendingPathComponent("checksums.json")
+        try await waitUntil { FileManager.default.fileExists(atPath: file.path) }
+        let reread = ChecksumStore(url: file)
+        await reread.load()
+        #expect(reread.count == 1)
+    }
+
+    @Test func flatCopyIntoAShootFolderMarksTheOtherCopies() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let (shoot, mirror) = try await twoCopyShoot(env)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1)])
+        let extra = shoot.folder.appendingPathComponent("Extra", isDirectory: true)
+        try FileManager.default.createDirectory(at: extra, withIntermediateDirectories: true)
+        card.plan = ShootPlanner.flatPlan(missing: card.missing, into: extra)
+        card.phase = .ready
+        env.model.copy(card)
+        try await waitUntil { settled(card) && card.plan == nil }
+        #expect(FileManager.default.fileExists(atPath: extra.appendingPathComponent("A.MP4").path))
+        #expect(try pending(env, shoot.id) == [mirror.standardizedFileURL.path])
+    }
+}

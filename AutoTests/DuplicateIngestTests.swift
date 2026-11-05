@@ -300,6 +300,8 @@ struct DuplicateIngestTests {
         let card2 = insertCard(env, files: files2, name: "CARD2")
         let selection1 = env.model.shootSheetDefaults(shootID: s.id, cardID: card1.id)
         try await env.model.addFootage(shootID: s.id, cardID: card1.id, cameras: [], selection: selection1)
+        // Hold card 1's copy open so card 2 is planned and started while it is still running.
+        env.model._testEngineHook = { engine in engine.onChunkWritten = { _ in Thread.sleep(forTimeInterval: 0.6) } }
         env.model.copy(card1)
         #expect(card1.engine != nil)
         #expect(env.model.isCopyingInto(shootID: s.id) === card1)
