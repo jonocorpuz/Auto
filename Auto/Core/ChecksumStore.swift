@@ -94,6 +94,12 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
         if map[stamp] != checksum { map[stamp] = checksum; dirty = true }
     }
 
+    /// Seeds the cache from a verified copy: the destination's checksum equals the source's.
+    func record(_ copied: CopiedFile) {
+        guard let checksum = copied.checksum, let stamp = Self.stamp(copied.destination) else { return }
+        record(checksum, for: stamp)
+    }
+
     var count: Int {
         lock.lock(); defer { lock.unlock() }
         return map.count
