@@ -272,7 +272,6 @@ nonisolated enum ShootStore {
     }
 
     @concurrent static func resolve(_ records: [ShootRecord], calendar: Calendar, cardVolumes: [URL]) async -> [UUID: ShootAvailability] {
-        let fm = FileManager.default
         var result: [UUID: ShootAvailability] = [:]
         for record in records {
             if let root = volumeRoot(of: record.path), !isMounted(root) {
