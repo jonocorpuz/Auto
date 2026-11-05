@@ -215,7 +215,50 @@ struct ShootRegistryTests {
         r.add(ShootRecord(id: id, name: "S", day: "d", path: "/a", mirrors: ["/b/c"], lastSeen: Date(timeIntervalSince1970: 0)))
         let other = record(path: "/b/./c/")
         r.add(other)
-        #expect(r.records == [other])
+        // The multi-copy record keeps its primary; only the shared mirror is stripped.
+        #expect(r.records.count == 2)
+        #expect(r.records[0].id == id)
+        #expect(r.records[0].copyPaths == ["/a"])
+        #expect(r.records[1] == other)
+    }
+
+    @Test func addOverlappingTwoRecordsStripsBoth() {
+        var r = ShootRegistry()
+        let single = UUID(), multi = UUID()
+        r.add(record(single, path: "/x"))
+        r.add(ShootRecord(id: multi, name: "S", day: "d", path: "/y", mirrors: ["/z", "/w"], lastSeen: Date(timeIntervalSince1970: 0)))
+        r.setPendingSync(id: multi, path: "/y", true)
+        let incoming = ShootRecord(id: UUID(), name: "N", day: "d", path: "/x", mirrors: ["/y"], lastSeen: Date(timeIntervalSince1970: 0))
+        r.add(incoming)
+        #expect(r.records.map(\.id) == [multi, incoming.id])
+        #expect(r.records[0].path == "/z")
+        #expect(r.records[0].mirrors == ["/w"])
+        #expect(r.records[0].pendingSync.isEmpty)
+    }
+
+    @Test func addSameIDPreservesMirrors() {
+        var r = ShootRegistry()
+        let id = UUID()
+        r.add(record(id, path: "/p"))
+        try? r.addMirror(id: id, path: "/m1")
+        try? r.addMirror(id: id, path: "/m2")
+        let incoming = ShootRecord(id: id, name: "S", day: "d", path: "/M1", mirrors: ["/m3"], lastSeen: Date(timeIntervalSince1970: 9))
+        r.add(incoming)
+        #expect(r.records.count == 1)
+        #expect(r.records[0].path == "/M1")
+        #expect(r.records[0].mirrors == ["/m2", "/m3"])
+        #expect(r.records[0].pendingSync == ["/m2"])
+    }
+
+    @Test func caseInsensitiveComparisonKeepsOriginalCasing() throws {
+        var r = ShootRegistry()
+        let a = UUID(), b = UUID()
+        r.add(record(a, path: "/A/Shoot"))
+        r.add(record(b, path: "/B"))
+        #expect(throws: ShootRegistry.RegistryError.alreadyRegistered) { try r.addMirror(id: b, path: "/a/shoot/") }
+        try r.addMirror(id: a, path: "/Mir/./Ror/")
+        #expect(r.records[0].mirrors == ["/Mir/Ror"])
+        #expect(r.records[0].pendingSync == ["/Mir/Ror"])
     }
 
     @Test func addMirrorRefusesDuplicatePathAcrossRecords() throws {
@@ -255,15 +298,80 @@ struct ShootRegistryTests {
         let id = UUID()
         r.add(record(id, path: "/p"))
         try r.addMirror(id: id, path: "/m")
-        r.relocate(id: id, from: "/m", to: "/m2")
+        try r.relocate(id: id, from: "/m", to: "/m2")
         #expect(r.records[0].mirrors == ["/m2"])
         #expect(r.records[0].pendingSync == ["/m2"])
         #expect(r.records[0].path == "/p")
-        r.relocate(id: id, from: "/p", to: "/p2")
+        try r.relocate(id: id, from: "/p", to: "/p2")
         #expect(r.records[0].path == "/p2")
-        r.relocate(id: id, from: "/nope", to: "/x")
-        r.relocate(id: id, from: "/p2", to: "/m2")
+        #expect(throws: ShootRegistry.RegistryError.notACopy) { try r.relocate(id: id, from: "/nope", to: "/x") }
+        #expect(throws: ShootRegistry.RegistryError.alreadyRegistered) { try r.relocate(id: id, from: "/p2", to: "/M2") }
+        #expect(throws: ShootRegistry.RegistryError.unknownShoot) { try r.relocate(id: UUID(), from: "/p2", to: "/x") }
         #expect(r.records[0].copyPaths == ["/p2", "/m2"])
+    }
+
+    @Test func relocateRefusesOtherRecordsPath() throws {
+        var r = ShootRegistry()
+        let a = UUID(), b = UUID()
+        r.add(record(a, path: "/a"))
+        r.add(record(b, path: "/b"))
+        #expect(throws: ShootRegistry.RegistryError.alreadyRegistered) { try r.relocate(id: a, from: "/a", to: "/b") }
+        #expect(r.records[0].path == "/a")
+    }
+
+    @Test func legacyRelocateKeepsInvariants() throws {
+        var r = ShootRegistry()
+        let id = UUID()
+        r.add(record(id, path: "/p"))
+        try r.addMirror(id: id, path: "/m")
+        r.relocate(id: id, to: "/m")   // onto its own mirror: refused
+        #expect(r.records[0].copyPaths == ["/p", "/m"])
+        r.setPendingSync(id: id, path: "/p", true)
+        r.relocate(id: id, to: "/q")
+        #expect(r.records[0].copyPaths == ["/q", "/m"])
+        #expect(r.records[0].pendingSync == ["/m", "/q"])
+    }
+
+    @Test func removingPrimaryInPendingSyncClearsIt() throws {
+        var r = ShootRegistry()
+        let id = UUID()
+        r.add(record(id, path: "/p"))
+        try r.addMirror(id: id, path: "/m")
+        r.setPendingSync(id: id, path: "/p", true)
+        try r.removeCopy(id: id, path: "/p")
+        #expect(r.records[0].path == "/m")
+        #expect(r.records[0].pendingSync == ["/m"])
+    }
+
+    @Test func removeCopyOfNonCopyThrowsAndLeavesRecord() throws {
+        var r = ShootRegistry()
+        let id = UUID()
+        r.add(record(id, path: "/p"))
+        try r.addMirror(id: id, path: "/m")
+        let before = r
+        #expect(throws: ShootRegistry.RegistryError.notACopy) { try r.removeCopy(id: id, path: "/other") }
+        #expect(r == before)
+    }
+
+    @Test func unknownIDMutationsAreNoOps() {
+        var r = ShootRegistry()
+        r.add(record(path: "/p"))
+        let before = r
+        r.setPendingSync(id: UUID(), path: "/p", true)
+        r.relocate(id: UUID(), to: "/x")
+        #expect(r == before)
+    }
+
+    @Test func decodesMirrorsWithoutPendingSync() throws {
+        let json = """
+        {"day":"2026-01-02","id":"11111111-2222-3333-4444-555555555555","lastSeen":"2023-11-14T22:13:20Z",
+         "mirrors":["/m"],"name":"W","path":"/p"}
+        """
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        let rec = try dec.decode(ShootRecord.self, from: Data(json.utf8))
+        #expect(rec.mirrors == ["/m"])
+        #expect(rec.pendingSync.isEmpty)
     }
 
     @Test func setPendingSyncTogglesOnlyKnownCopies() {

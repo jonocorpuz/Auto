@@ -47,88 +47,132 @@ nonisolated struct ShootRegistry: Codable, Sendable, Equatable {
         case alreadyRegistered
         case lastCopy
         case unknownShoot
+        case notACopy
     }
 
     var version = 1
     var records: [ShootRecord] = []
 
+    /// Standardized path, original casing. This is what gets stored.
     private static func key(_ path: String) -> String {
         VolumeClassifier.normalizedPath(URL(fileURLWithPath: path))
     }
 
-    /// Same id replaces; otherwise any overlap between copy paths replaces; otherwise appends.
-    mutating func add(_ r: ShootRecord) {
-        let incoming = Set(r.copyPaths.map(Self.key))
-        if let i = records.firstIndex(where: { $0.id == r.id }) {
-            records[i] = r
-        } else if let i = records.firstIndex(where: { !incoming.isDisjoint(with: $0.copyPaths.map(Self.key)) }) {
-            records[i] = r
-        } else {
-            records.append(r)
+    /// Comparison form: card and Mac volumes are usually case-insensitive and may differ in Unicode form.
+    private static func cmp(_ path: String) -> String {
+        key(path).precomposedStringWithCanonicalMapping.lowercased()
+    }
+
+    /// Drops `paths` from a record's copies and pendingSync, promoting a mirror if the primary went.
+    /// Returns false when nothing is left of the record.
+    private static func strip(_ rec: inout ShootRecord, paths: Set<String>) -> Bool {
+        rec.mirrors.removeAll { paths.contains(cmp($0)) }
+        rec.pendingSync.removeAll { paths.contains(cmp($0)) }
+        if paths.contains(cmp(rec.path)) {
+            guard !rec.mirrors.isEmpty else { return false }
+            rec.path = rec.mirrors.removeFirst()
         }
+        return true
+    }
+
+    /// Same id merges (incoming path becomes primary, existing mirrors kept, incoming mirrors unioned).
+    /// Every other record loses just the paths it shares with the incoming one, and is dropped only
+    /// if that leaves it with no copies.
+    mutating func add(_ r: ShootRecord) {
+        let incoming = Set(r.copyPaths.map(Self.cmp))
+        let same = records.firstIndex(where: { $0.id == r.id })
+        var kept: [ShootRecord] = []
+        var merged = r
+        for (i, var rec) in records.enumerated() {
+            if i == same {
+                var extra: [String] = []
+                for m in rec.mirrors + r.mirrors {
+                    let c = Self.cmp(m)
+                    if c != Self.cmp(r.path), !extra.contains(where: { Self.cmp($0) == c }) { extra.append(m) }
+                }
+                let primary = Self.cmp(r.path)
+                var pending = rec.pendingSync.filter { Self.cmp($0) != primary } + r.pendingSync
+                pending.removeAll { p in
+                    Self.cmp(p) != primary && !extra.contains { Self.cmp($0) == Self.cmp(p) }
+                }
+                var seen = Set<String>()
+                pending = pending.filter { seen.insert(Self.cmp($0)).inserted }
+                merged.mirrors = extra
+                merged.pendingSync = pending
+                kept.append(merged)
+            } else if Self.strip(&rec, paths: incoming) {
+                kept.append(rec)
+            }
+        }
+        if same == nil { kept.append(merged) }
+        records = kept
     }
 
     mutating func remove(id: UUID) {
         records.removeAll { $0.id == id }
     }
 
-    /// Relocates the primary copy.
+    /// Relocates the primary copy. Non-throwing wrapper that ignores refusals; prefer the throwing form.
     mutating func relocate(id: UUID, to path: String) {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
-        records[i].path = path
+        try? relocate(id: id, from: records[i].path, to: path)
     }
 
-    /// Replaces one copy path, primary or mirror. No-op if `from` isn't a copy of the shoot, or if
-    /// `to` is already another copy of it.
-    mutating func relocate(id: UUID, from: String, to: String) {
-        guard let i = records.firstIndex(where: { $0.id == id }) else { return }
-        let fromKey = Self.key(from)
-        let toKey = Self.key(to)
-        let keys = records[i].copyPaths.map(Self.key)
-        guard let slot = keys.firstIndex(of: fromKey) else { return }
-        if toKey != fromKey, keys.contains(toKey) { return }
-        if slot == 0 {
-            records[i].path = to
-        } else {
-            records[i].mirrors[slot - 1] = to
+    /// Replaces one copy path, primary or mirror.
+    mutating func relocate(id: UUID, from: String, to: String) throws(RegistryError) {
+        guard let i = records.firstIndex(where: { $0.id == id }) else { throw .unknownShoot }
+        let fromKey = Self.cmp(from)
+        let toKey = Self.cmp(to)
+        guard let slot = records[i].copyPaths.firstIndex(where: { Self.cmp($0) == fromKey }) else { throw .notACopy }
+        for (j, rec) in records.enumerated() {
+            for (n, p) in rec.copyPaths.enumerated() where Self.cmp(p) == toKey && !(j == i && n == slot) {
+                throw .alreadyRegistered
+            }
         }
-        for j in records[i].pendingSync.indices where Self.key(records[i].pendingSync[j]) == fromKey {
-            records[i].pendingSync[j] = to
+        let stored = Self.key(to)
+        if slot == 0 {
+            records[i].path = stored
+        } else {
+            records[i].mirrors[slot - 1] = stored
+        }
+        for j in records[i].pendingSync.indices where Self.cmp(records[i].pendingSync[j]) == fromKey {
+            records[i].pendingSync[j] = stored
         }
     }
 
     /// Adds a mirror and marks it pending, since a new mirror is out of sync until checked.
     mutating func addMirror(id: UUID, path: String) throws(RegistryError) {
         guard let i = records.firstIndex(where: { $0.id == id }) else { throw .unknownShoot }
-        let k = Self.key(path)
-        if records.contains(where: { $0.copyPaths.contains { Self.key($0) == k } }) {
+        let k = Self.cmp(path)
+        if records.contains(where: { $0.copyPaths.contains { Self.cmp($0) == k } }) {
             throw .alreadyRegistered
         }
-        records[i].mirrors.append(path)
-        records[i].pendingSync.append(path)
+        let stored = Self.key(path)
+        records[i].mirrors.append(stored)
+        records[i].pendingSync.append(stored)
     }
 
     /// Registry only; files are never touched. Removing the primary promotes the first mirror.
-    /// The last copy can't be removed (use `remove(id:)`). A path that isn't a copy is a no-op.
+    /// The last copy can't be removed (use `remove(id:)`).
     mutating func removeCopy(id: UUID, path: String) throws(RegistryError) {
         guard let i = records.firstIndex(where: { $0.id == id }) else { throw .unknownShoot }
-        let k = Self.key(path)
-        guard let slot = records[i].copyPaths.firstIndex(where: { Self.key($0) == k }) else { return }
+        let k = Self.cmp(path)
+        guard let slot = records[i].copyPaths.firstIndex(where: { Self.cmp($0) == k }) else { throw .notACopy }
         guard !records[i].mirrors.isEmpty else { throw .lastCopy }
         if slot == 0 {
             records[i].path = records[i].mirrors.removeFirst()
         } else {
             records[i].mirrors.remove(at: slot - 1)
         }
-        records[i].pendingSync.removeAll { Self.key($0) == k }
+        records[i].pendingSync.removeAll { Self.cmp($0) == k }
     }
 
     mutating func setPendingSync(id: UUID, path: String, _ on: Bool) {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
-        let k = Self.key(path)
-        records[i].pendingSync.removeAll { Self.key($0) == k }
-        if on, records[i].copyPaths.contains(where: { Self.key($0) == k }) {
-            records[i].pendingSync.append(path)
+        let k = Self.cmp(path)
+        records[i].pendingSync.removeAll { Self.cmp($0) == k }
+        if on, records[i].copyPaths.contains(where: { Self.cmp($0) == k }) {
+            records[i].pendingSync.append(Self.key(path))
         }
     }
 

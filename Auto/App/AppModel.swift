@@ -1057,7 +1057,8 @@ extension AppModel {
         guard registry.records.contains(where: { $0.id == id }) else { return }
         let sidecar = try await Task.detached { try ShootFolders.readSidecar(in: folder) }.value
         guard sidecar?.id == id else { throw ShootError.sidecarMismatch }
-        registry.relocate(id: id, to: folder.standardizedFileURL.path)
+        guard let current = registry.records.first(where: { $0.id == id }) else { return }
+        try registry.relocate(id: id, from: current.path, to: folder.standardizedFileURL.path)
         await saveRegistry()
         await refreshShoots()
     }
