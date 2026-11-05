@@ -71,6 +71,7 @@ nonisolated enum IngestDuplicates {
         var placements: [URL: Place] = [:]
         for file in report.files {
             guard let copy = backups[file.url],
+                  let size = try? copy.resourceValues(forKeys: [.fileSizeKey]).fileSize, Int64(size) == file.size,
                   cache.verifiedCandidate(for: file, in: [copy]) != nil else { continue }
             kept.append(file)
             placements[file.url] = report.placements[file.url]
