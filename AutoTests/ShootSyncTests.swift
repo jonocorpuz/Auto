@@ -10,7 +10,7 @@ private nonisolated final class Tally: @unchecked Sendable {
     var count: Int { all.count }
 }
 
-private struct Roots {
+private final class Roots {
     let top: URL
     let a: URL, b: URL, c: URL
 
@@ -31,7 +31,18 @@ private struct Roots {
         try Data(text.utf8).write(to: url)
     }
 
-    func cleanup() { try? FileManager.default.removeItem(at: top) }
+    var locked: [URL] = []
+
+    func lock(_ rel: String, in root: URL) throws {
+        let url = root.appendingPathComponent(rel)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: url.path)
+        locked.append(url)
+    }
+
+    func cleanup() {
+        for url in locked { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path) }
+        try? FileManager.default.removeItem(at: top)
+    }
 }
 
 @Suite struct ShootSyncTests {
@@ -146,7 +157,7 @@ private struct Roots {
         let key = ShootSyncChecker.foldedKey("Clip.mov")
         let colliding = InventoryEntry(url: a.appendingPathComponent("Clip.mov"), relPath: "Clip.mov", size: 4, collisions: ["clip.mov"])
         let other = InventoryEntry(url: b.appendingPathComponent("clip.mov"), relPath: "clip.mov", size: 4)
-        let result = ShootSyncChecker.compare([a: [key: colliding], b: [key: other]], order: [a, b])
+        let result = ShootSyncChecker.compare([a: Inventory(files: [key: colliding]), b: Inventory(files: [key: other])], order: [a, b])
         #expect(result.report.conflicts.map(\.kind) == [.caseCollision])
         #expect(result.report.conflicts.first?.copies == [a])
         #expect(result.toHash.isEmpty)
@@ -157,8 +168,8 @@ private struct Roots {
         let r = try Roots(); defer { r.cleanup() }
         try r.put(r.a, "D1/Clip.MOV", "x")
         let inv = try ShootSyncChecker.inventory(r.a)
-        #expect(inv["d1/clip.mov"]?.relPath == "D1/Clip.MOV")
-        #expect(inv.count == 1)
+        #expect(inv.files["d1/clip.mov"]?.relPath == "D1/Clip.MOV")
+        #expect(inv.files.count == 1)
     }
 
     @Test func secondRunIsAllCacheHitsAndDeepRehashes() async throws {
@@ -243,5 +254,120 @@ private struct Roots {
         _ = await check([r.a, r.b])
         #expect(listing(r.a) == before.0)
         #expect(listing(r.b) == before.1)
+    }
+
+    // MARK: Fail-closed behaviour
+
+    private func hasUnreadable(_ report: ShootSyncReport) -> Bool {
+        report.conflicts.contains { if case .unreadable = $0.kind { true } else { false } }
+    }
+
+    @Test func unreadableSubfolderOnBothCopiesIsNeverInSync() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        for root in [r.a, r.b] { try r.put(root, "ok.mov", "same"); try r.put(root, "Locked/x.mov", "same") }
+        try r.lock("Locked", in: r.a)
+        try r.lock("Locked", in: r.b)
+        let report = try #require(await check([r.a, r.b]))
+        #expect(!report.isInSync)
+        #expect(hasUnreadable(report))
+        #expect(report.conflicts.first?.copies == [r.a, r.b])
+    }
+
+    @Test func unreadableSubfolderOnOneCopyReportsNothingMissingUnderIt() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        try r.put(r.a, "Locked/x.mov", "same")
+        try r.put(r.b, "Locked/x.mov", "same")
+        try r.put(r.b, "Locked/only-b.mov", "bbb")
+        try r.lock("Locked", in: r.a)
+        let report = try #require(await check([r.a, r.b]))
+        #expect(!report.isInSync)
+        #expect(hasUnreadable(report))
+        #expect(report.missing.values.allSatisfy { $0.isEmpty })
+    }
+
+    @Test func unreadableFileOnTwoCopiesAbsentOnThirdIsConflictNotMissing() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        try r.put(r.a, "bad.mov", "same")
+        try r.put(r.b, "bad.mov", "same")
+        try r.lock("bad.mov", in: r.a)
+        try r.lock("bad.mov", in: r.b)
+        let report = try #require(await check([r.a, r.b, r.c]))
+        #expect(hasUnreadable(report))
+        #expect(report.missing.values.allSatisfy { $0.isEmpty })
+        #expect(!report.isInSync)
+    }
+
+    @Test func nestedShootOnOneCopyOnlyIsMismatch() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        try r.put(r.a, "Nested/inner.mov", "a")
+        try r.put(r.a, "Nested/\(ShootSidecar.fileName)", "{}")
+        try r.put(r.b, "Nested/inner.mov", "a")
+        try r.put(r.b, "Nested/extra.mov", "b")
+        let report = try #require(await check([r.a, r.b]))
+        #expect(report.conflicts.map(\.kind) == [.nestedShootMismatch])
+        #expect(report.missing.values.allSatisfy { $0.isEmpty })
+        #expect(!report.isInSync)
+    }
+
+    @Test func symlinkAtFileNameIsTypeMismatch() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        try r.put(r.a, "clip.mov", "data")
+        try r.put(r.b, "target.txt", "t")
+        try FileManager.default.createSymbolicLink(at: r.b.appendingPathComponent("clip.mov"),
+                                                   withDestinationURL: r.b.appendingPathComponent("target.txt"))
+        let report = try #require(await check([r.a, r.b]))
+        #expect(report.conflicts.contains { $0.kind == .typeMismatch && $0.relPath == "clip.mov" })
+        #expect(report.missing[r.b]?.contains { $0.file.relPath == "clip.mov" } != true)
+        #expect(!report.isInSync)
+    }
+
+    @Test func fileVersusFolderIsTypeMismatch() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        try r.put(r.a, "D1", "i am a file")
+        try r.put(r.b, "D1/x.mov", "inside")
+        let report = try #require(await check([r.a, r.b]))
+        #expect(report.conflicts.map(\.kind) == [.typeMismatch])
+        #expect(report.missing.values.allSatisfy { $0.isEmpty })
+    }
+
+    @Test func rewrittenFileWithSameSizeAndMtimeIsNotServedFromCache() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        try r.put(r.a, "clip.mov", "aaaa")
+        try r.put(r.b, "clip.mov", "aaaa")
+        let cache = ChecksumStore(url: nil)
+        #expect(await check([r.a, r.b], cache: cache)?.isInSync == true)
+
+        // Rewrite B in place (same inode, same size), then put its mtime back.
+        let path = r.b.appendingPathComponent("clip.mov").path
+        var st = stat()
+        #expect(stat(path, &st) == 0)
+        var times = [st.st_atimespec, st.st_mtimespec]
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try handle.write(contentsOf: Data("bbbb".utf8))
+        try handle.close()
+        #expect(utimensat(AT_FDCWD, path, &times, 0) == 0)
+
+        let report = try #require(await check([r.a, r.b], cache: cache))
+        #expect(report.conflicts.map(\.kind) == [.content])
+    }
+
+    @Test func foldedKeyIgnoresCaseAndNormalization() {
+        #expect(ShootSyncChecker.foldedKey("D1/Clip.MOV") == "d1/clip.mov")
+        #expect(ShootSyncChecker.foldedKey("\u{c4}BC.mov") == ShootSyncChecker.foldedKey("a\u{308}bc.MOV"))
+    }
+
+    @Test func cacheIsPersistedWhenCancelled() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        for root in [r.a, r.b] { try r.put(root, "one.mov", "11"); try r.put(root, "two.mov", "22") }
+        let storeURL = r.top.appendingPathComponent("checksums.json")
+        let cache = ChecksumStore(url: storeURL)
+        let hasher = FileHasher()
+        hasher.onFileHashed = { _ in hasher.cancel() }
+        let report = await check([r.a, r.b], cache: cache, hasher: hasher)
+        #expect(report == nil)
+        #expect(FileManager.default.fileExists(atPath: storeURL.path))
+        let reloaded = ChecksumStore(url: storeURL)
+        await reloaded.load()
+        #expect(reloaded.count >= 1)
     }
 }
