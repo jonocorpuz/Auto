@@ -80,12 +80,10 @@ struct MirrorShootsTests {
 
     @Test func partialCreateRegistersWhatExistsAndThrows() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let volB = env.volB
-        // The second parent vanishes after validation looked at it.
-        env.model.volumeIDProvider = { url in
-            if url.pathComponents.contains("volB") { try? FileManager.default.removeItem(at: volB) }
-            return Self.fakeProvider(url)
-        }
+        // Validation passes (the parent exists and the name is free), then the second drive turns read-only,
+        // so creating the mirror fails after the primary exists.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: env.volB.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: env.volB.path) }
         do {
             _ = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
             Issue.record("expected partialCreate")
@@ -212,7 +210,7 @@ struct MirrorShootsTests {
         let existing = env.volB.appendingPathComponent("S/Video/cam", isDirectory: true)
         try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
         try Data(repeating: 5, count: 100).write(to: existing.appendingPathComponent("A.MP4"))
-        try await Task.sleep(for: .milliseconds(200))
+        try await waitUntil { card.verifier == nil && card.phase != .scanning }
         #expect(card.phase != .backed)
 
         try await env.model.addMirror(shootID: shoot.id, parent: env.volB, adopt: true)
@@ -307,5 +305,204 @@ struct MirrorShootsTests {
         #expect(await env.model.volumeIdentity(of: env.volB) == "volB")
         let real = try makeEnv(fake: false); defer { try? FileManager.default.removeItem(at: real.dir) }
         #expect(await real.model.volumeIdentity(of: real.volA) != nil)
+    }
+
+    // MARK: Stale plans, busy, failover
+
+    /// A card with one real file and a pending add-footage plan into `shoot`.
+    private func cardWithPlan(_ env: Env, shoot: Shoot) async throws -> Card {
+        let cardFiles = env.dir.appendingPathComponent("c-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cardFiles, withIntermediateDirectories: true)
+        let url = cardFiles.appendingPathComponent("P.MP4")
+        try Data(repeating: 3, count: 100).write(to: url)
+        let file = MediaFile(url: url, size: 100, date: shoot.date, kind: .video, cameraID: "cam")
+        let card = Card(volume: env.dir.appendingPathComponent("CARD"), name: "CARD", identity: "card-\(UUID().uuidString)")
+        card.files = [file]
+        card.missing = [file]
+        card.phase = .needsBackup
+        env.model._testInsert(card: card)
+        let selection = env.model.shootSheetDefaults(shootID: shoot.id, cardID: card.id)
+        try await env.model.addFootage(shootID: shoot.id, cardID: card.id, cameras: [], selection: selection)
+        #expect(card.plan != nil)
+        return card
+    }
+
+    @Test func removingThePrimaryCancelsCoverageAndThePlan() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        let card = try await cardWithPlan(env, shoot: shoot)
+        let key = CoverageKey(shootID: shoot.id, cardID: card.id)
+        #expect(env.model.coverage[key] != nil)
+        try await env.model.removeCopy(shootID: shoot.id, path: try record(env, shoot.id).path)
+        #expect(card.plan == nil)
+        #expect(env.model.coverage[key] == nil)
+    }
+
+    @Test func refusedRemoveCopyLeavesThePlanIntact() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let card = try await cardWithPlan(env, shoot: shoot)
+        await #expect(throws: ShootError.lastCopy) {
+            try await env.model.removeCopy(shootID: shoot.id, path: shoot.folder.path)
+        }
+        #expect(card.plan != nil)
+        #expect(env.model.coverage[CoverageKey(shootID: shoot.id, cardID: card.id)] != nil)
+    }
+
+    @Test func relocatingThePrimaryDiscardsThePlan() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        let card = try await cardWithPlan(env, shoot: shoot)
+        let old = try record(env, shoot.id).path
+        let moved = env.volC.appendingPathComponent("S", isDirectory: true)
+        try FileManager.default.moveItem(at: URL(fileURLWithPath: old), to: moved)
+        try await env.model.relocateCopy(shootID: shoot.id, from: old, to: moved)
+        #expect(card.plan == nil)
+    }
+
+    @Test func failoverToTheMirrorDiscardsThePlan() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        let card = try await cardWithPlan(env, shoot: shoot)
+        try FileManager.default.moveItem(at: shoot.folder, to: env.volA.appendingPathComponent("S.gone"))
+        await env.model.refreshShoots()
+        #expect(card.plan == nil)
+        guard case .online(let now)? = env.model.shoots.first?.availability else { Issue.record("expected online"); return }
+        #expect(now.folder.pathComponents.contains("volB"))
+        #expect(now.mirrors.isEmpty)
+    }
+
+    // MARK: Card volumes, nil ids, duplicates
+
+    private func insertCardVolume(_ env: Env) throws -> URL {
+        let volume = env.dir.appendingPathComponent("CARD", isDirectory: true)
+        try FileManager.default.createDirectory(at: volume, withIntermediateDirectories: true)
+        let card = Card(volume: volume, name: "CARD", identity: "card-\(UUID().uuidString)")
+        env.model._testInsert(card: card)
+        return volume
+    }
+
+    @Test func cardVolumesAreRefusedEverywhere() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        let volume = try insertCardVolume(env)
+        let sub = volume.appendingPathComponent("sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+
+        await #expect(throws: ShootError.onCard) {
+            try await env.model.addMirror(shootID: shoot.id, parent: sub)
+        }
+        let sidecar = try #require(try ShootFolders.readSidecar(in: shoot.folder))
+        let onCard = try ShootFolders.createCopy(of: sidecar, parent: sub, cardVolumes: [])
+        await #expect(throws: ShootError.onCard) {
+            try await env.model.relocateCopy(shootID: shoot.id, from: try record(env, shoot.id).mirrors[0], to: onCard)
+        }
+        await #expect(throws: ShootError.onCard) {
+            try await env.model.createShoot(name: "T", date: day, parents: [env.volC, sub])
+        }
+        #expect(!FileManager.default.fileExists(atPath: env.volC.appendingPathComponent("T").path))
+    }
+
+    @Test func nilVolumeIdRefusesAddMirrorAndRelocate() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        env.model.volumeIDProvider = { _ in nil }
+        await #expect(throws: ShootError.parentMissing) {
+            try await env.model.addMirror(shootID: shoot.id, parent: env.volC)
+        }
+        let sidecar = try #require(try ShootFolders.readSidecar(in: shoot.folder))
+        let twin = try ShootFolders.createCopy(of: sidecar, parent: env.volC, cardVolumes: [])
+        await #expect(throws: ShootError.parentMissing) {
+            try await env.model.relocateCopy(shootID: shoot.id, from: try record(env, shoot.id).mirrors[0], to: twin)
+        }
+        #expect(try record(env, shoot.id).mirrors.count == 1)
+    }
+
+    @Test func duplicateParentsAreRefused() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        await #expect(throws: ShootError.sameVolumeAsCopy) {
+            try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volA])
+        }
+        #expect(env.model.registry.records.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: env.volA.appendingPathComponent("S").path))
+    }
+
+    @Test func onlyTheMirrorOnlineMakesItTheShootFolder() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        try FileManager.default.removeItem(at: shoot.folder.appendingPathComponent(ShootSidecar.fileName))
+        await env.model.refreshShoots()
+        guard case .online(let now)? = env.model.shoots.first?.availability else { Issue.record("expected online"); return }
+        #expect(now.folder.standardizedFileURL.path == URL(fileURLWithPath: try record(env, shoot.id).mirrors[0]).standardizedFileURL.path)
+        #expect(now.mirrors.isEmpty)
+    }
+
+    // MARK: Mismatch and same-volume copies are not backup places
+
+    enum BadMirror: Sendable { case sameVolume, mismatch }
+
+    /// Shoot S on volA plus a registered "mirror" that resolves as `kind`, holding the card's A.MP4. The
+    /// card's B.MP4 sits in a healthy shoot T, so waiting for B to be verified proves the check settled.
+    private func badMirrorScenario(_ env: Env, kind: BadMirror) async throws -> (card: Card, a: URL, s: Shoot, t: Shoot, bad: URL) {
+        let s = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let t = try ShootFolders.create(name: "T", date: day, parent: env.volC, cardVolumes: [], calendar: env.model.calendar)
+        let bad: URL
+        switch kind {
+        case .sameVolume:
+            let sidecar = try #require(try ShootFolders.readSidecar(in: s.folder))
+            let sub = env.volA.appendingPathComponent("sub", isDirectory: true)
+            try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+            bad = try ShootFolders.createCopy(of: sidecar, parent: sub, cardVolumes: [])
+        case .mismatch:
+            bad = try ShootFolders.create(name: "S", date: day, parent: env.volB, cardVolumes: [], calendar: env.model.calendar).folder
+        }
+        let cardFiles = env.dir.appendingPathComponent("cf", isDirectory: true)
+        try FileManager.default.createDirectory(at: cardFiles, withIntermediateDirectories: true)
+        var files: [MediaFile] = []
+        for (name, byte, dir) in [("A.MP4", UInt8(1), bad), ("B.MP4", UInt8(2), t.folder)] {
+            let url = cardFiles.appendingPathComponent(name)
+            try Data(repeating: byte, count: 100).write(to: url)
+            let dest = dir.appendingPathComponent("Video/cam", isDirectory: true)
+            try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+            try Data(repeating: byte, count: 100).write(to: dest.appendingPathComponent(name))
+            files.append(MediaFile(url: url, size: 100, date: day, kind: .video, cameraID: "cam"))
+        }
+        let card = Card(volume: env.dir.appendingPathComponent("CARD"), name: "CARD", identity: "card-\(UUID().uuidString)")
+        card.files = files
+        card.missing = files
+        card.phase = .needsBackup
+        env.model._testInsert(card: card)
+
+        // Register straight through the registry file, bypassing addMirror's refusals.
+        var reg = env.model.registry
+        reg.add(ShootRecord(id: t.id, name: "T", day: ShootSidecar.dayString(day, calendar: env.model.calendar),
+                            path: t.folder.standardizedFileURL.path, lastSeen: Date()))
+        try reg.addMirror(id: s.id, path: bad.standardizedFileURL.path)
+        try await ShootStore.save(reg, to: env.model.registryURL)
+        await env.model.loadShoots()
+        let item = try #require(env.model.shoots.first { $0.id == s.id })
+        let state = try #require(item.copies.first { $0.path == bad.standardizedFileURL.path })
+        switch kind {
+        case .sameVolume:
+            if case .sameVolume = state.availability {} else { Issue.record("expected sameVolume, got \(state.availability)") }
+        case .mismatch: #expect(state.availability == .mismatch)
+        }
+        return (card, files[0].url, s, Shoot(id: t.id, name: "T", date: day, folder: t.folder), bad)
+    }
+
+    @Test(arguments: [BadMirror.sameVolume, .mismatch])
+    func badMirrorDoesNotCountAsBacked(kind: BadMirror) async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let sc = try await badMirrorScenario(env, kind: kind)
+        let b = sc.card.files[1].url
+        try await waitUntil { sc.card.backups[b] != nil && sc.card.verifier == nil }
+        #expect(sc.card.backups[b] != nil)
+        #expect(sc.card.backups[sc.a] == nil)
+        #expect(sc.card.phase != .backed)
+        // And as a duplicate place: a verdict pointing into it is not reported.
+        sc.card.backups[sc.a] = sc.bad.appendingPathComponent("Video/cam/A.MP4")
+        sc.card.missing = [sc.card.files[0]]
+        let report = env.model.duplicates(shootID: sc.t.id, cardID: sc.card.id)
+        #expect(!report.files.contains { $0.url == sc.a })
     }
 }
