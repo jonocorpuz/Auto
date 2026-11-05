@@ -212,6 +212,11 @@ final class AppModel {
     @ObservationIgnored private var browserOnScreen: Card.ID?
     /// Card id -> shoot a pending add-footage plan copies into.
     @ObservationIgnored private var addTargets: [Card.ID: UUID] = [:]
+    /// Cards whose current plan was made with "copy duplicates anyway" (no copy-time pruning).
+    @ObservationIgnored private var includeDuplicatePlans: Set<Card.ID> = []
+    /// Cards with an addFootage/addFiles call in flight, and those that should be recomputed when it ends.
+    @ObservationIgnored private var addInFlight: Set<Card.ID> = []
+    @ObservationIgnored private var recomputeAfterAdd: Set<Card.ID> = []
     /// Online shoot folders the current backup verification considered (to detect changes).
     @ObservationIgnored private var backupShootFolders: Set<String> = []
 
@@ -522,8 +527,9 @@ final class AppModel {
         guard let phase = CardPhase.afterVerify(fileCount: card.files.count, missingCount: card.missing.count,
                                                 hasPlan: card.plan != nil, current: card.phase) else { return }
         if phase == .backed {
-            // A pending add-footage plan (extra copies into another shoot) survives a backed verdict.
-            if addTargets[card.id] != nil, card.plan != nil {
+            // A pending plan (add-footage or a chosen folder) survives a backed verdict; its jobs are
+            // pruned against the verdict when the copy starts.
+            if card.plan != nil {
                 card.phase = .ready
                 return
             }
@@ -563,7 +569,7 @@ final class AppModel {
         panel.prompt = "Copy here"
         let skipped = card.files.count - card.missing.count
         var message = "Choose where \(card.name)'s \(card.missing.count) files should go."
-        if skipped > 0 { message += " \(skipped) duplicates already backed up are skipped." }
+        if skipped > 0 { message += " \(skipped) files already backed up are skipped." }
         panel.message = message
         panel.directoryURL = workRoot
         NSApp.activate()
@@ -579,6 +585,7 @@ final class AppModel {
         stopVerifier(card)
         card.plan = ShootPlanner.flatPlan(missing: card.missing, into: dir)
         addTargets[card.id] = nil
+        includeDuplicatePlans.remove(card.id)
         card.phase = .ready
         cardSettledAfterStop(card)
     }
@@ -630,6 +637,19 @@ final class AppModel {
             cardSettledAfterStop(card)
             return
         }
+        // Two engines never write into overlapping folders (e.g. the same shoot) at once.
+        let myRoot = plan.workRoot ?? plan.destinationRoot
+        let overlapping = cards.contains { other in
+            guard other !== card, other.engine != nil, let theirs = other.plan else { return false }
+            let theirRoot = theirs.workRoot ?? theirs.destinationRoot
+            return myRoot.standardizedFileURL == theirRoot.standardizedFileURL
+                || ShootPlanner.isInside(myRoot, root: theirRoot) || ShootPlanner.isInside(theirRoot, root: myRoot)
+        }
+        if overlapping {
+            card.phase = .failed(ShootBusyError().localizedDescription)
+            cardSettledAfterStop(card)
+            return
+        }
         do {
             let volumes = volumes(including: card)
             let root = plan.workRoot ?? plan.destinationRoot
@@ -655,6 +675,7 @@ final class AppModel {
         card.phase = .copying
         let addShootID = addTargets[card.id]
         let planWorkRoot = plan.workRoot
+        let pruneDuplicates = !includeDuplicatePlans.contains(card.id)
 
         Task {
             // Off main: the destination folder must still exist, and an add-footage target must still
@@ -669,7 +690,34 @@ final class AppModel {
                 return
             }
             guard card.engine === engine else { return }
-            let outcome = await engine.run(plan.jobs) { progress in card.progress = progress }
+
+            // The verdict may have changed since the plan was made (another card's copy landed): drop jobs whose
+            // file now has a verified copy, unless the user asked to copy duplicates anyway.
+            if pruneDuplicates {
+                let backups = card.backups
+                let files = plan.jobs.map(\.file)
+                let found = IngestDuplicates.find(candidates: files, backups: backups, missing: Set(card.missing.map(\.url)),
+                                                  shoots: shootRoots(), target: addShootID)
+                let confirmed = await IngestDuplicates.revalidate(found, backups: backups, cache: verifications)
+                guard card.engine === engine else { return }
+                let drop = Set(confirmed.files.map(\.url))
+                if !drop.isEmpty {
+                    card.plan?.jobs.removeAll { drop.contains($0.file.url) }
+                    if card.plan?.jobs.isEmpty != false {
+                        NSLog("Auto: \(card.name): everything in the plan is already backed up; nothing copied.")
+                        card.plan = nil
+                        addTargets[card.id] = nil
+                        includeDuplicatePlans.remove(card.id)
+                        card.engine = nil
+                        card.phase = .needsBackup
+                        recompute(card)
+                        return
+                    }
+                    card.progress = CopyProgress(filesTotal: card.plan?.jobs.count ?? 0, bytesTotal: card.plan?.bytes ?? 0)
+                }
+            }
+            let runJobs = card.plan?.jobs ?? plan.jobs
+            let outcome = await engine.run(runJobs) { progress in card.progress = progress }
             card.engine = nil
             sessionCopies.append(contentsOf: outcome.copied)
             verifications.record(outcome.copied)
@@ -680,7 +728,7 @@ final class AppModel {
             card.missing.removeAll { done.contains($0.url) }
             if card.plan?.jobs.isEmpty == true { card.plan = nil }
             // The add target lives as long as the plan does (partial failures retry into the same shoot).
-            if card.plan == nil { addTargets[card.id] = nil }
+            if card.plan == nil { addTargets[card.id] = nil; includeDuplicatePlans.remove(card.id) }
             card.backedTo = plan.destinationRoot.path.hasPrefix(workingVolume?.path ?? "\u{0}") ? workingDriveName : plan.destinationLabel
 
             if let first = outcome.failures.first {
@@ -691,7 +739,10 @@ final class AppModel {
             }
             recompute(card)
             // This copy may make other cards' files duplicates (or fully backed): re-verify idle cards.
-            for other in cards where other !== card && isIdleForRecompute(other) { recompute(other) }
+            let copiedKeys = Set(outcome.copied.map(\.file.key))
+            for other in cards where other !== card && needsRecompute(other, afterCopyOf: copiedKeys) {
+                if addInFlight.contains(other.id) { recomputeAfterAdd.insert(other.id) } else { recompute(other) }
+            }
             // Anything that landed inside a registered shoot changes that shoot's coverage.
             let landed = shoots.filter { item in
                 if case .online(let shoot)? = item.availability { return ShootPlanner.isInside(plan.destinationRoot, root: shoot.folder) }
@@ -705,14 +756,17 @@ final class AppModel {
         }
     }
 
-    /// No engine, no verifier, not copying; a card still scanning is left alone unless a recompute is pending.
-    private func isIdleForRecompute(_ card: Card) -> Bool {
-        guard card.engine == nil, card.verifier == nil else { return false }
+    /// Whether another card's verdict can change because files with `copiedKeys` (name+size) just landed:
+    /// it has no engine, isn't copying or backed, and some missing file shares a key. A running verifier is
+    /// fine: recompute restarts it, and the verification cache keeps what it already proved.
+    private func needsRecompute(_ card: Card, afterCopyOf copiedKeys: Set<String>) -> Bool {
+        guard card.engine == nil else { return false }
         switch card.phase {
-        case .copying: return false
-        case .scanning: return recomputePending.contains(card.id)
-        default: return true
+        case .copying, .backed: return false
+        case .scanning: guard recomputePending.contains(card.id) else { return false }
+        default: break
         }
+        return card.missing.contains { copiedKeys.contains($0.key) }
     }
 
     nonisolated private static func preflight(workRoot: URL?, shootID: UUID?) throws {
@@ -1183,11 +1237,18 @@ extension AppModel {
         shoots.map { IngestDuplicates.ShootRoots(id: $0.id, name: $0.record.name, roots: [URL(fileURLWithPath: $0.record.path)]) }
     }
 
-    /// Card files that already have a verified copy somewhere other than `shootID`. Synchronous and cheap:
-    /// reads the card's verdict, no I/O and no revalidation.
-    func duplicates(shootID: UUID?, cardID: Card.ID) -> IngestDuplicates.Report {
+    /// Card files (or `candidates`, e.g. the current selection) that already have a verified copy somewhere
+    /// other than `shootID`. Synchronous and cheap: reads the card's verdict, no I/O and no revalidation.
+    /// The count is provisional until the (shoot, card) coverage is `.done`; once it is, files already
+    /// verified inside the target shoot are excluded first, as `addFootage` does.
+    func duplicates(shootID: UUID?, cardID: Card.ID, candidates: [MediaFile]? = nil) -> IngestDuplicates.Report {
         guard let card = cards.first(where: { $0.id == cardID }) else { return IngestDuplicates.Report() }
-        return IngestDuplicates.find(candidates: card.files, backups: card.backups, missing: Set(card.missing.map(\.url)),
+        var files = candidates ?? card.files
+        if let shootID, case .done(let covered)? = coverage[CoverageKey(shootID: shootID, cardID: cardID)] {
+            let notIn = Set(covered.notInShoot.map(\.url))
+            files = files.filter { notIn.contains($0.url) }
+        }
+        return IngestDuplicates.find(candidates: files, backups: card.backups, missing: Set(card.missing.map(\.url)),
                                      shoots: shootRoots(), target: shootID)
     }
 
@@ -1226,6 +1287,13 @@ extension AppModel {
         }
         guard case .online(let shoot)? = item.availability else { throw ShootError.shootOffline }
         guard canAddFootage(card) else { throw PhaseError() }
+        // A card with no plan at entry must still have none after every await (e.g. a Choose Folder plan).
+        let planWasNil = card.plan == nil
+        addInFlight.insert(cardID)
+        defer {
+            addInFlight.remove(cardID)
+            if recomputeAfterAdd.remove(cardID) != nil, cards.contains(where: { $0 === card }), card.engine == nil { recompute(card) }
+        }
         // Another card's in-flight files aren't in any verdict yet: wait for it to finish.
         guard !isShootBusy(shootID, except: card) else { throw ShootBusyError() }
         let folder = shoot.folder
@@ -1239,6 +1307,7 @@ extension AppModel {
             throw ShootError.shootOffline
         }
         guard cards.contains(where: { $0 === card }), canAddFootage(card) else { throw PhaseError() }
+        if planWasNil, card.plan != nil { throw PendingPlanError() }
         if isOnCard(folder) { throw CardDestinationError() }
 
         // Fresh coverage for exactly the files on the card right now.
@@ -1254,6 +1323,7 @@ extension AppModel {
               case .online(let latest)? = shoots.first(where: { $0.id == shootID })?.availability, latest.folder == folder else {
             throw CoverageUnavailableError()
         }
+        if planWasNil, card.plan != nil { throw PendingPlanError() }
 
         guard !isShootBusy(shootID, except: card) else { throw ShootBusyError() }
 
@@ -1268,6 +1338,7 @@ extension AppModel {
                   case .online(let latest2)? = shoots.first(where: { $0.id == shootID })?.availability, latest2.folder == folder else {
                 throw CoverageUnavailableError()
             }
+            if planWasNil, card.plan != nil { throw PendingPlanError() }
             guard !isShootBusy(shootID, except: card) else { throw ShootBusyError() }
             let drop = Set(confirmed.files.map(\.url))
             if !drop.isEmpty {
@@ -1283,6 +1354,7 @@ extension AppModel {
         stopVerifier(card)
         card.plan = ShootPlanner.plan(jobs: jobs, shoot: folder, workRoot: folder)
         addTargets[cardID] = shootID
+        if includeDuplicates { includeDuplicatePlans.insert(cardID) } else { includeDuplicatePlans.remove(cardID) }
         card.phase = .ready
         cardSettledAfterStop(card)
         shootSheet = nil
