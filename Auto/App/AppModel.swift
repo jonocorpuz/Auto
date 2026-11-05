@@ -224,12 +224,17 @@ final class AppModel {
     /// Shoots with a mirror operation (add / relocate / remove copy) in flight; one at a time per shoot.
     @ObservationIgnored private var copyOpsInFlight: Set<UUID> = []
     @ObservationIgnored var volumeIDProvider: @Sendable (URL) -> String? = ShootStore.realVolumeID(of:)
+    /// MD5 cache (`checksums.json` next to the registry). Seeded by every verified copy so a later sync check is all hits.
+    @ObservationIgnored let checksums: ChecksumStore
+    /// Cards waiting for another card's copy into an overlapping folder, in the order they asked.
+    @ObservationIgnored private var copyQueue: [Card.ID] = []
 
     init(registryURL: URL = ShootStore.defaultURL(),
          thumbnails: any ThumbnailProvider = QLThumbnailProvider(),
          defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.registryURL = registryURL
+        self.checksums = ChecksumStore(url: registryURL.deletingLastPathComponent().appendingPathComponent("checksums.json"))
         self.thumbnails = thumbnails
         autoOpen = defaults.object(forKey: Keys.autoOpen) as? Bool ?? true
         appearance = defaults.string(forKey: Keys.appearance).flatMap(AppearanceMode.init) ?? .system
@@ -313,6 +318,7 @@ final class AppModel {
         }
         watcher.start()
         rebuildIndex()
+        Task { await checksums.load() }
         Task { await loadShoots() }
     }
 
@@ -327,6 +333,7 @@ final class AppModel {
             card.engine?.cancel(); card.verifier?.cancel()
             cancelCoverage { $0.cardID == card.id }
             addTargets[card.id] = nil
+            dequeue(card)
             recomputePending.remove(card.id)
         }
         if let shown = shootSheetCard, gone.contains(where: { $0 === shown }) {
@@ -355,6 +362,7 @@ final class AppModel {
 
     private func scan(_ card: Card) {
         card.phase = .scanning
+        card.mirrorNote = nil
         card.backups = [:]
         // The file list is about to change: any coverage computed from it is stale.
         cancelCoverage { $0.cardID == card.id }
@@ -376,6 +384,7 @@ final class AppModel {
         card.verifier?.cancel()
         card.verifier = nil
         card.plan = nil
+        dequeue(card)
         scan(card)
     }
 
@@ -527,7 +536,12 @@ final class AppModel {
     private func finishRecompute(_ card: Card, results: [URL: VerifyResult]) {
         // Every exit: the card may have settled. A plain refresh restarts the run only when its inputs
         // (files, verdict, session copies, shoots) changed or the run was stopped.
-        defer { if card.id == browsingCardID { refreshBrowserMembership() } }
+        // A queued card was re-verified because the copy it waited for finished: start it now (it re-queues
+        // if another copy is still in the way), so the twins that just landed are pruned from its plan.
+        defer {
+            if card.id == browsingCardID { refreshBrowserMembership() }
+            if card.queuedBehind != nil, card.engine == nil { copy(card) }
+        }
         card.missing = BackupVerifier.missing(files: card.files, results: results)
         card.backups = results.compactMapValues { if case .verified(let copy) = $0 { copy } else { nil } }
         guard let phase = CardPhase.afterVerify(fileCount: card.files.count, missingCount: card.missing.count,
@@ -590,6 +604,7 @@ final class AppModel {
         guard card.engine == nil else { return }
         stopVerifier(card)
         card.plan = ShootPlanner.flatPlan(missing: card.missing, into: dir)
+        dequeue(card)
         addTargets[card.id] = nil
         includeDuplicatePlans.remove(card.id)
         card.phase = .ready
@@ -622,6 +637,7 @@ final class AppModel {
     func discardPlan(_ card: Card) {
         guard card.engine == nil else { return }
         card.plan = nil
+        dequeue(card)
         addTargets[card.id] = nil
         recompute(card)
     }
@@ -635,41 +651,49 @@ final class AppModel {
     // MARK: Copying
 
     func copy(_ card: Card) {
-        // One engine per card; a running verifier yields to the copy.
+        // One engine per card.
         guard let plan = card.plan, card.engine == nil, card.phase != .copying else { return }
+        // Two engines never write into overlapping folders (e.g. the same shoot) at once: wait for the other
+        // one. Checked before the verifier is touched, so a waiting card keeps its state.
+        let myRoots = plan.copyRoots
+        if let blocker = cards.first(where: { other in
+            guard other !== card, other.engine != nil, let theirs = other.plan else { return false }
+            return myRoots.contains { mine in theirs.copyRoots.contains { Self.overlap(mine, $0) } }
+        }) {
+            enqueue(card, behind: blocker)
+            return
+        }
+        dequeue(card)
+        card.mirrorNote = nil
         stopVerifier(card)
         if isOnCard(plan.destinationRoot) {
             card.phase = .failed(CardDestinationError().localizedDescription)
             cardSettledAfterStop(card)
             return
         }
-        // Two engines never write into overlapping folders (e.g. the same shoot) at once.
-        let myRoot = plan.workRoot ?? plan.destinationRoot
-        let overlapping = cards.contains { other in
-            guard other !== card, other.engine != nil, let theirs = other.plan else { return false }
-            let theirRoot = theirs.workRoot ?? theirs.destinationRoot
-            return myRoot.standardizedFileURL == theirRoot.standardizedFileURL
-                || ShootPlanner.isInside(myRoot, root: theirRoot) || ShootPlanner.isInside(theirRoot, root: myRoot)
-        }
-        if overlapping {
-            card.phase = .failed(ShootBusyError().localizedDescription)
-            cardSettledAfterStop(card)
-            return
-        }
-        do {
-            let volumes = volumes(including: card)
-            let root = plan.workRoot ?? plan.destinationRoot
-            for dir in ShootPlanner.directories(for: plan.jobs) {
-                try ShootPlanner.checkDestination(dir, root: root, cardVolumes: volumes)
+        // Destinations and free space are checked per copy. A copy that fails is left out (marked for sync
+        // afterwards) as long as another one can take the files; if none can, the card fails.
+        let volumes = volumes(including: card)
+        var usable: [URL] = []
+        var firstError: String?
+        for root in myRoots {
+            let rootJobs = Self.jobs(in: plan.jobs, roots: [root], of: myRoots)
+            do {
+                for dir in ShootPlanner.directories(for: rootJobs) {
+                    try ShootPlanner.checkDestination(dir, root: root, cardVolumes: volumes)
+                }
+                let needed = rootJobs.reduce(Int64(0)) { $0 + $1.file.size }
+                let values = try? root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+                if let free = values?.volumeAvailableCapacityForImportantUsage, free < needed {
+                    throw NotEnoughSpaceError(needed: needed, free: free)
+                }
+                usable.append(root)
+            } catch {
+                firstError = firstError ?? error.localizedDescription
             }
-        } catch {
-            card.phase = .failed(error.localizedDescription)
-            cardSettledAfterStop(card)
-            return
         }
-        let values = try? plan.destinationRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        if let free = values?.volumeAvailableCapacityForImportantUsage, free < plan.bytes {
-            card.phase = .failed("Not enough space: needs \(Format.bytes(plan.bytes)), \(Format.bytes(free)) free.")
+        guard !usable.isEmpty else {
+            card.phase = .failed(firstError ?? "No copy folder is available.")
             cardSettledAfterStop(card)
             return
         }
@@ -677,33 +701,41 @@ final class AppModel {
         let engine = CopyEngine()
         card.engine = engine
         invalidateBrowserMembership(for: card)
-        card.progress = CopyProgress(filesTotal: plan.jobs.count, bytesTotal: plan.bytes)
+        let startJobs = Self.jobs(in: plan.jobs, roots: usable, of: myRoots)
+        card.progress = CopyProgress(filesTotal: startJobs.count, bytesTotal: startJobs.reduce(0) { $0 + $1.file.size })
         card.phase = .copying
         let addShootID = addTargets[card.id]
-        let planWorkRoot = plan.workRoot
+        let preflightShootID = plan.shootID ?? addShootID
         let pruneDuplicates = !includeDuplicatePlans.contains(card.id)
 
         Task {
-            // Off main: the destination folder must still exist, and an add-footage target must still
-            // carry the shoot's id, before a single byte is written.
-            do {
-                try await Task.detached { try Self.preflight(workRoot: planWorkRoot, shootID: addShootID) }.value
-            } catch {
-                guard card.engine === engine else { return }
+            // Off main: every copy folder must still exist, and carry the shoot's id for an add-footage plan,
+            // before a single byte is written. A copy that fails is left out while another passes.
+            let checks: [(root: URL, error: String?)] = await Task.detached {
+                usable.map { root in
+                    do { try Self.preflight(workRoot: root, shootID: preflightShootID); return (root, nil) }
+                    catch { return (root, error.localizedDescription) }
+                }
+            }.value
+            guard card.engine === engine else { return }
+            let runRoots = checks.filter { $0.error == nil }.map(\.root)
+            guard !runRoots.isEmpty else {
                 card.engine = nil
-                card.phase = .failed(error.localizedDescription)
+                card.phase = .failed(checks.first?.error ?? "No copy folder is available.")
                 refreshBrowserMembership(force: true)
+                releaseQueuedCopies()
                 return
             }
-            guard card.engine === engine else { return }
 
             // The verdict may have changed since the plan was made (another card's copy landed): drop jobs whose
             // file now has a verified copy, unless the user asked to copy duplicates anyway.
             if pruneDuplicates {
                 let backups = card.backups
                 let files = plan.jobs.map(\.file)
+                // No target exclusion here: a file that just landed in the target shoot (a queued card behind
+                // another card's copy into the same shoot) is as done as one verified anywhere else.
                 let found = IngestDuplicates.find(candidates: files, backups: backups, missing: Set(card.missing.map(\.url)),
-                                                  shoots: shootRoots(), target: addShootID)
+                                                  shoots: shootRoots(), target: nil)
                 let confirmed = await IngestDuplicates.revalidate(found, backups: backups, cache: verifications)
                 guard card.engine === engine else { return }
                 let drop = Set(confirmed.files.map(\.url))
@@ -717,18 +749,27 @@ final class AppModel {
                         card.engine = nil
                         card.phase = .needsBackup
                         recompute(card)
+                        releaseQueuedCopies()
                         return
                     }
-                    card.progress = CopyProgress(filesTotal: card.plan?.jobs.count ?? 0, bytesTotal: card.plan?.bytes ?? 0)
                 }
             }
-            let runJobs = card.plan?.jobs ?? plan.jobs
+            let runJobs = Self.jobs(in: card.plan?.jobs ?? plan.jobs, roots: runRoots, of: myRoots)
+            card.progress = CopyProgress(filesTotal: runJobs.count, bytesTotal: runJobs.reduce(0) { $0 + $1.file.size })
             let outcome = await engine.run(runJobs) { progress in card.progress = progress }
+            // Seed the checksum cache from the verified copies (off main; only files still unmodified count).
+            let store = checksums, landedFiles = outcome.copied
+            await Task.detached {
+                for copied in landedFiles { store.record(copied) }
+                await store.saveIfDirty()
+            }.value
             card.engine = nil
             sessionCopies.append(contentsOf: outcome.copied)
             verifications.record(outcome.copied)
 
+            // A file is done once it reached at least one copy; the others are marked for sync.
             let done = Set(outcome.copied.map(\.file.url))
+            let marked = markUnreachedCopies(of: card, plan: plan, runRoots: runRoots, outcome: outcome)
             card.plan?.jobs.removeAll { done.contains($0.file.url) }
             // Just-copied files must not be selectable again while they re-verify.
             card.missing.removeAll { done.contains($0.url) }
@@ -737,8 +778,11 @@ final class AppModel {
             if card.plan == nil { addTargets[card.id] = nil; includeDuplicatePlans.remove(card.id) }
             card.backedTo = plan.destinationRoot.path.hasPrefix(workingVolume?.path ?? "\u{0}") ? workingDriveName : plan.destinationLabel
 
-            if let first = outcome.failures.first {
-                let more = outcome.failures.count > 1 ? " (+\(outcome.failures.count - 1) more)" : ""
+            // Only failures of files that reached no copy fail the card (a mirror failing is a sync matter).
+            let unreached = Set(runJobs.filter { !done.contains($0.file.url) }.map(\.file.name))
+            let blocking = outcome.failures.filter { unreached.contains($0.name) }
+            if let first = blocking.first {
+                let more = blocking.count > 1 ? " (+\(blocking.count - 1) more)" : ""
                 card.phase = .failed("\(first.name): \(first.reason)\(more)")
             } else {
                 card.phase = .needsBackup
@@ -746,9 +790,10 @@ final class AppModel {
             recompute(card)
             // This copy may make other cards' files duplicates (or fully backed): re-verify idle cards.
             let copiedKeys = Set(outcome.copied.map(\.file.key))
-            for other in cards where other !== card && needsRecompute(other, afterCopyOf: copiedKeys) {
+            for other in cards where other !== card && !copyQueue.contains(other.id) && needsRecompute(other, afterCopyOf: copiedKeys) {
                 if addInFlight.contains(other.id) { recomputeAfterAdd.insert(other.id) } else { recompute(other) }
             }
+            releaseQueuedCopies()
             // Anything that landed inside a registered shoot changes that shoot's coverage.
             let landed = shoots.filter { item in
                 if case .online(let shoot)? = item.availability { return ShootPlanner.isInside(plan.destinationRoot, root: shoot.folder) }
@@ -757,9 +802,83 @@ final class AppModel {
             for item in landed { checkCoverage(shootID: item.id, cardID: card.id) }
             // Another card's copy landing in a shoot changes the browsed card's membership too.
             if !landed.isEmpty, card.id != browsingCardID { refreshBrowserMembership(force: true) }
-            if !landed.isEmpty { await refreshShoots() }
+            if marked { await saveRegistry() }
+            if !landed.isEmpty || marked { await refreshShoots() }
             if !outcome.cancelled { openMainWindow() }
         }
+    }
+
+    // MARK: Copy queue
+
+    private func enqueue(_ card: Card, behind other: Card) {
+        if !copyQueue.contains(card.id) { copyQueue.append(card.id) }
+        card.queuedBehind = other.id
+        card.queueNote = "Waiting for \(other.name) to finish"
+    }
+
+    /// Takes a card out of the queue (it keeps its plan and phase). Safe to call for any card.
+    private func dequeue(_ card: Card) {
+        copyQueue.removeAll { $0 == card.id }
+        card.queuedBehind = nil
+        card.queueNote = nil
+    }
+
+    /// An engine just ended. Re-verify each waiting card, since the copy that finished may have made its files
+    /// duplicates; `finishRecompute` then starts it (and `copy` prunes the twins from its plan).
+    private func releaseQueuedCopies() {
+        for id in copyQueue {
+            guard let queued = cards.first(where: { $0.id == id }) else { copyQueue.removeAll { $0 == id }; continue }
+            guard queued.engine == nil else { continue }
+            if addInFlight.contains(id) { recomputeAfterAdd.insert(id) } else { recompute(queued) }
+        }
+    }
+
+    private struct NotEnoughSpaceError: LocalizedError {
+        let needed: Int64
+        let free: Int64
+        var errorDescription: String? { "Not enough space: needs \(Format.bytes(needed)), \(Format.bytes(free)) free." }
+    }
+
+    private static func overlap(_ a: URL, _ b: URL) -> Bool {
+        a.standardizedFileURL == b.standardizedFileURL || ShootPlanner.isInside(a, root: b) || ShootPlanner.isInside(b, root: a)
+    }
+
+    /// The jobs that write to `roots`. A single-root plan (flat folder, legacy) uses all jobs.
+    private static func jobs(in jobs: [CopyJob], roots: [URL], of all: [URL]) -> [CopyJob] {
+        guard all.count > 1 else { return jobs }
+        let keys = Set(roots.map(VolumeClassifier.normalizedPath))
+        return jobs.filter { job in job.root.map { keys.contains(VolumeClassifier.normalizedPath($0)) } ?? false }
+    }
+
+    nonisolated private static func copyLabel(_ path: String) -> String {
+        let parts = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        return parts.count > 2 && parts[1] == "Volumes" ? parts[2] : "This Mac"
+    }
+
+    /// After a run in which something landed: every copy of the shoot that did not get every landed file (offline,
+    /// left out before the run, or failed during it) is marked `pendingSync`, and the card says so. Returns
+    /// whether the registry changed (the caller saves it).
+    private func markUnreachedCopies(of card: Card, plan: CopyPlan, runRoots: [URL], outcome: CopyOutcome) -> Bool {
+        let done = Set(outcome.copied.map(\.file.url))
+        guard !done.isEmpty, let shootID = plan.shootID, let record = registry.records.first(where: { $0.id == shootID }) else { return false }
+        let ran = Set(runRoots.map(VolumeClassifier.normalizedPath))
+        var short = record.copyPaths.filter { !ran.contains(VolumeClassifier.normalizedPath(URL(fileURLWithPath: $0))) }
+        var reached: [String] = []
+        for root in runRoots {
+            let landed = Set(outcome.copied.filter { ShootPlanner.isInside($0.destination, root: root) }.map(\.file.url))
+            if done.isSubset(of: landed) { reached.append(Self.copyLabel(root.path)) } else { short.append(root.path) }
+        }
+        guard !short.isEmpty else { return false }
+        for path in short { registry.setPendingSync(id: shootID, path: path, true) }
+        func unique(_ names: [String]) -> String {
+            var seen = Set<String>()
+            return names.filter { seen.insert($0).inserted }.joined(separator: " and ")
+        }
+        let missing = unique(short.map(Self.copyLabel))
+        card.mirrorNote = reached.isEmpty
+            ? "\(missing) didn't get every file; sync the shoot when it's connected."
+            : "Copied to \(unique(reached)). \(missing) wasn't updated; sync the shoot when it's connected."
+        return true
     }
 
     /// Whether another card's verdict can change because files with `copiedKeys` (name+size) just landed:
@@ -786,7 +905,9 @@ final class AppModel {
         }
     }
 
+    /// Stops a running copy, or takes a waiting card out of the queue (it stays ready with its plan).
     func stop(_ card: Card) {
+        dequeue(card)
         card.engine?.cancel()
     }
 
@@ -1667,13 +1788,32 @@ extension AppModel {
                 if wanted.isEmpty { throw AllDuplicatesError() }
             }
         }
-        let jobs = ShootPlanner.jobs(missing: wanted, shoot: folder, cameras: cameras, fallback: card.name)
+        // Every online copy gets the files. No await from here to the plan, so the copies can't change underneath.
+        guard case .online(let live)? = shoots.first(where: { $0.id == shootID })?.availability, live.folder == folder else {
+            throw ShootError.shootOffline
+        }
+        let jobs = ShootPlanner.jobs(missing: wanted, copies: live.copies, cameras: cameras, fallback: card.name)
         guard !jobs.isEmpty else { throw EmptySelectionError() }
-        guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: folder) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
-
-        try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobs), root: folder, cardVolumes: volumes(including: card))
+        guard jobs.allSatisfy({ job in job.root.map { ShootPlanner.isInside(job.destDir, root: $0) } ?? false }) else {
+            throw ShootPlanner.PathError.outsideWorkFolder
+        }
+        let cardVolumes = volumes(including: card)
+        func jobsFor(_ root: URL) -> [CopyJob] { jobs.filter { $0.root == root } }
+        // The primary must be usable. A mirror that can't take its folders is left out; it is marked for sync after the copy.
+        try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobsFor(folder)), root: folder, cardVolumes: cardVolumes)
+        var roots = [folder]
+        for mirror in live.mirrors {
+            do {
+                try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobsFor(mirror)), root: mirror, cardVolumes: cardVolumes)
+                roots.append(mirror)
+            } catch {
+                NSLog("Auto: skipping copy \(mirror.path) for this ingest: \(error.localizedDescription)")
+            }
+        }
         stopVerifier(card)
-        card.plan = ShootPlanner.plan(jobs: jobs, shoot: folder, workRoot: folder)
+        dequeue(card)
+        card.plan = ShootPlanner.plan(jobs: jobs.filter { job in roots.contains { $0 == job.root } }, shoot: folder, workRoot: folder,
+                                      roots: roots, shootID: shootID)
         addTargets[cardID] = shootID
         if includeDuplicates { includeDuplicatePlans.insert(cardID) } else { includeDuplicatePlans.remove(cardID) }
         card.phase = .ready

@@ -212,12 +212,13 @@ struct DuplicateIngestTests {
         card2.phase = .ready
         env.model.copy(card1)
         env.model.copy(card2)
+        // Queued, not failed: it waits in its ready state and starts by itself.
         #expect(card2.engine == nil)
-        if case .failed(let reason) = card2.phase { #expect(reason == AppModel.ShootBusyError().localizedDescription) } else {
-            Issue.record("expected a busy failure, got \(card2.phase)")
-        }
+        #expect(card2.phase == .ready)
+        #expect(card2.queuedBehind == card1.id)
         #expect(card2.plan != nil)
-        try await waitUntil("copy to finish") { settled(card1) }
+        try await waitUntil("both copies to finish") { settled(card1) && card2.queuedBehind == nil && card2.plan == nil && settled(card2) }
+        #expect(try mp4s(in: s) == ["Video/CARD1/A.MP4", "Video/CARD2/B.MP4"])
     }
 
     @Test func planAppearingDuringAddFootageIsNotReplaced() async throws {
