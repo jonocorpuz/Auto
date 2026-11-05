@@ -219,6 +219,9 @@ final class AppModel {
     @ObservationIgnored private var recomputeAfterAdd: Set<Card.ID> = []
     /// Online shoot folders the current backup verification considered (to detect changes).
     @ObservationIgnored private var backupShootFolders: Set<String> = []
+    /// Runtime mount identity of the volume holding a URL (nil: unknown). Injectable so tests can fake
+    /// distinct drives; every mirror / same-volume decision goes through it.
+    @ObservationIgnored var volumeIDProvider: @Sendable (URL) -> String? = ShootStore.realVolumeID(of:)
 
     init(registryURL: URL = ShootStore.defaultURL(),
          thumbnails: any ThumbnailProvider = QLThumbnailProvider(),
@@ -472,11 +475,12 @@ final class AppModel {
         }
     }
 
-    /// Folders of every registered shoot that is currently online (no I/O).
+    /// Folders of every online copy of every registered shoot, mirrors included (no I/O). A card file
+    /// verified only in a mirror counts as backed up.
     private func onlineShootFolders() -> [URL] {
-        shoots.compactMap { item -> URL? in
-            if case .online(let shoot)? = item.availability { return shoot.folder.standardizedFileURL }
-            return nil
+        shoots.flatMap { item -> [URL] in
+            if case .online(let shoot)? = item.availability { return shoot.copies.map(\.standardizedFileURL) }
+            return []
         }
     }
 
@@ -1003,7 +1007,8 @@ extension AppModel {
         let generation = shootsGeneration
         publishShoots(previous: Dictionary(uniqueKeysWithValues: shoots.map { ($0.id, $0) }))
 
-        let resolved = await ShootStore.resolve(registry.records, calendar: calendar, cardVolumes: cardVolumes())
+        let resolved = await ShootStore.resolve(registry.records, calendar: calendar, cardVolumes: cardVolumes(),
+                                                volumeID: volumeIDProvider)
         let availability = resolved.mapValues(\.availability)
         guard generation == shootsGeneration else { return }
         for i in shoots.indices {
@@ -1049,7 +1054,8 @@ extension AppModel {
 
     private func record(for shoot: Shoot) -> ShootRecord {
         ShootRecord(id: shoot.id, name: shoot.name, day: ShootSidecar.dayString(shoot.date, calendar: calendar),
-                    path: shoot.folder.standardizedFileURL.path, lastSeen: Date())
+                    path: shoot.folder.standardizedFileURL.path,
+                    mirrors: shoot.mirrors.map { $0.standardizedFileURL.path }, lastSeen: Date())
     }
 
     private func register(_ shoot: Shoot) async {
@@ -1061,13 +1067,89 @@ extension AppModel {
     /// Creates `<parent>/<name>` with its sidecar and registers it.
     @discardableResult
     func createShoot(name: String, date: Date, parent: URL) async throws -> Shoot {
+        try await createShoot(name: name, date: date, parents: [parent])
+    }
+
+    /// Creates the shoot in `parents[0]` and a mirror in each further parent (all must be on distinct
+    /// drives). If a mirror can't be made nothing is rolled back: the shoot registers with the copies
+    /// that exist and `ShootError.partialCreate` is thrown.
+    @discardableResult
+    func createShoot(name: String, date: Date, parents: [URL]) async throws -> Shoot {
+        guard !parents.isEmpty else { throw ShootError.parentMissing }
         let volumes = cardVolumes()
         let calendar = calendar
-        let shoot = try await Task.detached {
-            try ShootFolders.create(name: name, date: date, parent: parent, cardVolumes: volumes, calendar: calendar)
+        let provider = volumeIDProvider
+        let outcome = try await Task.detached {
+            try Self.createCopies(name: name, date: date, parents: parents, cardVolumes: volumes,
+                                  calendar: calendar, volumeID: provider)
         }.value
-        await register(shoot)
-        return shoot
+        await register(outcome.shoot)
+        if !outcome.failures.isEmpty {
+            throw ShootError.partialCreate(created: outcome.created, failed: outcome.failures)
+        }
+        return outcome.shoot
+    }
+
+    private struct CreateOutcome: Sendable {
+        var shoot: Shoot
+        var created: [String]
+        var failures: [ShootError.CopyFailure]
+    }
+
+    /// Drive name for messages: the `/Volumes/<name>` component, else the folder's own name.
+    nonisolated private static func driveLabel(_ url: URL) -> String {
+        let parts = url.standardizedFileURL.pathComponents
+        if parts.count > 2, parts[1] == "Volumes" { return parts[2] }
+        return url.lastPathComponent
+    }
+
+    nonisolated private static func isExistingDirectory(_ url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    /// Off main. With several parents every one is validated first (exists, off the cards, distinct
+    /// drives, name free); then the primary and each mirror are created.
+    nonisolated private static func createCopies(name: String, date: Date, parents: [URL], cardVolumes: [URL],
+                                                 calendar: Calendar, volumeID: @Sendable (URL) -> String?) throws -> CreateOutcome {
+        if parents.count > 1 {
+            var seen = Set<String>()
+            for parent in parents {
+                guard isExistingDirectory(parent) else { throw ShootError.parentMissing }
+                if VolumeClassifier.isOnCard(parent, cards: cardVolumes) { throw ShootError.onCard }
+                guard let vid = volumeID(parent) else { throw ShootError.parentMissing }
+                guard seen.insert(vid).inserted else { throw ShootError.sameVolumeAsCopy }
+                switch ShootFolders.classify(parent: parent, name: name) {
+                case .free: break
+                case .existingShoot(let s): throw ShootError.alreadyAShoot(s.id)
+                case .plainFolder: throw ShootError.folderExistsWithoutSidecar(name)
+                case .notAFolder: throw ShootError.notAFolder(name)
+                case .unreadableShoot(let e): throw e
+                case .invalidName: throw ShootError.invalidName
+                }
+            }
+        }
+        var shoot = try ShootFolders.create(name: name, date: date, parent: parents[0], cardVolumes: cardVolumes, calendar: calendar)
+        var created = [driveLabel(parents[0])]
+        var failures: [ShootError.CopyFailure] = []
+        if parents.count > 1 {
+            guard let sidecar = try ShootFolders.readSidecar(in: shoot.folder) else { throw ShootError.corruptSidecar }
+            for parent in parents.dropFirst() {
+                do {
+                    shoot.mirrors.append(try ShootFolders.createCopy(of: sidecar, parent: parent, cardVolumes: cardVolumes))
+                    created.append(driveLabel(parent))
+                } catch {
+                    failures.append(.init(name: driveLabel(parent), reason: error.localizedDescription))
+                }
+            }
+        }
+        return CreateOutcome(shoot: shoot, created: created, failures: failures)
+    }
+
+    /// Runtime mount identity of the volume holding `url`, read off the main actor.
+    func volumeIdentity(of url: URL) async -> String? {
+        let provider = volumeIDProvider
+        return await Task.detached { provider(url) }.value
     }
 
     /// "Use this folder": turns an existing plain folder into a shoot.
@@ -1131,6 +1213,161 @@ extension AppModel {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task {
             do { try await relocateShoot(id: id, to: url) } catch {
+                let alert = NSAlert()
+                alert.messageText = "Can't use that folder"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
+
+    private func mapRegistryError(_ error: ShootRegistry.RegistryError) -> Error {
+        switch error {
+        case .alreadyRegistered: ShootError.alreadyRegistered
+        case .lastCopy: ShootError.lastCopy
+        default: error
+        }
+    }
+
+    /// Adds a mirror of an online shoot in `parent/<shoot name>`. A free name is created; a plain folder
+    /// there is only used when `adopt` is true; a folder already carrying this shoot's sidecar is linked
+    /// without a write. The mirror must be on a different drive than every online copy, and must not
+    /// overlap any registered copy. The sidecar is verified before the mirror is registered.
+    func addMirror(shootID: UUID, parent: URL, adopt: Bool = false) async throws {
+        guard let item = shoots.first(where: { $0.id == shootID }) else { throw UnknownTargetError() }
+        guard case .online(let shoot)? = item.availability else { throw ShootError.shootOffline }
+        let source = shoot.folder
+        let online = shoot.copies
+        let registered = registry.records.flatMap(\.copyPaths)
+        let volumes = cardVolumes()
+        let provider = volumeIDProvider
+        let folder = try await Task.detached {
+            try Self.prepareMirror(shootID: shootID, source: source, parent: parent, adopt: adopt, onlineCopies: online,
+                                   registered: registered, cardVolumes: volumes, volumeID: provider)
+        }.value
+        guard registry.records.contains(where: { $0.id == shootID }) else { throw UnknownTargetError() }
+        do { try registry.addMirror(id: shootID, path: folder.standardizedFileURL.path) } catch { throw mapRegistryError(error) }
+        await saveRegistry()
+        await refreshShoots()
+    }
+
+    /// Off main. Returns the mirror folder, created, adopted or linked, with its sidecar verified.
+    nonisolated private static func prepareMirror(
+        shootID: UUID, source: URL, parent: URL, adopt: Bool, onlineCopies: [URL], registered: [String],
+        cardVolumes: [URL], volumeID: @Sendable (URL) -> String?
+    ) throws -> URL {
+        guard let sidecar = try ShootFolders.readSidecar(in: source), sidecar.id == shootID else { throw ShootError.sidecarMismatch }
+        guard isExistingDirectory(parent) else { throw ShootError.parentMissing }
+        if VolumeClassifier.isOnCard(parent, cards: cardVolumes) { throw ShootError.onCard }
+        guard let parentID = volumeID(parent) else { throw ShootError.parentMissing }
+        if onlineCopies.contains(where: { volumeID($0) == parentID }) { throw ShootError.sameVolumeAsCopy }
+        guard let component = ShootPlanner.safeComponent(sidecar.name) else { throw ShootError.invalidName }
+        let target = parent.appendingPathComponent(component, isDirectory: true)
+        try checkNotOverlapping(target, registered: registered)
+
+        switch ShootFolders.classifyCopy(parent: parent, sidecar: sidecar) {
+        case .free: try ShootFolders.createCopy(of: sidecar, parent: parent, cardVolumes: cardVolumes)
+        case .sameShoot: break
+        case .plainFolder:
+            guard adopt else { throw ShootError.folderExistsWithoutSidecar(component) }
+            try ShootFolders.adoptCopy(folder: target, sidecar: sidecar, cardVolumes: cardVolumes)
+        case .otherShoot(let id): throw ShootError.alreadyAShoot(id)
+        case .notAFolder: throw ShootError.notAFolder(component)
+        case .unreadable(let e): throw e
+        }
+        guard try ShootFolders.readSidecar(in: target)?.id == shootID else { throw ShootError.sidecarMismatch }
+        return target
+    }
+
+    /// Refuses a folder equal to, inside or containing any registered copy (symlinks resolved, case-insensitive).
+    nonisolated private static func checkNotOverlapping(_ target: URL, registered: [String]) throws {
+        func norm(_ url: URL) -> String {
+            let p = ShootPlanner.resolvedPath(url).standardizedFileURL.path.lowercased()
+            return p.hasSuffix("/") ? p : p + "/"
+        }
+        let t = norm(target)
+        for path in registered {
+            let r = norm(URL(fileURLWithPath: path, isDirectory: true))
+            if t.hasPrefix(r) || r.hasPrefix(t) { throw ShootError.alreadyRegistered }
+        }
+    }
+
+    /// Asks for the parent folder of a new mirror, offering to adopt a plain folder of the same name.
+    func addMirror(shootID: UUID) {
+        guard let item = shoots.first(where: { $0.id == shootID }) else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Add Mirror"
+        panel.message = "Choose a folder on another drive for a mirror of \"\(item.record.name)\"."
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do {
+                do { try await addMirror(shootID: shootID, parent: url) } catch ShootError.folderExistsWithoutSidecar(let name) {
+                    let ask = NSAlert()
+                    ask.messageText = "Use the existing \"\(name)\" folder?"
+                    ask.informativeText = "A folder with that name is already there. Auto will add its shoot info file and use it as a mirror; nothing in it is changed."
+                    ask.addButton(withTitle: "Use Folder")
+                    ask.addButton(withTitle: "Cancel")
+                    guard ask.runModal() == .alertFirstButtonReturn else { return }
+                    try await addMirror(shootID: shootID, parent: url, adopt: true)
+                }
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Can't add that mirror"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
+
+    /// Points one copy (primary or mirror) at `folder` after checking its sidecar carries the shoot's id
+    /// and that no other online copy is on the same drive.
+    func relocateCopy(shootID: UUID, from path: String, to folder: URL) async throws {
+        guard let item = shoots.first(where: { $0.id == shootID }) else { throw UnknownTargetError() }
+        // Dry run on a copy: unknown copy or already-registered folder is reported before any disk checks.
+        var trial = registry
+        do { try trial.relocate(id: shootID, from: path, to: folder.standardizedFileURL.path) } catch { throw mapRegistryError(error) }
+        let others = item.copies.filter { $0.availability == .online && $0.path != path }.map { URL(fileURLWithPath: $0.path, isDirectory: true) }
+        let volumes = cardVolumes()
+        let provider = volumeIDProvider
+        try await Task.detached {
+            guard try ShootFolders.readSidecar(in: folder)?.id == shootID else { throw ShootError.sidecarMismatch }
+            if VolumeClassifier.isOnCard(folder, cards: volumes) { throw ShootError.onCard }
+            if let vid = provider(folder), others.contains(where: { provider($0) == vid }) { throw ShootError.sameVolumeAsCopy }
+        }.value
+        do { try registry.relocate(id: shootID, from: path, to: folder.standardizedFileURL.path) } catch { throw mapRegistryError(error) }
+        await saveRegistry()
+        await refreshShoots()
+    }
+
+    /// Drops one copy from Auto's list. Files on the drive are never touched; the last copy can't go.
+    func removeCopy(shootID: UUID, path: String) async throws {
+        if let item = shoots.first(where: { $0.id == shootID }), case .online(let shoot)? = item.availability,
+           shoot.folder.standardizedFileURL.path == URL(fileURLWithPath: path).standardizedFileURL.path {
+            // The folder Auto reads from is going away: coverage and pending add plans aimed at it are stale.
+            cancelCoverage { $0.shootID == shootID }
+            discardAddPlans(forShoot: shootID)
+        }
+        do { try registry.removeCopy(id: shootID, path: path) } catch { throw mapRegistryError(error) }
+        await saveRegistry()
+        await refreshShoots()
+    }
+
+    /// Asks the user where one copy of the shoot is now.
+    func locateCopy(shootID: UUID, path: String) {
+        guard let item = shoots.first(where: { $0.id == shootID }) else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Locate"
+        panel.message = "Choose the folder for this copy of \"\(item.record.name)\"."
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do { try await relocateCopy(shootID: shootID, from: path, to: url) } catch {
                 let alert = NSAlert()
                 alert.messageText = "Can't use that folder"
                 alert.informativeText = error.localizedDescription
@@ -1232,9 +1469,12 @@ extension AppModel {
         var errorDescription: String? { "Another card is copying into this shoot. Try again when it finishes." }
     }
 
-    /// Every shoot with its copy roots (the record path now; mirrors later).
+    /// Every shoot with all of its copy roots (primary plus mirrors).
     private func shootRoots() -> [IngestDuplicates.ShootRoots] {
-        shoots.map { IngestDuplicates.ShootRoots(id: $0.id, name: $0.record.name, roots: [URL(fileURLWithPath: $0.record.path)]) }
+        shoots.map { item in
+            IngestDuplicates.ShootRoots(id: item.id, name: item.record.name,
+                                        roots: item.record.copyPaths.map { URL(fileURLWithPath: $0) })
+        }
     }
 
     /// Card files (or `candidates`, e.g. the current selection) that already have a verified copy somewhere
