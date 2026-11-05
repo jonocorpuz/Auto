@@ -90,10 +90,8 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
             for e in payload.entries {
                 if let d = Self.data(fromHex: e.md5) { loaded[e.stamp] = d }
             }
-            lock.lock()
             // Anything recorded before load finishes wins.
-            map.merge(loaded) { current, _ in current }
-            lock.unlock()
+            lock.withLock { map.merge(loaded) { current, _ in current } }
         } else {
             Self.quarantine(url)
         }
@@ -101,11 +99,12 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
 
     @concurrent func saveIfDirty() async {
         guard let url else { return }
-        lock.lock()
-        guard dirty else { lock.unlock(); return }
-        let entries = map.map { Entry(stamp: $0.key, md5: Self.hex($0.value)) }
-        dirty = false
-        lock.unlock()
+        let snapshot: [Entry]? = lock.withLock {
+            guard dirty else { return nil }
+            dirty = false
+            return map.map { Entry(stamp: $0.key, md5: Self.hex($0.value)) }
+        }
+        guard let entries = snapshot else { return }
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
@@ -114,7 +113,7 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
             try data.write(to: url, options: .atomic)
         } catch {
             NSLog("Auto: could not save checksums: \(error)")
-            lock.lock(); dirty = true; lock.unlock()
+            lock.withLock { dirty = true }
         }
     }
 
