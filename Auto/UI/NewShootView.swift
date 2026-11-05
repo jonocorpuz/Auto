@@ -17,26 +17,62 @@ struct NewShootView: View {
     }
 }
 
-/// Create mode: name, date, location and a live check of the target folder.
+/// One destination in the create sheet.
+private struct Destination: Identifiable {
+    let id = UUID()
+    var url: URL?
+    /// Mount identity of `url`'s volume; nil until resolved (or if unknown).
+    var volumeID: String?
+    var resolved = false
+}
+
+/// Create mode: name, date, destinations and a live check of each target folder.
 private struct CreateShootSheet: View {
     @Environment(AppModel.self) private var model
 
     @State private var name = ""
     @State private var date = Date()
-    @State private var parent: URL?
+    @State private var destinations = [Destination()]
     @State private var error: String?
+    @State private var finished = false
     @State private var working = false
     @FocusState private var nameFocused: Bool
 
     private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
-    private var collision: ShootFolders.FolderCollision? {
-        guard let parent, !trimmed.isEmpty else { return nil }
-        return model.classifyShootFolder(parent: parent, name: trimmed)
+
+    private func collision(_ dest: Destination) -> ShootFolders.FolderCollision? {
+        guard let url = dest.url, !trimmed.isEmpty else { return nil }
+        return model.classifyShootFolder(parent: url, name: trimmed)
     }
-    private var canCreate: Bool {
-        guard parent != nil, !working, model.isValidShootName(name), let collision else { return false }
-        if case .free = collision { return true }
+
+    /// Index of the earlier row sharing this row's drive, if any.
+    private func duplicateOf(_ index: Int) -> Int? {
+        guard let id = destinations[index].volumeID else { return nil }
+        return destinations[..<index].firstIndex { $0.volumeID == id }
+    }
+
+    private func isFree(_ dest: Destination) -> Bool {
+        if case .free = collision(dest) { return true }
         return false
+    }
+
+    private var canCreate: Bool {
+        guard !working, !finished, model.isValidShootName(name) else { return false }
+        for (i, dest) in destinations.enumerated() {
+            guard dest.url != nil, dest.resolved, isFree(dest), duplicateOf(i) == nil else { return false }
+        }
+        return true
+    }
+
+    private func driveName(_ url: URL?) -> String {
+        guard let url else { return "No folder chosen" }
+        let parts = url.pathComponents
+        if parts.count > 2, parts[1] == "Volumes" { return parts[2] }
+        return url.lastPathComponent
+    }
+
+    private func rowTitle(_ index: Int) -> String {
+        index == 0 ? "Primary" : "Mirror \(index)"
     }
 
     var body: some View {
@@ -65,28 +101,32 @@ private struct CreateShootSheet: View {
                             .datePickerStyle(.field)
                     }
 
-                    HStack(spacing: 8) {
-                        Text("Location").font(.system(size: 13, weight: .medium))
+                    HStack {
+                        Text("Destinations").font(.system(size: 13, weight: .medium))
                         Spacer()
-                        Text(parent?.path ?? "No folder chosen")
-                            .font(.callout).foregroundStyle(.secondary)
-                            .lineLimit(1).truncationMode(.middle)
-                            .help(parent?.path ?? "")
-                        Button("Choose…") { if let url = model.chooseShootParent() { parent = url } }
-                            .buttonStyle(.bordered)
+                        Button {
+                            destinations.append(Destination())
+                        } label: {
+                            Label("Add Mirror Drive", systemImage: "plus")
+                        }
+                        .buttonStyle(.bordered).controlSize(.small)
+                        .disabled(working || finished)
                     }
 
-                    collisionLine
+                    ForEach(Array(destinations.enumerated()), id: \.element.id) { index, dest in
+                        destinationRow(index, dest)
+                    }
                 }
             }
 
             if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(finished ? .orange : .red).font(.callout)
             }
 
             HStack {
                 Spacer()
-                Button("Cancel") { model.shootSheet = nil }
+                Button(finished ? "Close" : "Cancel") { model.shootSheet = nil }
                     .buttonStyle(.bordered)
                     .keyboardShortcut(.cancelAction)
                 Button("Create Shoot") { create() }
@@ -100,27 +140,76 @@ private struct CreateShootSheet: View {
         .frame(width: 480)
         .background(Theme.panel)
         .onAppear {
-            parent = model.defaultShootParent
+            if let parent = model.defaultShootParent { setURL(parent, at: destinations[0].id) }
             nameFocused = true
         }
     }
 
-    @ViewBuilder private var collisionLine: some View {
-        if let parent {
-            if trimmed.isEmpty {
-                caption("The shoot folder is named after this.")
-            } else if let collision {
+    private func destinationRow(_ index: Int, _ dest: Destination) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(rowTitle(index)).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                    .frame(width: 60, alignment: .leading)
+                Text(driveName(dest.url))
+                    .font(.callout)
+                    .lineLimit(1).truncationMode(.middle)
+                    .help(dest.url?.path ?? "")
+                Spacer()
+                Button("Choose…") {
+                    if let url = model.chooseShootParent() { setURL(url, at: dest.id) }
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+                .disabled(working || finished)
+                if index > 0 {
+                    Button {
+                        destinations.removeAll { $0.id == dest.id }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove this drive")
+                    .disabled(working || finished)
+                }
+            }
+            collisionLine(index, dest)
+                .padding(.leading, 68)
+        }
+    }
+
+    /// Stores the chosen folder and resolves its volume off the main actor.
+    private func setURL(_ url: URL, at id: UUID) {
+        guard let i = destinations.firstIndex(where: { $0.id == id }) else { return }
+        destinations[i].url = url
+        destinations[i].volumeID = nil
+        destinations[i].resolved = false
+        Task {
+            let volume = await model.volumeIdentity(of: url)
+            guard let i = destinations.firstIndex(where: { $0.id == id }), destinations[i].url == url else { return }
+            destinations[i].volumeID = volume
+            destinations[i].resolved = true
+        }
+    }
+
+    @ViewBuilder private func collisionLine(_ index: Int, _ dest: Destination) -> some View {
+        if let url = dest.url {
+            if let other = duplicateOf(index) {
+                problem("Same drive as \(rowTitle(other)) \u{2014} pick another drive")
+            } else if trimmed.isEmpty {
+                caption(index == 0 ? "The shoot folder is named after this." : "A mirror copy goes here.")
+            } else if let collision = collision(dest) {
                 switch collision {
                 case .free:
-                    caption("Creates \(parent.appendingPathComponent(trimmed).path)")
+                    caption("Creates \(url.appendingPathComponent(trimmed).path)")
                 case .plainFolder:
                     HStack(spacing: 8) {
                         Label("A folder named “\(trimmed)” already exists", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.orange)
                         Spacer()
-                        Button("Use this folder") { adopt(parent) }
-                            .buttonStyle(.bordered).controlSize(.small)
-                            .disabled(working || !model.isValidShootName(name))
+                        if index == 0 {
+                            Button("Use this folder") { adopt(url) }
+                                .buttonStyle(.bordered).controlSize(.small)
+                                .disabled(working || finished || !model.isValidShootName(name))
+                        }
                     }
                 case .existingShoot:
                     Label("That's already a shoot", systemImage: "exclamationmark.triangle.fill")
@@ -147,8 +236,9 @@ private struct CreateShootSheet: View {
     }
 
     private func create() {
-        guard let parent, canCreate else { return }
-        run { try await model.createShoot(name: trimmed, date: date, parent: parent) }
+        guard canCreate else { return }
+        let parents = destinations.compactMap(\.url)
+        run { try await model.createShoot(name: trimmed, date: date, parents: parents) }
     }
 
     private func adopt(_ parent: URL) {
@@ -167,6 +257,12 @@ private struct CreateShootSheet: View {
                 } else {
                     model.shootSheet = nil
                 }
+            } catch ShootError.partialCreate(let created, let failed) {
+                // The shoot exists on the drives that worked; don't offer Create again.
+                finished = true
+                let bad = failed.map { "\($0.name) (\($0.reason))" }.joined(separator: ", ")
+                let made = created.isEmpty ? "" : " The shoot was created on \(created.joined(separator: ", "))."
+                self.error = "Couldn't create on \(bad).\(made) Use Add Mirror\u{2026} on the shoot to retry."
             } catch {
                 self.error = error.localizedDescription
             }
