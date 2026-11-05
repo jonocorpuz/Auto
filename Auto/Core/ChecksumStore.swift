@@ -121,7 +121,12 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
                 if let d = Self.data(fromHex: e.md5) { loaded[e.stamp] = d }
             }
             // Anything recorded before load finishes wins.
-            lock.withLock { map.merge(loaded) { current, _ in current } }
+            // Dirty when the merge added entries: a save that ran before the load must not leave the file short.
+            lock.withLock {
+                let before = map.count
+                map.merge(loaded) { current, _ in current }
+                if map.count > before { dirty = true }
+            }
         } else {
             Self.quarantine(url)
         }

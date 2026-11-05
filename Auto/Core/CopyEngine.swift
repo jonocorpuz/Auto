@@ -43,9 +43,23 @@ nonisolated struct CopiedFile: Sendable, Equatable {
 }
 
 nonisolated struct CopyOutcome: Sendable {
+    struct Failure: Sendable {
+        enum Kind: Sendable, Equatable {
+            /// The bytes written or read did not check out (checksum or size mismatch, source changed).
+            case integrity
+            /// The destination could not take the file (missing root, no space, I/O, name taken).
+            case destination
+        }
+        let name: String
+        let reason: String
+        let file: URL
+        let root: URL?
+        let kind: Kind
+    }
+
     var copied: [CopiedFile] = []
     var copiedKeys: [String] { copied.map(\.file.key) }
-    var failures: [(name: String, reason: String)] = []
+    var failures: [Failure] = []
     var cancelled = false
 }
 
@@ -117,7 +131,13 @@ nonisolated final class CopyEngine: @unchecked Sendable {
                 outcome.cancelled = true
                 break
             } catch {
-                outcome.failures.append((job.file.name, error.localizedDescription))
+                let kind: CopyOutcome.Failure.Kind
+                switch error as? CopyError {
+                case .mismatch, .sizeMismatch, .sourceChanged: kind = .integrity
+                default: kind = .destination
+                }
+                outcome.failures.append(.init(name: job.file.name, reason: error.localizedDescription, file: job.file.url,
+                                              root: job.root, kind: kind))
             }
             progress.bytesDone = startBytes + job.file.size
             progress.filesDone += 1

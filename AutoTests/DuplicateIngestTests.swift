@@ -291,23 +291,27 @@ struct DuplicateIngestTests {
         #expect(sc.card2.plan?.jobs.count == 2)
     }
 
-    @Test func shootBusyWhileAnotherCardCopiesIntoIt() async throws {
+    @Test func planningWhileAnotherCardCopiesQueuesAndPrunesTwinsAtCopyTime() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
         let s = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
         let files1 = try makeFiles(env.dir.appendingPathComponent("c1"), [("A.MP4", 1)], camera: "camA")
-        let files2 = try makeFiles(env.dir.appendingPathComponent("c2"), [("B.MP4", 2)], camera: "camB")
+        let files2 = try makeFiles(env.dir.appendingPathComponent("c2"), [("A.MP4", 1), ("B.MP4", 2)], camera: "camB")
         let card1 = insertCard(env, files: files1, name: "CARD1")
         let card2 = insertCard(env, files: files2, name: "CARD2")
         let selection1 = env.model.shootSheetDefaults(shootID: s.id, cardID: card1.id)
         try await env.model.addFootage(shootID: s.id, cardID: card1.id, cameras: [], selection: selection1)
         env.model.copy(card1)
         #expect(card1.engine != nil)
+        #expect(env.model.isCopyingInto(shootID: s.id) === card1)
 
+        // Planning is allowed while card 1 copies; the copy queues and skips card 1's twin at copy time.
         let selection2 = env.model.shootSheetDefaults(shootID: s.id, cardID: card2.id)
-        await #expect(throws: AppModel.ShootBusyError.self) {
-            try await env.model.addFootage(shootID: s.id, cardID: card2.id, cameras: [], selection: selection2)
-        }
-        #expect(card2.plan == nil)
-        try await waitUntil { settled(card1) }
+        try await env.model.addFootage(shootID: s.id, cardID: card2.id, cameras: [], selection: selection2)
+        #expect(card2.plan != nil)
+        env.model.copy(card2)
+        #expect(card2.queuedBehind == card1.id)
+        try await waitUntil("both to finish") { settled(card1) && settled(card2) && card2.queuedBehind == nil && card2.plan == nil }
+        #expect(try mp4s(in: s) == ["Video/CARD1/A.MP4", "Video/CARD2/B.MP4"])
+        #expect(env.model.isCopyingInto(shootID: s.id) == nil)
     }
 }
