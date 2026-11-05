@@ -561,7 +561,10 @@ final class AppModel {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = "Copy here"
-        panel.message = "Choose where \(card.name)'s \(card.missing.count) files should go."
+        let skipped = card.files.count - card.missing.count
+        var message = "Choose where \(card.name)'s \(card.missing.count) files should go."
+        if skipped > 0 { message += " \(skipped) duplicates already backed up are skipped." }
+        panel.message = message
         panel.directoryURL = workRoot
         NSApp.activate()
         guard panel.runModal() == .OK, let dir = panel.url else { return }
@@ -687,6 +690,8 @@ final class AppModel {
                 card.phase = .needsBackup
             }
             recompute(card)
+            // This copy may make other cards' files duplicates (or fully backed): re-verify idle cards.
+            for other in cards where other !== card && isIdleForRecompute(other) { recompute(other) }
             // Anything that landed inside a registered shoot changes that shoot's coverage.
             let landed = shoots.filter { item in
                 if case .online(let shoot)? = item.availability { return ShootPlanner.isInside(plan.destinationRoot, root: shoot.folder) }
@@ -697,6 +702,16 @@ final class AppModel {
             if !landed.isEmpty, card.id != browsingCardID { refreshBrowserMembership(force: true) }
             if !landed.isEmpty { await refreshShoots() }
             if !outcome.cancelled { openMainWindow() }
+        }
+    }
+
+    /// No engine, no verifier, not copying; a card still scanning is left alone unless a recompute is pending.
+    private func isIdleForRecompute(_ card: Card) -> Bool {
+        guard card.engine == nil, card.verifier == nil else { return false }
+        switch card.phase {
+        case .copying: return false
+        case .scanning: return recomputePending.contains(card.id)
+        default: return true
         }
     }
 
@@ -1150,6 +1165,34 @@ extension AppModel {
         var errorDescription: String? { "Auto couldn't finish checking what this shoot already has. Try again in a moment." }
     }
 
+    struct AllDuplicatesError: LocalizedError {
+        var errorDescription: String? {
+            "All selected files are already backed up. Turn on Copy duplicates anyway to copy them again."
+        }
+    }
+
+    struct ShootBusyError: LocalizedError {
+        var errorDescription: String? { "Another card is copying into this shoot. Try again when it finishes." }
+    }
+
+    /// Every shoot with its copy roots (the record path now; mirrors later).
+    private func shootRoots() -> [IngestDuplicates.ShootRoots] {
+        shoots.map { IngestDuplicates.ShootRoots(id: $0.id, name: $0.record.name, roots: [URL(fileURLWithPath: $0.record.path)]) }
+    }
+
+    /// Card files that already have a verified copy somewhere other than `shootID`. Synchronous and cheap:
+    /// reads the card's verdict, no I/O and no revalidation.
+    func duplicates(shootID: UUID?, cardID: Card.ID) -> IngestDuplicates.Report {
+        guard let card = cards.first(where: { $0.id == cardID }) else { return IngestDuplicates.Report() }
+        return IngestDuplicates.find(candidates: card.files, backups: card.backups, missing: Set(card.missing.map(\.url)),
+                                     shoots: shootRoots(), target: shootID)
+    }
+
+    /// Whether another card's engine is copying into `shootID` right now.
+    private func isShootBusy(_ shootID: UUID, except card: Card) -> Bool {
+        cards.contains { $0 !== card && $0.engine != nil && addTargets[$0.id] == shootID }
+    }
+
     /// Add-footage doesn't depend on the backup verdict: a backed-up card can still feed another shoot.
     private func canAddFootage(_ card: Card) -> Bool {
         switch card.phase {
@@ -1174,12 +1217,14 @@ extension AppModel {
     /// plans from a stale snapshot. The user then starts it with `copy(_:)`.
     /// `onlyFiles`: when set, only these card files (by URL) are considered, on top of `selection`.
     func addFootage(shootID: UUID, cardID: Card.ID, cameras: [Camera], selection: ShootSelection,
-                    onlyFiles: Set<URL>? = nil) async throws {
+                    onlyFiles: Set<URL>? = nil, includeDuplicates: Bool = false) async throws {
         guard let item = shoots.first(where: { $0.id == shootID }), let card = cards.first(where: { $0.id == cardID }) else {
             throw UnknownTargetError()
         }
         guard case .online(let shoot)? = item.availability else { throw ShootError.shootOffline }
         guard canAddFootage(card) else { throw PhaseError() }
+        // Another card's in-flight files aren't in any verdict yet: wait for it to finish.
+        guard !isShootBusy(shootID, except: card) else { throw ShootBusyError() }
         let folder = shoot.folder
         let sidecar = try await Task.detached { try ShootFolders.readSidecar(in: folder) }.value
         guard sidecar?.id == shootID else {
@@ -1207,7 +1252,26 @@ extension AppModel {
             throw CoverageUnavailableError()
         }
 
-        let wanted = selection.filter(covered.notInShoot).filter { onlyFiles?.contains($0.url) ?? true }
+        guard !isShootBusy(shootID, except: card) else { throw ShootBusyError() }
+
+        var wanted = selection.filter(covered.notInShoot).filter { onlyFiles?.contains($0.url) ?? true }
+        if !includeDuplicates, !wanted.isEmpty {
+            let backups = card.backups
+            let found = IngestDuplicates.find(candidates: wanted, backups: backups, missing: Set(card.missing.map(\.url)),
+                                              shoots: shootRoots(), target: shootID)
+            // Off main: a duplicate whose verified copy vanished or changed is a normal file again.
+            let confirmed = await IngestDuplicates.revalidate(found, backups: backups, cache: verifications)
+            guard cards.contains(where: { $0 === card }), card.files == snapshot, canAddFootage(card),
+                  case .online(let latest2)? = shoots.first(where: { $0.id == shootID })?.availability, latest2.folder == folder else {
+                throw CoverageUnavailableError()
+            }
+            guard !isShootBusy(shootID, except: card) else { throw ShootBusyError() }
+            let drop = Set(confirmed.files.map(\.url))
+            if !drop.isEmpty {
+                wanted.removeAll { drop.contains($0.url) }
+                if wanted.isEmpty { throw AllDuplicatesError() }
+            }
+        }
         let jobs = ShootPlanner.jobs(missing: wanted, shoot: folder, cameras: cameras, fallback: card.name)
         guard !jobs.isEmpty else { throw EmptySelectionError() }
         guard jobs.allSatisfy({ ShootPlanner.isInside($0.destDir, root: folder) }) else { throw ShootPlanner.PathError.outsideWorkFolder }
@@ -1229,7 +1293,7 @@ extension AppModel {
 
     /// Card browser: plans and starts a copy of exactly `urls` (minus anything already verified in the
     /// shoot) into the shoot, through the same checks as the Add Footage sheet.
-    func addFiles(_ urls: Set<URL>, from cardID: Card.ID, toShoot shootID: UUID) async throws {
+    func addFiles(_ urls: Set<URL>, from cardID: Card.ID, toShoot shootID: UUID, includeDuplicates: Bool = false) async throws {
         guard let card = cards.first(where: { $0.id == cardID }) else { throw UnknownTargetError() }
         // Never replace a copy the user already has waiting on this card.
         guard card.plan == nil else { throw PendingPlanError() }
@@ -1238,7 +1302,8 @@ extension AppModel {
         let selection = ShootSelection(missing: chosen, cameras: card.cameras, calendar: calendar)
         // addFootage closes the sheets for its own flow; an unrelated open sheet should survive this one.
         let sheet = shootSheet, sheetCard = shootSheetCard
-        try await addFootage(shootID: shootID, cardID: cardID, cameras: card.cameras, selection: selection, onlyFiles: urls)
+        try await addFootage(shootID: shootID, cardID: cardID, cameras: card.cameras, selection: selection, onlyFiles: urls,
+                                  includeDuplicates: includeDuplicates)
         shootSheet = sheet
         shootSheetCard = sheetCard
         copy(card)
