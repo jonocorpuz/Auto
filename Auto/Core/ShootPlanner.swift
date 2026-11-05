@@ -32,7 +32,12 @@ nonisolated struct CopyPlan: Sendable {
     var destinationRoot: URL
     /// The work folder every destination must stay inside (falls back to `destinationRoot`).
     var workRoot: URL?
+    /// Every copy root the jobs write to (primary first). Empty = just `workRoot ?? destinationRoot`.
+    var roots: [URL] = []
+    /// The shoot these jobs add to (nil for flat folder plans).
+    var shootID: UUID?
     var bytes: Int64 { jobs.reduce(0) { $0 + $1.file.size } }
+    var copyRoots: [URL] { roots.isEmpty ? [workRoot ?? destinationRoot] : roots }
 }
 
 /// Pure helpers for naming shoot folders and turning missing files into copy jobs.
@@ -194,14 +199,29 @@ nonisolated enum ShootPlanner {
         }
     }
 
-    static func plan(jobs: [CopyJob], shoot: URL, workRoot: URL? = nil) -> CopyPlan {
+    /// One job per file per copy, file-major (f1 to every copy, then f2, ...). Every job carries its copy
+    /// `root`, so a copy that disappears fails with `.rootMissing` instead of being recreated.
+    static func jobs(missing: [MediaFile], copies: [URL], cameras: [Camera], fallback: String) -> [CopyJob] {
+        let perCopy = copies.map { copy in
+            jobs(missing: missing, shoot: copy, cameras: cameras, fallback: fallback).map { job -> CopyJob in
+                var rooted = job
+                rooted.root = copy
+                return rooted
+            }
+        }
+        return missing.indices.flatMap { i in perCopy.map { $0[i] } }
+    }
+
+    static func plan(jobs: [CopyJob], shoot: URL, workRoot: URL? = nil, roots: [URL] = [], shootID: UUID? = nil) -> CopyPlan {
         let labels = Set(jobs.map { $0.destDir.lastPathComponent }).sorted()
-        return CopyPlan(jobs: jobs, destinationLabel: labels.joined(separator: ", "), destinationRoot: shoot, workRoot: workRoot)
+        return CopyPlan(jobs: jobs, destinationLabel: labels.joined(separator: ", "), destinationRoot: shoot, workRoot: workRoot,
+                        roots: roots, shootID: shootID)
     }
 
     /// Everything into one chosen folder.
     static func flatPlan(missing: [MediaFile], into dir: URL) -> CopyPlan {
-        CopyPlan(jobs: missing.map { CopyJob(file: $0, destDir: dir) }, destinationLabel: dir.lastPathComponent, destinationRoot: dir, workRoot: dir)
+        CopyPlan(jobs: missing.map { CopyJob(file: $0, destDir: dir, root: dir) }, destinationLabel: dir.lastPathComponent,
+                 destinationRoot: dir, workRoot: dir)
     }
 
 }

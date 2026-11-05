@@ -79,6 +79,26 @@ struct ShootPlannerTests {
         #expect(plan.bytes == 30)
     }
 
+    @Test func multiCopyJobsAreFileMajorAndRooted() {
+        let cams = [Camera(id: "a", model: "FX3", serial: nil, folderName: "A-cam")]
+        let a = URL(fileURLWithPath: "/volA/S"), b = URL(fileURLWithPath: "/volB/S")
+        let jobs = ShootPlanner.jobs(missing: [file("1.MP4", kind: .video, camera: "a"), file("2.JPG", kind: .photo, camera: "a")],
+                                     copies: [a, b], cameras: cams, fallback: "CARD")
+        #expect(jobs.map(\.file.name) == ["1.MP4", "1.MP4", "2.JPG", "2.JPG"])
+        #expect(jobs.map(\.destDir.path) == ["/volA/S/Video/A-cam", "/volB/S/Video/A-cam", "/volA/S/Photo/A-cam", "/volB/S/Photo/A-cam"])
+        #expect(jobs.map(\.root?.path) == ["/volA/S", "/volB/S", "/volA/S", "/volB/S"])
+        let plan = ShootPlanner.plan(jobs: jobs, shoot: a, workRoot: a, roots: [a, b], shootID: UUID())
+        #expect(plan.copyRoots == [a, b])
+        #expect(plan.bytes == 40)
+    }
+
+    @Test func flatPlanJobsCarryTheirRoot() {
+        let dir = URL(fileURLWithPath: "/out")
+        let plan = ShootPlanner.flatPlan(missing: [file("1.MP4", kind: .video, camera: "a")], into: dir)
+        #expect(plan.jobs.allSatisfy { $0.root == dir })
+        #expect(plan.copyRoots == [dir])
+    }
+
     private func mixedJobs() -> (jobs: [CopyJob], shoot: URL, root: URL) {
         let cams = [Camera(id: "a", model: "FX3", serial: nil, folderName: "A-cam"),
                     Camera(id: "b", model: "A7", serial: nil, folderName: "B-cam")]

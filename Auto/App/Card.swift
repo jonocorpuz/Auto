@@ -27,6 +27,12 @@ final class Card: Identifiable {
     var progress = CopyProgress()
     var verifyProgress = CopyProgress()
     var backedTo: String?
+    /// Set after a copy that didn't reach every copy of the shoot; cleared on the next copy or rescan.
+    var mirrorNote: String?
+    /// The card whose copy this one waits for (both write into the same folder); nil when not queued.
+    /// A queued card keeps its `.ready` phase and starts by itself when the other copy finishes.
+    var queuedBehind: Card.ID?
+    var queueNote: String?
     var ejecting = false
     var ejectError: String?
     @ObservationIgnored var engine: CopyEngine?
