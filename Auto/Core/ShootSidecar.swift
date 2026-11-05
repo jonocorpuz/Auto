@@ -11,6 +11,17 @@ nonisolated enum ShootError: LocalizedError, Equatable {
     case sidecarMismatch
     case shootOffline
     case invalidName
+    case sameVolumeAsCopy
+    case alreadyRegistered
+    /// Some copies were made, some weren't. Nothing is rolled back; the shoot keeps the ones that exist.
+    case partialCreate(created: [String], failed: [CopyFailure])
+    case lastCopy
+
+    /// One destination that couldn't be created, with a user-facing reason.
+    struct CopyFailure: Sendable, Equatable {
+        var name: String
+        var reason: String
+    }
 
     var errorDescription: String? {
         switch self {
@@ -34,6 +45,16 @@ nonisolated enum ShootError: LocalizedError, Equatable {
             return "This shoot's drive isn't connected."
         case .invalidName:
             return "Enter a shoot name that works as a folder name."
+        case .sameVolumeAsCopy:
+            return "That drive already holds a copy of this shoot. Pick a different drive."
+        case .alreadyRegistered:
+            return "That folder is already part of a shoot in Auto."
+        case .partialCreate(let created, let failed):
+            let made = created.isEmpty ? "No copies were created" : "Created on \(created.joined(separator: ", "))"
+            let bad = failed.map { "\($0.name): \($0.reason)" }.joined(separator: "; ")
+            return "\(made). Couldn't create on \(bad). Use Add Mirror\u{2026} to retry."
+        case .lastCopy:
+            return "This is the shoot's only copy. Use Remove from Auto instead."
         }
     }
 }

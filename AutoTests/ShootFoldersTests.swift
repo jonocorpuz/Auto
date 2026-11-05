@@ -253,4 +253,128 @@ struct ShootFoldersTests {
         let shoot = try make("A", in: parent)
         #expect(try FileManager.default.contentsOfDirectory(atPath: shoot.folder.path) == [ShootSidecar.fileName])
     }
+
+    // MARK: Copies
+
+    private func original(_ name: String = "Wedding") throws -> (ShootSidecar, Data) {
+        let home = try temp()
+        let shoot = try make(name, in: home)
+        let url = shoot.folder.appendingPathComponent(ShootSidecar.fileName)
+        return (try #require(try ShootFolders.readSidecar(in: shoot.folder)), try Data(contentsOf: url))
+    }
+
+    @Test func createCopyWritesByteIdenticalSidecar() throws {
+        let (sidecar, bytes) = try original()
+        let other = try temp()
+        let folder = try ShootFolders.createCopy(of: sidecar, parent: other, cardVolumes: [])
+        #expect(folder.lastPathComponent == "Wedding")
+        #expect(try Data(contentsOf: folder.appendingPathComponent(ShootSidecar.fileName)) == bytes)
+        let read = try #require(try ShootFolders.readSidecar(in: folder))
+        #expect(read.id == sidecar.id && read.createdAt == sidecar.createdAt)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path) == [ShootSidecar.fileName])
+    }
+
+    @Test func createCopyRefusesPlainFolderAndWritesNothing() throws {
+        let (sidecar, _) = try original()
+        let other = try temp()
+        let plain = try sub(other, "Wedding")
+        #expect(throws: ShootError.folderExistsWithoutSidecar("Wedding")) {
+            try ShootFolders.createCopy(of: sidecar, parent: other, cardVolumes: [])
+        }
+        #expect(isEmpty(plain))
+        #expect(ShootFolders.classifyCopy(parent: other, sidecar: sidecar) == .plainFolder)
+    }
+
+    @Test func sameIdClassifiesSameShootAndCreateCopyRefuses() throws {
+        let (sidecar, bytes) = try original()
+        let other = try temp()
+        let folder = try ShootFolders.createCopy(of: sidecar, parent: other, cardVolumes: [])
+        #expect(ShootFolders.classifyCopy(parent: other, sidecar: sidecar) == .sameShoot)
+        #expect(throws: ShootError.alreadyAShoot(sidecar.id)) {
+            try ShootFolders.createCopy(of: sidecar, parent: other, cardVolumes: [])
+        }
+        #expect(try Data(contentsOf: folder.appendingPathComponent(ShootSidecar.fileName)) == bytes)
+    }
+
+    @Test func otherIdRefusedWithAlreadyAShoot() throws {
+        let (sidecar, _) = try original()
+        let other = try temp()
+        let rival = try make("Wedding", in: other)
+        #expect(ShootFolders.classifyCopy(parent: other, sidecar: sidecar) == .otherShoot(rival.id))
+        #expect(throws: ShootError.alreadyAShoot(rival.id)) {
+            try ShootFolders.createCopy(of: sidecar, parent: other, cardVolumes: [])
+        }
+        #expect(throws: ShootError.alreadyAShoot(rival.id)) {
+            try ShootFolders.adoptCopy(folder: rival.folder, sidecar: sidecar, cardVolumes: [])
+        }
+        #expect(try ShootFolders.readSidecar(in: rival.folder)?.id == rival.id)
+    }
+
+    @Test func createCopyOnCardRejected() throws {
+        let (sidecar, _) = try original()
+        let card = try temp()
+        let parent = try sub(card, "Shoots")
+        #expect(throws: ShootError.onCard) {
+            try ShootFolders.createCopy(of: sidecar, parent: parent, cardVolumes: [card])
+        }
+        #expect(isEmpty(parent))
+    }
+
+    @Test func classifyCopyOtherCases() throws {
+        let (sidecar, _) = try original()
+        let parent = try temp()
+        #expect(ShootFolders.classifyCopy(parent: parent, sidecar: sidecar) == .free)
+        try Data("x".utf8).write(to: parent.appendingPathComponent("Wedding"))
+        #expect(ShootFolders.classifyCopy(parent: parent, sidecar: sidecar) == .notAFolder)
+        let bad = try temp()
+        let folder = try sub(bad, "Wedding")
+        try Data("junk".utf8).write(to: folder.appendingPathComponent(ShootSidecar.fileName))
+        #expect(ShootFolders.classifyCopy(parent: bad, sidecar: sidecar) == .unreadable(.corruptSidecar))
+    }
+
+    @Test func adoptCopyPlainFolderWritesIdenticalSidecarKeepingFiles() throws {
+        let (sidecar, bytes) = try original()
+        let parent = try temp()
+        let folder = try sub(parent, "Handmade")
+        try Data("footage".utf8).write(to: folder.appendingPathComponent("clip.mov"))
+        try ShootFolders.adoptCopy(folder: folder, sidecar: sidecar, cardVolumes: [])
+        #expect(try Data(contentsOf: folder.appendingPathComponent(ShootSidecar.fileName)) == bytes)
+        #expect(try Data(contentsOf: folder.appendingPathComponent("clip.mov")) == Data("footage".utf8))
+        // Same id again: accepted, no write.
+        try ShootFolders.adoptCopy(folder: folder, sidecar: sidecar, cardVolumes: [])
+        #expect(try Data(contentsOf: folder.appendingPathComponent(ShootSidecar.fileName)) == bytes)
+    }
+
+    @Test func adoptCopyRefusesCardUnreadableAndSymlink() throws {
+        let (sidecar, _) = try original()
+        let card = try temp()
+        let cardFolder = try sub(card, "X")
+        #expect(throws: ShootError.onCard) {
+            try ShootFolders.adoptCopy(folder: cardFolder, sidecar: sidecar, cardVolumes: [card])
+        }
+        #expect(isEmpty(cardFolder))
+
+        let parent = try temp()
+        let bad = try sub(parent, "Bad")
+        let junk = Data("not json".utf8)
+        try junk.write(to: bad.appendingPathComponent(ShootSidecar.fileName))
+        #expect(throws: ShootError.corruptSidecar) {
+            try ShootFolders.adoptCopy(folder: bad, sidecar: sidecar, cardVolumes: [])
+        }
+        #expect(try Data(contentsOf: bad.appendingPathComponent(ShootSidecar.fileName)) == junk)
+
+        let link = parent.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: bad)
+        #expect(throws: (any Error).self) {
+            try ShootFolders.adoptCopy(folder: link, sidecar: sidecar, cardVolumes: [])
+        }
+    }
+
+    @Test func newShootErrorsHaveMessages() {
+        let e = ShootError.partialCreate(created: ["T7-A"], failed: [.init(name: "T7-B", reason: "full")])
+        #expect(e.errorDescription?.contains("T7-A") == true && e.errorDescription?.contains("T7-B: full") == true)
+        #expect(ShootError.sameVolumeAsCopy.errorDescription != nil)
+        #expect(ShootError.alreadyRegistered.errorDescription != nil)
+        #expect(ShootError.lastCopy.errorDescription != nil)
+    }
 }

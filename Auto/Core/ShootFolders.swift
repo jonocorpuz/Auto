@@ -158,6 +158,61 @@ nonisolated enum ShootFolders {
         guard isExistingDirectory(parent) else { throw ShootError.parentMissing }
         try checkSafe(parent, root: parent, cardVolumes: cardVolumes, name: parent.lastPathComponent)
         guard let component = ShootPlanner.safeComponent(name) else { throw ShootError.invalidName }
+        let sidecar = makeSidecar(name: component, date: date, calendar: calendar, now: now)
+        let folder = try makeFolder(sidecar: sidecar, parent: parent, cardVolumes: cardVolumes)
+        return shoot(sidecar, folder: folder, date: date, calendar: calendar)
+    }
+
+    /// Makes another copy of an existing shoot: `parent/<sidecar.name>` with a sidecar byte-identical to
+    /// the original (same id, name, day, createdAt). Never writes into a folder that already exists.
+    @discardableResult
+    static func createCopy(of sidecar: ShootSidecar, parent: URL, cardVolumes: [URL]) throws -> URL {
+        try makeFolder(sidecar: sidecar, parent: parent, cardVolumes: cardVolumes)
+    }
+
+    /// What is at `parent/<sidecar.name>`, from the point of view of a copy of `sidecar`.
+    enum CopyCollision: Sendable, Equatable {
+        case free
+        case sameShoot
+        case otherShoot(UUID)
+        case plainFolder
+        case notAFolder
+        case unreadable(ShootError)
+    }
+
+    static func classifyCopy(parent: URL, sidecar: ShootSidecar) -> CopyCollision {
+        switch classify(parent: parent, name: sidecar.name) {
+        case .free: return .free
+        case .existingShoot(let s): return s.id == sidecar.id ? .sameShoot : .otherShoot(s.id)
+        case .plainFolder: return .plainFolder
+        case .notAFolder: return .notAFolder
+        case .unreadableShoot(let e): return .unreadable(e)
+        case .invalidName: return .unreadable(.invalidName)
+        }
+    }
+
+    /// Turns an existing plain folder into a copy of `sidecar` by writing that exact sidecar. A folder
+    /// that is already a copy of the same shoot is accepted without a write; any other shoot is refused.
+    static func adoptCopy(folder: URL, sidecar: ShootSidecar, cardVolumes: [URL]) throws {
+        guard isExistingDirectory(folder) else { throw ShootError.notAFolder(folder.lastPathComponent) }
+        try checkSafe(folder, root: folder, cardVolumes: cardVolumes, name: folder.lastPathComponent)
+        switch classify(folder: folder) {
+        case .existingShoot(let s):
+            if s.id == sidecar.id { return }
+            throw ShootError.alreadyAShoot(s.id)
+        case .unreadableShoot(let e): throw e
+        case .notAFolder, .free: throw ShootError.notAFolder(folder.lastPathComponent)
+        case .invalidName: throw ShootError.invalidName
+        case .plainFolder: break
+        }
+        try writeSidecar(sidecar, in: folder, cardVolumes: cardVolumes)
+    }
+
+    /// Shared by `create` and `createCopy`: exclusive mkdir of `parent/<sidecar.name>`, then the sidecar.
+    private static func makeFolder(sidecar: ShootSidecar, parent: URL, cardVolumes: [URL]) throws -> URL {
+        guard isExistingDirectory(parent) else { throw ShootError.parentMissing }
+        try checkSafe(parent, root: parent, cardVolumes: cardVolumes, name: parent.lastPathComponent)
+        guard let component = ShootPlanner.safeComponent(sidecar.name) else { throw ShootError.invalidName }
         let folder = parent.appendingPathComponent(component, isDirectory: true)
         try checkSafe(folder, root: parent, cardVolumes: cardVolumes, name: component)
 
@@ -174,14 +229,13 @@ nonisolated enum ShootFolders {
             case .free: throw posix(code)
             }
         }
-        let sidecar = makeSidecar(name: component, date: date, calendar: calendar, now: now)
         do {
             try writeSidecar(sidecar, in: folder, cardVolumes: cardVolumes)
         } catch {
             rmdir(folder.path) // we made this directory just now; rmdir only succeeds while it is empty
             throw error
         }
-        return shoot(sidecar, folder: folder, date: date, calendar: calendar)
+        return folder
     }
 
     /// Turns an existing plain folder into a shoot by adding the sidecar. Nothing else is touched.
