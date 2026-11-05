@@ -133,6 +133,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         case destinationExists
         case sourceChanged
         case rootMissing
+        case outsideRoot
 
         var errorDescription: String? {
             switch self {
@@ -142,6 +143,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             case .destinationExists: return "A different file is already at the destination"
             case .sourceChanged: return "The source file changed since it was last checked"
             case .rootMissing: return "The destination folder is missing"
+            case .outsideRoot: return "The destination isn't a plain folder inside the copy folder"
             }
         }
     }
@@ -159,11 +161,12 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         let rootParts = root.standardizedFileURL.pathComponents
         let destParts = job.destDir.standardizedFileURL.pathComponents
         guard destParts.count >= rootParts.count, Array(destParts.prefix(rootParts.count)) == rootParts else {
-            throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: job.destDir.path])
+            throw CopyError.outsideRoot
         }
         var current = root.standardizedFileURL
         for part in destParts.dropFirst(rootParts.count) {
             current.appendPathComponent(part, isDirectory: true)
+            if (try? current.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true { throw CopyError.outsideRoot }
             if fm.fileExists(atPath: current.path, isDirectory: &isDir) {
                 guard isDir.boolValue else { throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: current.path]) }
             } else {
@@ -229,7 +232,15 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             if let created = attrs?[.creationDate] { keep[.creationDate] = created }
             if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
             try? fm.setAttributes(keep, ofItemAtPath: partial.path)
-            let final = try Self.moveWithoutOverwriting(partial, to: dest, renameOnCollision: job.onCollision == .renameUnique)
+            let final: URL
+            do {
+                final = try Self.moveWithoutOverwriting(partial, to: dest, renameOnCollision: job.onCollision == .renameUnique)
+            } catch CopyError.destinationExists {
+                // Something appeared at the name mid-copy. If it is byte-identical, that is a success.
+                guard try hash(dest, bypassCache: true) == sourceDigest else { throw CopyError.destinationExists }
+                try? fm.removeItem(at: partial)
+                return CopiedFile(file: job.file, destination: dest, destinationModified: VerificationCache.modificationDate(dest), preexisting: true, checksum: sourceDigest)
+            }
             return CopiedFile(file: job.file, destination: final, destinationModified: VerificationCache.modificationDate(final), preexisting: false, checksum: sourceDigest)
         } catch {
             // Any failure after the partial exists (I/O, cancel, verify, rename) removes it.
