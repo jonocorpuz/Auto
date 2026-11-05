@@ -156,4 +156,137 @@ struct ShootRegistryTests {
         try await saver.save(first, to: url, ticket: 9)
         #expect(await ShootStore.load(from: url) == second)
     }
+
+    // MARK: Mirrors
+
+    @Test func legacyRegistryJSONDecodesAndIsNotQuarantined() async throws {
+        // Exact format ShootRegistrySaver wrote before mirrors existed (pretty, sorted keys, iso8601).
+        let legacy = """
+        {
+          "records" : [
+            {
+              "day" : "2026-01-02",
+              "id" : "11111111-2222-3333-4444-555555555555",
+              "lastSeen" : "2023-11-14T22:13:20Z",
+              "name" : "Wedding",
+              "path" : "\\/Volumes\\/Work\\/Wedding"
+            }
+          ],
+          "version" : 1
+        }
+        """
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("shoots.json")
+        try Data(legacy.utf8).write(to: url)
+        let reg = await ShootStore.load(from: url)
+        #expect(reg.records.count == 1)
+        let r = try #require(reg.records.first)
+        #expect(r.id == UUID(uuidString: "11111111-2222-3333-4444-555555555555"))
+        #expect(r.name == "Wedding")
+        #expect(r.path == "/Volumes/Work/Wedding")
+        #expect(r.mirrors.isEmpty)
+        #expect(r.pendingSync.isEmpty)
+        #expect(r.lastSeen == Date(timeIntervalSince1970: 1_700_000_000))
+        let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        #expect(names == ["shoots.json"])
+    }
+
+    @Test func roundTripWithMirrors() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("shoots.json")
+        let id = UUID()
+        var reg = ShootRegistry()
+        reg.add(record(id, path: "/p", seen: 100))
+        try reg.addMirror(id: id, path: "/m1")
+        try reg.addMirror(id: id, path: "/m2")
+        reg.setPendingSync(id: id, path: "/m1", false)
+        try await ShootStore.save(reg, to: url)
+        let loaded = await ShootStore.load(from: url)
+        #expect(loaded == reg)
+        #expect(loaded.records[0].mirrors == ["/m1", "/m2"])
+        #expect(loaded.records[0].pendingSync == ["/m2"])
+    }
+
+    @Test func addDedupesOnMirrorPath() {
+        var r = ShootRegistry()
+        let id = UUID()
+        r.add(ShootRecord(id: id, name: "S", day: "d", path: "/a", mirrors: ["/b/c"], lastSeen: Date(timeIntervalSince1970: 0)))
+        let other = record(path: "/b/./c/")
+        r.add(other)
+        #expect(r.records == [other])
+    }
+
+    @Test func addMirrorRefusesDuplicatePathAcrossRecords() throws {
+        var r = ShootRegistry()
+        let a = UUID(), b = UUID()
+        r.add(record(a, path: "/a"))
+        r.add(record(b, path: "/b"))
+        try r.addMirror(id: a, path: "/a-copy")
+        #expect(throws: ShootRegistry.RegistryError.alreadyRegistered) { try r.addMirror(id: b, path: "/a-copy") }
+        #expect(throws: ShootRegistry.RegistryError.alreadyRegistered) { try r.addMirror(id: b, path: "/a/") }
+        #expect(throws: ShootRegistry.RegistryError.alreadyRegistered) { try r.addMirror(id: a, path: "/a-copy/./") }
+        #expect(throws: ShootRegistry.RegistryError.unknownShoot) { try r.addMirror(id: UUID(), path: "/zzz") }
+        #expect(r.records[1].mirrors.isEmpty)
+        #expect(r.records[0].mirrors == ["/a-copy"])
+        #expect(r.records[0].pendingSync == ["/a-copy"])
+    }
+
+    @Test func removingPrimaryPromotesMirrorAndLastCopyThrows() throws {
+        var r = ShootRegistry()
+        let id = UUID()
+        r.add(record(id, path: "/p"))
+        try r.addMirror(id: id, path: "/m1")
+        try r.addMirror(id: id, path: "/m2")
+        try r.removeCopy(id: id, path: "/p")
+        #expect(r.records[0].path == "/m1")
+        #expect(r.records[0].mirrors == ["/m2"])
+        try r.removeCopy(id: id, path: "/m2")
+        #expect(r.records[0].mirrors.isEmpty)
+        #expect(r.records[0].pendingSync == ["/m1"])
+        #expect(throws: ShootRegistry.RegistryError.lastCopy) { try r.removeCopy(id: id, path: "/m1") }
+        #expect(r.records[0].path == "/m1")
+        #expect(throws: ShootRegistry.RegistryError.unknownShoot) { try r.removeCopy(id: UUID(), path: "/m1") }
+    }
+
+    @Test func relocateMirrorAndPrimaryByPath() throws {
+        var r = ShootRegistry()
+        let id = UUID()
+        r.add(record(id, path: "/p"))
+        try r.addMirror(id: id, path: "/m")
+        r.relocate(id: id, from: "/m", to: "/m2")
+        #expect(r.records[0].mirrors == ["/m2"])
+        #expect(r.records[0].pendingSync == ["/m2"])
+        #expect(r.records[0].path == "/p")
+        r.relocate(id: id, from: "/p", to: "/p2")
+        #expect(r.records[0].path == "/p2")
+        r.relocate(id: id, from: "/nope", to: "/x")
+        r.relocate(id: id, from: "/p2", to: "/m2")
+        #expect(r.records[0].copyPaths == ["/p2", "/m2"])
+    }
+
+    @Test func setPendingSyncTogglesOnlyKnownCopies() {
+        var r = ShootRegistry()
+        let id = UUID()
+        r.add(record(id, path: "/p"))
+        r.setPendingSync(id: id, path: "/elsewhere", true)
+        #expect(r.records[0].pendingSync.isEmpty)
+        r.setPendingSync(id: id, path: "/p", true)
+        r.setPendingSync(id: id, path: "/p", true)
+        #expect(r.records[0].pendingSync == ["/p"])
+        r.setPendingSync(id: id, path: "/p", false)
+        #expect(r.records[0].pendingSync.isEmpty)
+    }
+
+    @Test func mergeDiscoveredNeverAddsMirrors() {
+        var r = ShootRegistry()
+        let id = UUID()
+        r.add(record(id, path: "/mine", seen: 1))
+        r.merge(discovered: [record(id, path: "/finder-duplicate", seen: 2)])
+        #expect(r.records.count == 1)
+        #expect(r.records[0].mirrors.isEmpty)
+        #expect(r.records[0].pendingSync.isEmpty)
+        #expect(r.records[0].path == "/mine")
+    }
 }

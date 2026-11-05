@@ -6,12 +6,49 @@ nonisolated struct ShootRecord: Codable, Sendable, Hashable {
     var name: String
     /// "yyyy-MM-dd", calendar-local.
     var day: String
+    /// Primary copy.
     var path: String
+    /// Other copies, standardized paths, in user order.
+    var mirrors: [String] = []
+    /// Copies known to be missing footage from an ingest that couldn't reach them. A hint only.
+    var pendingSync: [String] = []
     var lastSeen: Date
+
+    var copyPaths: [String] { [path] + mirrors }
+
+    init(id: UUID, name: String, day: String, path: String,
+         mirrors: [String] = [], pendingSync: [String] = [], lastSeen: Date) {
+        self.id = id
+        self.name = name
+        self.day = day
+        self.path = path
+        self.mirrors = mirrors
+        self.pendingSync = pendingSync
+        self.lastSeen = lastSeen
+    }
+
+    // Hand-written because synthesized decoding ignores property defaults, and a decode failure
+    // quarantines the whole registry. Registries written before mirrors existed lack both keys.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        day = try c.decode(String.self, forKey: .day)
+        path = try c.decode(String.self, forKey: .path)
+        mirrors = try c.decodeIfPresent([String].self, forKey: .mirrors) ?? []
+        pendingSync = try c.decodeIfPresent([String].self, forKey: .pendingSync) ?? []
+        lastSeen = try c.decode(Date.self, forKey: .lastSeen)
+    }
 }
 
 /// The list of known shoots, persisted in Application Support.
 nonisolated struct ShootRegistry: Codable, Sendable, Equatable {
+    enum RegistryError: Error, Equatable {
+        case alreadyRegistered
+        case lastCopy
+        case unknownShoot
+    }
+
     var version = 1
     var records: [ShootRecord] = []
 
@@ -19,11 +56,12 @@ nonisolated struct ShootRegistry: Codable, Sendable, Equatable {
         VolumeClassifier.normalizedPath(URL(fileURLWithPath: path))
     }
 
-    /// Same id replaces; otherwise same standardized path replaces; otherwise appends.
+    /// Same id replaces; otherwise any overlap between copy paths replaces; otherwise appends.
     mutating func add(_ r: ShootRecord) {
+        let incoming = Set(r.copyPaths.map(Self.key))
         if let i = records.firstIndex(where: { $0.id == r.id }) {
             records[i] = r
-        } else if let i = records.firstIndex(where: { Self.key($0.path) == Self.key(r.path) }) {
+        } else if let i = records.firstIndex(where: { !incoming.isDisjoint(with: $0.copyPaths.map(Self.key)) }) {
             records[i] = r
         } else {
             records.append(r)
@@ -34,12 +72,68 @@ nonisolated struct ShootRegistry: Codable, Sendable, Equatable {
         records.removeAll { $0.id == id }
     }
 
+    /// Relocates the primary copy.
     mutating func relocate(id: UUID, to path: String) {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
         records[i].path = path
     }
 
+    /// Replaces one copy path, primary or mirror. No-op if `from` isn't a copy of the shoot, or if
+    /// `to` is already another copy of it.
+    mutating func relocate(id: UUID, from: String, to: String) {
+        guard let i = records.firstIndex(where: { $0.id == id }) else { return }
+        let fromKey = Self.key(from)
+        let toKey = Self.key(to)
+        let keys = records[i].copyPaths.map(Self.key)
+        guard let slot = keys.firstIndex(of: fromKey) else { return }
+        if toKey != fromKey, keys.contains(toKey) { return }
+        if slot == 0 {
+            records[i].path = to
+        } else {
+            records[i].mirrors[slot - 1] = to
+        }
+        for j in records[i].pendingSync.indices where Self.key(records[i].pendingSync[j]) == fromKey {
+            records[i].pendingSync[j] = to
+        }
+    }
+
+    /// Adds a mirror and marks it pending, since a new mirror is out of sync until checked.
+    mutating func addMirror(id: UUID, path: String) throws(RegistryError) {
+        guard let i = records.firstIndex(where: { $0.id == id }) else { throw .unknownShoot }
+        let k = Self.key(path)
+        if records.contains(where: { $0.copyPaths.contains { Self.key($0) == k } }) {
+            throw .alreadyRegistered
+        }
+        records[i].mirrors.append(path)
+        records[i].pendingSync.append(path)
+    }
+
+    /// Registry only; files are never touched. Removing the primary promotes the first mirror.
+    /// The last copy can't be removed (use `remove(id:)`). A path that isn't a copy is a no-op.
+    mutating func removeCopy(id: UUID, path: String) throws(RegistryError) {
+        guard let i = records.firstIndex(where: { $0.id == id }) else { throw .unknownShoot }
+        let k = Self.key(path)
+        guard let slot = records[i].copyPaths.firstIndex(where: { Self.key($0) == k }) else { return }
+        guard !records[i].mirrors.isEmpty else { throw .lastCopy }
+        if slot == 0 {
+            records[i].path = records[i].mirrors.removeFirst()
+        } else {
+            records[i].mirrors.remove(at: slot - 1)
+        }
+        records[i].pendingSync.removeAll { Self.key($0) == k }
+    }
+
+    mutating func setPendingSync(id: UUID, path: String, _ on: Bool) {
+        guard let i = records.firstIndex(where: { $0.id == id }) else { return }
+        let k = Self.key(path)
+        records[i].pendingSync.removeAll { Self.key($0) == k }
+        if on, records[i].copyPaths.contains(where: { Self.key($0) == k }) {
+            records[i].pendingSync.append(path)
+        }
+    }
+
     /// Adds unseen ids. Known ids keep their record and only get `lastSeen` refreshed.
+    /// Discovery never adds or changes mirrors.
     mutating func merge(discovered: [ShootRecord]) {
         for d in discovered {
             if let i = records.firstIndex(where: { $0.id == d.id }) {
