@@ -14,7 +14,7 @@ struct MirrorShootsTests {
         let volC: URL
     }
 
-    private static let fakeProvider: @Sendable (URL) -> String? = { url in
+    nonisolated private static let fakeProvider: @Sendable (URL) -> String? = { url in
         for name in ["volA", "volB", "volC"] where url.pathComponents.contains(name) { return name }
         return nil
     }
