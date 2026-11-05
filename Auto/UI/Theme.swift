@@ -15,6 +15,10 @@ enum Theme {
     static let selection = Color(light: 0xFFFFFF, dark: 0x26282C)
     static let border = Color(light: 0xE4E6EA, dark: 0x2E3035)
     static let accent = Color(light: 0x1D8CF0, dark: 0x3A9BF5)
+    /// Backed-up / in-sync green (the same green as the menu bar's backed state).
+    static let success = Color(nsColor: .systemGreen)
+    /// Copies don't match.
+    static let warning = Color(nsColor: .systemYellow)
 
     static let panelRadius: CGFloat = 16
     static let cardRadius: CGFloat = 12
