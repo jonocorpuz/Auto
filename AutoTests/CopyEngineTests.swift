@@ -163,6 +163,171 @@ struct CopyEngineTests {
         #expect(last.filesDone == 1)
         #expect(last.fraction == 1)
     }
+
+    // MARK: Generalized jobs (root, onCollision, expectedChecksum)
+
+    private func md5Data(_ url: URL) throws -> Data { Data(Insecure.MD5.hash(data: try Data(contentsOf: url))) }
+
+    private func names(_ dir: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
+    }
+
+    @Test func checksumIsSourceMD5ForNewAndPreexistingFiles() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let fresh = try makeFile(in: f.src, "A.MP4", bytes: 3_000, fill: 0x11)
+        let same = try makeFile(in: f.src, "B.MP4", bytes: 3_000, fill: 0x22)
+        try FileManager.default.copyItem(at: same.url, to: f.dst.appendingPathComponent("B.MP4"))
+
+        let outcome = await CopyEngine().run([CopyJob(file: fresh, destDir: f.dst), CopyJob(file: same, destDir: f.dst)]) { _ in }
+        #expect(outcome.failures.isEmpty)
+        #expect(outcome.copied.count == 2)
+        #expect(outcome.copied[0].preexisting == false)
+        #expect(outcome.copied[0].checksum == (try md5Data(fresh.url)))
+        #expect(outcome.copied[1].preexisting == true)
+        #expect(outcome.copied[1].checksum == (try md5Data(same.url)))
+    }
+
+    @Test func skipWithDifferentFileFailsAndLeavesItUntouched() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 2_000, fill: 0x01)
+        let existing = f.dst.appendingPathComponent("A.MP4")
+        let other = Data(repeating: 0x99, count: 2_000)
+        try other.write(to: existing)
+
+        let outcome = await CopyEngine().run([CopyJob(file: file, destDir: f.dst, onCollision: .skip)]) { _ in }
+        #expect(outcome.copied.isEmpty)
+        #expect(outcome.failures.count == 1)
+        #expect(outcome.failures.first?.reason == CopyEngine.CopyError.destinationExists.errorDescription)
+        #expect(try Data(contentsOf: existing) == other)
+        #expect(try names(f.dst) == ["A.MP4"])
+    }
+
+    @Test func skipWithDifferentSizeFileFailsToo() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 2_000)
+        let existing = f.dst.appendingPathComponent("A.MP4")
+        try Data(repeating: 0x99, count: 10).write(to: existing)
+
+        let outcome = await CopyEngine().run([CopyJob(file: file, destDir: f.dst, onCollision: .skip)]) { _ in }
+        #expect(outcome.failures.count == 1)
+        #expect(try Data(contentsOf: existing) == Data(repeating: 0x99, count: 10))
+        #expect(try names(f.dst) == ["A.MP4"])
+    }
+
+    @Test func skipWithIdenticalFileIsPreexisting() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 2_000)
+        try FileManager.default.copyItem(at: file.url, to: f.dst.appendingPathComponent("A.MP4"))
+
+        let outcome = await CopyEngine().run([CopyJob(file: file, destDir: f.dst, onCollision: .skip)]) { _ in }
+        #expect(outcome.failures.isEmpty)
+        #expect(outcome.copied.first?.preexisting == true)
+        #expect(outcome.copied.first?.checksum == (try md5Data(file.url)))
+        #expect(try names(f.dst) == ["A.MP4"])
+    }
+
+    @Test func skipRacedDestinationRemovesPartialAndKeepsOtherFile() throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let partial = f.dst.appendingPathComponent(".A.MP4.\(UUID().uuidString).auto-partial")
+        try Data(repeating: 0x01, count: 100).write(to: partial)
+        let dest = f.dst.appendingPathComponent("A.MP4")
+        try Data(repeating: 0x99, count: 100).write(to: dest)
+
+        #expect(throws: CopyEngine.CopyError.self) {
+            try CopyEngine.moveWithoutOverwriting(partial, to: dest, renameOnCollision: false)
+        }
+        #expect(try Data(contentsOf: dest) == Data(repeating: 0x99, count: 100))
+        #expect(try names(f.dst).count == 2) // caller (copyVerified) removes the partial
+    }
+
+    @Test func expectedChecksumMatchCopies() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 2_000)
+        let job = CopyJob(file: file, destDir: f.dst, expectedChecksum: try md5Data(file.url))
+        let outcome = await CopyEngine().run([job]) { _ in }
+        #expect(outcome.failures.isEmpty)
+        #expect(outcome.copied.count == 1)
+    }
+
+    @Test func expectedChecksumMismatchFailsAndLeavesNothing() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 2_000)
+        let job = CopyJob(file: file, destDir: f.dst, expectedChecksum: Data(repeating: 0, count: 16))
+        let outcome = await CopyEngine().run([job]) { _ in }
+        #expect(outcome.copied.isEmpty)
+        #expect(outcome.failures.first?.reason == CopyEngine.CopyError.sourceChanged.errorDescription)
+        #expect(try names(f.dst).isEmpty)
+    }
+
+    @Test func expectedChecksumMismatchOnPreexistingFileFails() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 2_000)
+        try FileManager.default.copyItem(at: file.url, to: f.dst.appendingPathComponent("A.MP4"))
+        let job = CopyJob(file: file, destDir: f.dst, onCollision: .skip, expectedChecksum: Data(repeating: 0, count: 16))
+        let outcome = await CopyEngine().run([job]) { _ in }
+        #expect(outcome.copied.isEmpty)
+        #expect(outcome.failures.first?.reason == CopyEngine.CopyError.sourceChanged.errorDescription)
+        #expect(try names(f.dst) == ["A.MP4"])
+    }
+
+    @Test func missingRootFailsWithoutCreatingDirectories() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 1_000)
+        let root = f.dst.appendingPathComponent("Gone")
+        let dest = root.appendingPathComponent("Sub/Deeper")
+
+        let outcome = await CopyEngine().run([CopyJob(file: file, destDir: dest, root: root)]) { _ in }
+        #expect(outcome.copied.isEmpty)
+        #expect(outcome.failures.first?.reason == CopyEngine.CopyError.rootMissing.errorDescription)
+        #expect(try names(f.dst).isEmpty)
+    }
+
+    @Test func rootThatIsAFileFailsAsMissing() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 1_000)
+        let root = f.dst.appendingPathComponent("NotADir")
+        try Data([1]).write(to: root)
+
+        let outcome = await CopyEngine().run([CopyJob(file: file, destDir: root.appendingPathComponent("Sub"), root: root)]) { _ in }
+        #expect(outcome.failures.first?.reason == CopyEngine.CopyError.rootMissing.errorDescription)
+        #expect(try names(f.dst) == ["NotADir"])
+    }
+
+    @Test func existingRootGetsMissingSubfoldersBelowItOnly() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 1_000)
+        let root = f.dst.appendingPathComponent("Copy")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let dest = root.appendingPathComponent("Cam/Day 1")
+
+        let outcome = await CopyEngine().run([CopyJob(file: file, destDir: dest, root: root)]) { _ in }
+        #expect(outcome.failures.isEmpty)
+        #expect(outcome.copied.first?.destination == dest.appendingPathComponent("A.MP4"))
+        #expect(try names(f.dst) == ["Copy"])
+        #expect(try names(root) == ["Cam"])
+    }
+
+    @Test func destinationOutsideRootIsRefused() async throws {
+        let f = try fixture(); defer { f.cleanup() }
+        let file = try makeFile(in: f.src, "A.MP4", bytes: 1_000)
+        let root = f.dst.appendingPathComponent("Copy")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let outside = f.dst.appendingPathComponent("Other/Sub")
+
+        let outcome = await CopyEngine().run([CopyJob(file: file, destDir: outside, root: root)]) { _ in }
+        #expect(outcome.copied.isEmpty)
+        #expect(outcome.failures.count == 1)
+        #expect(try names(f.dst) == ["Copy"])
+    }
+
+    @Test func syncSourceUsesCopyCardIDAndKind() {
+        let url = URL(fileURLWithPath: "/tmp/x/clip.mp4")
+        let m = MediaFile.syncSource(url: url, size: 5, modified: Date(timeIntervalSince1970: 7))
+        #expect(m.cardID == "copy")
+        #expect(m.cameraID == "")
+        #expect(m.kind == .video)
+        #expect(m.size == 5)
+    }
 }
 
 @MainActor final class ProgressBox { var last: CopyProgress?; var count = 0 }

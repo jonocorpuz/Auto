@@ -4,6 +4,19 @@ import Foundation
 nonisolated struct CopyJob: Sendable {
     let file: MediaFile
     let destDir: URL
+    /// Copy root. When set, the engine refuses (`.rootMissing`) if it isn't a directory right now, and only
+    /// creates folders BELOW it, one level at a time. nil = create `destDir` with intermediates.
+    var root: URL? = nil
+    var onCollision: CollisionPolicy = .renameUnique
+    /// If set, the MD5 streamed from the source must equal this, else `.sourceChanged` and nothing is kept.
+    var expectedChecksum: Data? = nil
+}
+
+nonisolated enum CollisionPolicy: Sendable {
+    /// A different file at the name gets a "name 2" sibling.
+    case renameUnique
+    /// A different file at the name fails the job with `.destinationExists`; nothing else is written.
+    case skip
 }
 
 nonisolated struct CopyProgress: Sendable, Equatable {
@@ -25,6 +38,8 @@ nonisolated struct CopiedFile: Sendable, Equatable {
     let destinationModified: Date?
     /// An identical file was already there, so nothing was written.
     let preexisting: Bool
+    /// MD5 of the source as read (equals the destination's, which was verified).
+    var checksum: Data? = nil
 }
 
 nonisolated struct CopyOutcome: Sendable {
@@ -92,7 +107,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             report(true)
             let startBytes = progress.bytesDone
             do {
-                try FileManager.default.createDirectory(at: job.destDir, withIntermediateDirectories: true)
+                try Self.prepareDestination(job)
                 let copied = try copyVerified(job) { written in
                     progress.bytesDone = startBytes + written
                     report(false)
@@ -115,12 +130,44 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         case cancelled
         case mismatch
         case sizeMismatch
+        case destinationExists
+        case sourceChanged
+        case rootMissing
 
         var errorDescription: String? {
             switch self {
             case .cancelled: return "Stopped"
             case .mismatch: return "Checksum didn't match the card"
             case .sizeMismatch: return "Copied size didn't match the card"
+            case .destinationExists: return "A different file is already at the destination"
+            case .sourceChanged: return "The source file changed since it was last checked"
+            case .rootMissing: return "The destination folder is missing"
+            }
+        }
+    }
+
+    /// Creates `destDir`. With a `root`, it must exist as a directory and only components below it are
+    /// created, each without intermediates, so a vanished drive can never be recreated elsewhere.
+    private static func prepareDestination(_ job: CopyJob) throws {
+        let fm = FileManager.default
+        guard let root = job.root else {
+            try fm.createDirectory(at: job.destDir, withIntermediateDirectories: true)
+            return
+        }
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else { throw CopyError.rootMissing }
+        let rootParts = root.standardizedFileURL.pathComponents
+        let destParts = job.destDir.standardizedFileURL.pathComponents
+        guard destParts.count >= rootParts.count, Array(destParts.prefix(rootParts.count)) == rootParts else {
+            throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: job.destDir.path])
+        }
+        var current = root.standardizedFileURL
+        for part in destParts.dropFirst(rootParts.count) {
+            current.appendPathComponent(part, isDirectory: true)
+            if fm.fileExists(atPath: current.path, isDirectory: &isDir) {
+                guard isDir.boolValue else { throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: current.path]) }
+            } else {
+                try fm.createDirectory(at: current, withIntermediateDirectories: false)
             }
         }
     }
@@ -134,10 +181,15 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         if fm.fileExists(atPath: dest.path) {
             let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? -1
             let mtime = VerificationCache.modificationDate(dest)
-            if size == job.file.size, try hash(source) == hash(dest, bypassCache: true) {
-                onBytes(job.file.size)
-                return CopiedFile(file: job.file, destination: dest, destinationModified: mtime, preexisting: true)
+            if size == job.file.size {
+                let sourceDigest = try hash(source)
+                if let expected = job.expectedChecksum, sourceDigest != expected { throw CopyError.sourceChanged }
+                if sourceDigest == (try hash(dest, bypassCache: true)) {
+                    onBytes(job.file.size)
+                    return CopiedFile(file: job.file, destination: dest, destinationModified: mtime, preexisting: true, checksum: sourceDigest)
+                }
             }
+            if job.onCollision == .skip { throw CopyError.destinationExists }
             dest = Self.uniqueURL(for: dest)
         }
 
@@ -167,16 +219,18 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             // Force data to the platter, not just the cache; fall back if unsupported.
             if fcntl(fd, F_FULLFSYNC) == -1 { try writer.synchronize() }
 
+            let sourceDigest = Data(sourceHash.finalize())
+            if let expected = job.expectedChecksum, sourceDigest != expected { throw CopyError.sourceChanged }
             guard written == job.file.size else { throw CopyError.sizeMismatch }
-            guard try hash(partial, bypassCache: true) == Data(sourceHash.finalize()) else { throw CopyError.mismatch }
+            guard try hash(partial, bypassCache: true) == sourceDigest else { throw CopyError.mismatch }
 
             let attrs = try? fm.attributesOfItem(atPath: source.path)
             var keep: [FileAttributeKey: Any] = [:]
             if let created = attrs?[.creationDate] { keep[.creationDate] = created }
             if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
             try? fm.setAttributes(keep, ofItemAtPath: partial.path)
-            let final = try Self.moveWithoutOverwriting(partial, to: dest)
-            return CopiedFile(file: job.file, destination: final, destinationModified: VerificationCache.modificationDate(final), preexisting: false)
+            let final = try Self.moveWithoutOverwriting(partial, to: dest, renameOnCollision: job.onCollision == .renameUnique)
+            return CopiedFile(file: job.file, destination: final, destinationModified: VerificationCache.modificationDate(final), preexisting: false, checksum: sourceDigest)
         } catch {
             // Any failure after the partial exists (I/O, cancel, verify, rename) removes it.
             try? fm.removeItem(at: partial)
@@ -203,8 +257,9 @@ nonisolated final class CopyEngine: @unchecked Sendable {
     }
 
     /// Atomically renames `src` to `dest` only if `dest` doesn't exist (RENAME_EXCL).
-    /// On collision picks the next free name and retries (bounded). Returns the final URL.
-    static func moveWithoutOverwriting(_ src: URL, to dest: URL, maxAttempts: Int = 100) throws -> URL {
+    /// On collision picks the next free name and retries (bounded), or with `renameOnCollision: false`
+    /// throws `.destinationExists` without touching anything. Returns the final URL.
+    static func moveWithoutOverwriting(_ src: URL, to dest: URL, maxAttempts: Int = 100, renameOnCollision: Bool = true) throws -> URL {
         var target = dest
         for _ in 0..<maxAttempts {
             if renamex_np(src.path, target.path, UInt32(RENAME_EXCL)) == 0 { return target }
@@ -212,6 +267,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             guard err == EEXIST else {
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(err), userInfo: [NSFilePathErrorKey: target.path])
             }
+            guard renameOnCollision else { throw CopyError.destinationExists }
             target = uniqueURL(for: target)
         }
         throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: dest.path])

@@ -20,6 +20,11 @@ nonisolated struct MediaFile: Identifiable, Sendable, Hashable {
     /// Files are matched across volumes by name + size, the same way you'd eyeball it in Finder.
     static func key(name: String, size: Int64) -> String { "\(name.lowercased())|\(size)" }
 
+    /// A file on a shoot copy (not a card) used as the source of a sync copy job.
+    static func syncSource(url: URL, size: Int64, modified: Date) -> MediaFile {
+        MediaFile(url: url, size: size, date: modified, kind: MediaTypes.kind(for: url) ?? .video, cameraID: "", cardID: "copy")
+    }
+
     /// One specific file on one specific card: card identity + full path + size + mtime.
     /// Unlike `key`, two cards' same-name, same-size files never share an identity.
     var identity: String { "\(cardID)|\(url.standardizedFileURL.path)|\(size)|\(date.timeIntervalSince1970)" }
