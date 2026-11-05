@@ -61,8 +61,13 @@ nonisolated struct Inventory: Sendable, Equatable {
         let message: String
     }
     var files: [String: InventoryEntry] = [:]
-    /// Non-regular names (symlinks, special files) and folders, key -> display path.
-    var occupied: [String: String] = [:]
+    enum Kind: Sendable, Hashable { case file, dir, symlink, special }
+    struct Occupant: Sendable, Hashable {
+        let kind: Kind
+        let relPath: String
+    }
+    /// Non-regular names (symlinks, special files) and folders by folded key.
+    var occupied: [String: Occupant] = [:]
     /// Folders containing a sidecar (nested shoots), key -> display path. Never descended into.
     var nestedShoots: [String: String] = [:]
     /// Folders or files that could not be read. Never silently dropped.
@@ -113,9 +118,9 @@ nonisolated enum ShootSyncChecker {
                 continue
             }
             if v.isSymbolicLink == true {
-                inv.occupied[key] = childRel
+                inv.occupied[key] = Inventory.Occupant(kind: .symlink, relPath: childRel)
             } else if v.isDirectory == true {
-                inv.occupied[key] = childRel
+                inv.occupied[key] = Inventory.Occupant(kind: .dir, relPath: childRel)
                 if fm.fileExists(atPath: url.appendingPathComponent(ShootSidecar.fileName).path) {
                     inv.nestedShoots[key] = childRel
                 } else {
@@ -133,7 +138,7 @@ nonisolated enum ShootSyncChecker {
                     inv.files[key] = InventoryEntry(url: url, relPath: childRel, size: Int64(size))
                 }
             } else {
-                inv.occupied[key] = childRel
+                inv.occupied[key] = Inventory.Occupant(kind: .special, relPath: childRel)
             }
         }
     }
@@ -164,21 +169,9 @@ nonisolated enum ShootSyncChecker {
         for key in nestedKeys.sorted() {
             blocked.insert(key)
             let nested = order.filter { inv($0).nestedShoots[key] != nil }
-            let plain = order.filter { inv($0).nestedShoots[key] == nil && inv($0).occupied[key] != nil }
+            let plain = order.filter { inv($0).nestedShoots[key] == nil && (inv($0).occupied[key] != nil || inv($0).files[key] != nil) }
             if !plain.isEmpty, let display = nested.first.flatMap({ inv($0).nestedShoots[key] }) {
                 report.conflicts.append(SyncConflict(relPath: display, kind: .nestedShootMismatch, copies: order.filter { nested.contains($0) || plain.contains($0) }))
-            }
-        }
-
-        var fileKeys = Set<String>()
-        for root in order { fileKeys.formUnion(inv(root).files.keys) }
-        for key in fileKeys.sorted() where !blocked.contains(key) {
-            let filers = order.filter { inv($0).files[key] != nil }
-            let others = order.filter { inv($0).files[key] == nil && inv($0).occupied[key] != nil }
-            if !others.isEmpty, let first = filers.first.flatMap({ inv($0).files[key] }) {
-                report.conflicts.append(SyncConflict(relPath: first.relPath, kind: .typeMismatch,
-                                                     copies: order.filter { filers.contains($0) || others.contains($0) }))
-                blocked.insert(key)
             }
         }
 
@@ -190,6 +183,24 @@ nonisolated enum ShootSyncChecker {
                 from = key.index(after: slash)
             }
             return false
+        }
+
+        var fileKeys = Set<String>()
+        for root in order { fileKeys.formUnion(inv(root).files.keys) }
+
+        // Same name, different kind of thing (file / folder / symlink / special) on different copies.
+        func kind(_ root: URL, _ key: String) -> Inventory.Kind? {
+            if inv(root).files[key] != nil { return .file }
+            return inv(root).occupied[key]?.kind
+        }
+        var kindKeys = fileKeys
+        for root in order { kindKeys.formUnion(inv(root).occupied.keys) }
+        for key in kindKeys.sorted() where !isBlocked(key) {
+            let holders = order.filter { kind($0, key) != nil }
+            guard Set(holders.compactMap { kind($0, key) }).count > 1, let h = holders.first else { continue }
+            let display = inv(h).files[key]?.relPath ?? inv(h).occupied[key]?.relPath ?? key
+            report.conflicts.append(SyncConflict(relPath: display, kind: .typeMismatch, copies: holders))
+            blocked.insert(key)
         }
 
         for key in fileKeys.sorted() where !isBlocked(key) {
