@@ -81,12 +81,28 @@ struct ChecksumStoreTests {
         let f = dir.appendingPathComponent("a.bin")
         try Data([1, 2, 3]).write(to: f)
         let media = MediaFile.syncSource(url: f, size: 3, modified: Date())
+        let mtime = VerificationCache.modificationDate(f)
         let store = ChecksumStore(url: nil)
-        store.record(CopiedFile(file: media, destination: f, destinationModified: nil, preexisting: false, checksum: nil))
+        store.record(CopiedFile(file: media, destination: f, destinationModified: mtime, preexisting: false, checksum: nil))
         #expect(store.count == 0)
         store.record(CopiedFile(file: media, destination: f, destinationModified: nil, preexisting: false, checksum: Data([7, 7])))
+        #expect(store.count == 0)
+        store.record(CopiedFile(file: media, destination: f, destinationModified: mtime, preexisting: true, checksum: Data([7, 7])))
         #expect(store.count == 1)
         #expect(store.checksum(for: try #require(ChecksumStore.stamp(f))) == Data([7, 7]))
+    }
+
+    @Test func recordCopiedFileSkipsDestinationModifiedAfterCopy() throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let f = dir.appendingPathComponent("a.bin")
+        try Data([1, 2, 3]).write(to: f)
+        let media = MediaFile.syncSource(url: f, size: 3, modified: Date())
+        let copied = CopiedFile(file: media, destination: f, destinationModified: VerificationCache.modificationDate(f),
+                                preexisting: false, checksum: Data([7, 7]))
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 42)], ofItemAtPath: f.path)
+        let store = ChecksumStore(url: nil)
+        store.record(copied)
+        #expect(store.count == 0)
     }
 
     @Test func persistenceRoundTrip() async throws {

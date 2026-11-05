@@ -22,6 +22,8 @@ nonisolated struct SyncConflict: Sendable, Hashable {
 nonisolated struct SyncMissing: Sendable, Hashable {
     let file: SyncFile
     let source: URL              // copy root that has it (preferring the effective primary)
+    /// MD5 of the source as the checker read it, when the file was hashed (present on 2+ copies and agreeing).
+    var checksum: Data? = nil
 }
 
 nonisolated struct ShootSyncReport: Sendable, Equatable {
@@ -319,12 +321,22 @@ nonisolated enum ShootSyncChecker {
                 report.missing[root] = list.filter { !conflicted.contains(foldedKey($0.file.relPath)) }
             }
         }
+        if !outcome.digests.isEmpty {
+            for (root, list) in report.missing {
+                report.missing[root] = list.map { item in
+                    var m = item
+                    m.checksum = outcome.digests[foldedKey(item.file.relPath)]
+                    return m
+                }
+            }
+        }
         report.depth = .checksums
         return report
     }
 
     private struct HashOutcome: Sendable {
         var conflicts: [SyncConflict] = []
+        var digests: [String: Data] = [:]   // folded key -> digest all copies agree on
         var cancelled = false
     }
 
@@ -380,6 +392,8 @@ nonisolated enum ShootSyncChecker {
                 outcome.conflicts.append(failure)
             } else if Set(digests.map(\.1)).count > 1 {
                 outcome.conflicts.append(SyncConflict(relPath: display, kind: .content, copies: digests.map(\.0)))
+            } else if let agreed = digests.first?.1 {
+                outcome.digests[key] = agreed
             }
             p.filesDone += 1
             report(force: false)

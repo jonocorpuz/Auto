@@ -95,8 +95,13 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
     }
 
     /// Seeds the cache from a verified copy: the destination's checksum equals the source's.
+    /// Only when the destination's mtime still equals the one read right after verification
+    /// (a file edited since is not vouched for), for new and preexisting copies alike.
     func record(_ copied: CopiedFile) {
-        guard let checksum = copied.checksum, let stamp = Self.stamp(copied.destination) else { return }
+        guard let checksum = copied.checksum,
+              let verifiedAt = copied.destinationModified,
+              VerificationCache.modificationDate(copied.destination) == verifiedAt,
+              let stamp = Self.stamp(copied.destination) else { return }
         record(checksum, for: stamp)
     }
 
