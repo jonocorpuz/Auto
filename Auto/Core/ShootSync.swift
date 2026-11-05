@@ -6,7 +6,14 @@ nonisolated struct SyncFile: Sendable, Hashable {
 }
 
 nonisolated struct SyncConflict: Sendable, Hashable {
-    enum Kind: Sendable, Hashable { case size, content, caseCollision, unreadable(String) }
+    enum Kind: Sendable, Hashable {
+        case size, content, caseCollision
+        case unreadable(String)
+        /// A folder holds a nested shoot (has a sidecar) on some copies but is a plain folder on others.
+        case nestedShootMismatch
+        /// A regular file on some copies, a symlink / folder / special file on others.
+        case typeMismatch
+    }
     let relPath: String
     let kind: Kind
     let copies: [URL]            // copy roots that disagree
@@ -27,8 +34,8 @@ nonisolated struct ShootSyncReport: Sendable, Equatable {
     var bytes: Int64 = 0
     var depth: Depth = .sizes
     var notChecked: NotChecked?
-    var isInSync: Bool { notChecked == nil && depth == .checksums && missing.values.allSatisfy(\.isEmpty) && conflicts.isEmpty }
-    var isOutOfSync: Bool { notChecked == nil && (!missing.values.allSatisfy(\.isEmpty) || !conflicts.isEmpty) }
+    var isInSync: Bool { notChecked == nil && depth == .checksums && missing.values.allSatisfy { $0.isEmpty } && conflicts.isEmpty }
+    var isOutOfSync: Bool { notChecked == nil && (!missing.values.allSatisfy { $0.isEmpty } || !conflicts.isEmpty) }
 }
 
 nonisolated struct SyncProgress: Sendable, Equatable {
@@ -47,73 +54,155 @@ nonisolated struct InventoryEntry: Sendable, Hashable {
     var collisions: [String] = []
 }
 
+/// Everything one copy contains, keyed by folded relative path.
+nonisolated struct Inventory: Sendable, Equatable {
+    struct Unreadable: Sendable, Hashable {
+        let relPath: String
+        let message: String
+    }
+    var files: [String: InventoryEntry] = [:]
+    /// Non-regular names (symlinks, special files) and folders, key -> display path.
+    var occupied: [String: String] = [:]
+    /// Folders containing a sidecar (nested shoots), key -> display path. Never descended into.
+    var nestedShoots: [String: String] = [:]
+    /// Folders or files that could not be read. Never silently dropped.
+    var unreadable: [String: Unreadable] = [:]
+}
+
 /// Compares the copies of a shoot (sizes, then checksums). Strictly read-only.
+/// Every uncertainty fails closed: it surfaces as a conflict or `notChecked`, never as "in sync".
 nonisolated enum ShootSyncChecker {
+    /// NFC + case-insensitive fold: the comparison key for relative paths.
     static func foldedKey(_ relPath: String) -> String {
-        relPath.precomposedStringWithCanonicalMapping.lowercased()
+        relPath.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: nil)
     }
 
     // MARK: Inventory
 
-    /// Regular files under `root`, keyed by NFC + case-folded relative path. Skips hidden files
-    /// (sidecar, `.auto-partial`, `.DS_Store`, `._*`), symlinks and nested shoots (folders with a sidecar).
-    static func inventory(_ root: URL) throws -> [String: InventoryEntry] {
-        let base = root.resolvingSymlinksInPath()
-        let fm = FileManager.default
+    /// Inventory of `root`. Skips hidden entries (sidecar, `.auto-partial`, `.DS_Store`, `._*`) and does not
+    /// descend into nested shoots (folders with a sidecar). Unreadable entries are recorded, not dropped.
+    /// Throws if `root` itself is unreadable, and `CancellationError` when `isCancelled` turns true.
+    static func inventory(_ root: URL, isCancelled: () -> Bool = { Task.isCancelled }) throws -> Inventory {
         var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: base.path, isDirectory: &isDir), isDir.boolValue else {
-            throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: base.path])
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else {
+            throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: root.path])
         }
-        _ = try fm.contentsOfDirectory(atPath: base.path) // surfaces permission errors
-        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
-        guard let e = fm.enumerator(at: base, includingPropertiesForKeys: keys,
-                                    options: [.skipsHiddenFiles], errorHandler: { _, _ in true }) else {
-            throw CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: base.path])
+        var inv = Inventory()
+        try walk(dir: root, rel: "", inv: &inv, isCancelled: isCancelled)
+        return inv
+    }
+
+    private static func walk(dir: URL, rel: String, inv: inout Inventory, isCancelled: () -> Bool) throws {
+        let fm = FileManager.default
+        let children: [URL]
+        do {
+            children = try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        } catch {
+            if rel.isEmpty { throw error }
+            inv.unreadable[foldedKey(rel)] = Inventory.Unreadable(relPath: rel, message: error.localizedDescription)
+            return
         }
-        let prefix = base.path.hasSuffix("/") ? base.path : base.path + "/"
-        var out: [String: InventoryEntry] = [:]
-        for case let url as URL in e {
-            if Task.isCancelled { break }
-            guard let v = try? url.resourceValues(forKeys: Set(keys)) else { continue }
-            if v.isSymbolicLink == true { continue }
-            if v.isDirectory == true {
-                if fm.fileExists(atPath: url.appendingPathComponent(ShootSidecar.fileName).path) { e.skipDescendants() }
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
+        for url in children {
+            if isCancelled() { throw CancellationError() }
+            let name = url.lastPathComponent
+            let childRel = rel.isEmpty ? name : rel + "/" + name
+            let key = foldedKey(childRel)
+            guard let v = try? url.resourceValues(forKeys: keys) else {
+                inv.unreadable[key] = Inventory.Unreadable(relPath: childRel, message: "Cannot read attributes")
                 continue
             }
-            let urlPath = url.resolvingSymlinksInPath().path
-            guard v.isRegularFile == true, urlPath.hasPrefix(prefix) else { continue }
-            let rel = String(urlPath.dropFirst(prefix.count))
-            let key = foldedKey(rel)
-            if var existing = out[key] {
-                existing.collisions.append(rel)
-                out[key] = existing
+            if v.isSymbolicLink == true {
+                inv.occupied[key] = childRel
+            } else if v.isDirectory == true {
+                inv.occupied[key] = childRel
+                if fm.fileExists(atPath: url.appendingPathComponent(ShootSidecar.fileName).path) {
+                    inv.nestedShoots[key] = childRel
+                } else {
+                    try walk(dir: url, rel: childRel, inv: &inv, isCancelled: isCancelled)
+                }
+            } else if v.isRegularFile == true {
+                guard let size = v.fileSize else {
+                    inv.unreadable[key] = Inventory.Unreadable(relPath: childRel, message: "Cannot read size")
+                    continue
+                }
+                if var existing = inv.files[key] {
+                    existing.collisions.append(childRel)
+                    inv.files[key] = existing
+                } else {
+                    inv.files[key] = InventoryEntry(url: url, relPath: childRel, size: Int64(size))
+                }
             } else {
-                out[key] = InventoryEntry(url: url, relPath: rel, size: Int64(v.fileSize ?? 0))
+                inv.occupied[key] = childRel
             }
         }
-        return out
     }
 
     // MARK: Size pass
 
     /// Pure: inventories -> size-pass report + folded keys needing a checksum comparison.
-    static func compare(_ inventories: [URL: [String: InventoryEntry]], order: [URL]) -> (report: ShootSyncReport, toHash: [String]) {
+    static func compare(_ inventories: [URL: Inventory], order: [URL]) -> (report: ShootSyncReport, toHash: [String]) {
         var report = ShootSyncReport(copies: order)
         var toHash: [String] = []
         for root in order { report.missing[root] = [] }
-        var keySet = Set<String>()
-        for root in order { keySet.formUnion(inventories[root]?.keys.map { $0 } ?? []) }
-        for key in keySet.sorted() {
-            let present = order.filter { inventories[$0]?[key] != nil }
-            guard let first = present.first.flatMap({ inventories[$0]?[key] }) else { continue }
-            let colliding = present.filter { !(inventories[$0]?[key]?.collisions.isEmpty ?? true) }
+        func inv(_ root: URL) -> Inventory { inventories[root] ?? Inventory() }
+
+        // Keys (and everything below them) that must not be compared or propagated.
+        var blocked = Set<String>()
+
+        var unreadableKeys = Set<String>()
+        for root in order { unreadableKeys.formUnion(inv(root).unreadable.keys) }
+        for key in unreadableKeys.sorted() {
+            let holders = order.filter { inv($0).unreadable[key] != nil }
+            guard let u = holders.first.flatMap({ inv($0).unreadable[key] }) else { continue }
+            report.conflicts.append(SyncConflict(relPath: u.relPath, kind: .unreadable(u.message), copies: holders))
+            blocked.insert(key)
+        }
+
+        var nestedKeys = Set<String>()
+        for root in order { nestedKeys.formUnion(inv(root).nestedShoots.keys) }
+        for key in nestedKeys.sorted() {
+            blocked.insert(key)
+            let nested = order.filter { inv($0).nestedShoots[key] != nil }
+            let plain = order.filter { inv($0).nestedShoots[key] == nil && inv($0).occupied[key] != nil }
+            if !plain.isEmpty, let display = nested.first.flatMap({ inv($0).nestedShoots[key] }) {
+                report.conflicts.append(SyncConflict(relPath: display, kind: .nestedShootMismatch, copies: order.filter { nested.contains($0) || plain.contains($0) }))
+            }
+        }
+
+        var fileKeys = Set<String>()
+        for root in order { fileKeys.formUnion(inv(root).files.keys) }
+        for key in fileKeys.sorted() where !blocked.contains(key) {
+            let filers = order.filter { inv($0).files[key] != nil }
+            let others = order.filter { inv($0).files[key] == nil && inv($0).occupied[key] != nil }
+            if !others.isEmpty, let first = filers.first.flatMap({ inv($0).files[key] }) {
+                report.conflicts.append(SyncConflict(relPath: first.relPath, kind: .typeMismatch,
+                                                     copies: order.filter { filers.contains($0) || others.contains($0) }))
+                blocked.insert(key)
+            }
+        }
+
+        func isBlocked(_ key: String) -> Bool {
+            if blocked.contains(key) { return true }
+            var from = key.startIndex
+            while let slash = key[from...].firstIndex(of: "/") {
+                if blocked.contains(String(key[..<slash])) { return true }
+                from = key.index(after: slash)
+            }
+            return false
+        }
+
+        for key in fileKeys.sorted() where !isBlocked(key) {
+            let present = order.filter { inv($0).files[key] != nil }
+            guard let first = present.first.flatMap({ inv($0).files[key] }) else { continue }
+            let colliding = present.filter { !(inv($0).files[key]?.collisions.isEmpty ?? true) }
             if !colliding.isEmpty {
                 report.conflicts.append(SyncConflict(relPath: first.relPath, kind: .caseCollision, copies: colliding))
                 continue
             }
             report.fileCount += 1
             report.bytes += first.size
-            let sizes = Set(present.compactMap { inventories[$0]?[key]?.size })
+            let sizes = Set(present.compactMap { inv($0).files[key]?.size })
             if sizes.count > 1 {
                 report.conflicts.append(SyncConflict(relPath: first.relPath, kind: .size, copies: present))
                 continue
@@ -130,9 +219,17 @@ nonisolated enum ShootSyncChecker {
 
     // MARK: Run
 
+    private enum ListOutcome: Sendable {
+        case ok([URL: Inventory])
+        case unreadable(URL, String)
+        case cancelled
+    }
+
     /// `copies[0]` is the effective primary (preferred sync source). Read-only everywhere.
-    /// `onSizePass` fires once (main actor) with the depth == .sizes report, before any hashing.
+    /// `onSizePass` fires once (main actor) with the `depth == .sizes` report, before any hashing.
+    /// That report is provisional: it must NEVER drive Sync Now or be shown as "in sync".
     /// Returns nil when cancelled (never a partial result). Cancelling the task cancels `hasher`.
+    /// `hasher` is single-use: once cancelled it stays cancelled, so pass a fresh one per run.
     @concurrent static func run(copies: [URL], cache: ChecksumStore, hasher: FileHasher = FileHasher(),
                                 deep: Bool = false,
                                 onSizePass: @escaping @MainActor @Sendable (ShootSyncReport) -> Void = { _ in },
@@ -145,6 +242,17 @@ nonisolated enum ShootSyncChecker {
         }
     }
 
+    private static func listAll(_ copies: [URL], hasher: FileHasher) -> ListOutcome {
+        var inventories: [URL: Inventory] = [:]
+        for root in copies {
+            if hasher.isCancelled { return .cancelled }
+            do { inventories[root] = try inventory(root, isCancelled: { hasher.isCancelled }) }
+            catch is CancellationError { return .cancelled }
+            catch { return .unreadable(root, error.localizedDescription) }
+        }
+        return .ok(inventories)
+    }
+
     private static func runBody(copies: [URL], cache: ChecksumStore, hasher: FileHasher, deep: Bool,
                                 onSizePass: @escaping @MainActor @Sendable (ShootSyncReport) -> Void,
                                 progress: @escaping @MainActor @Sendable (SyncProgress) -> Void) async -> ShootSyncReport? {
@@ -154,14 +262,20 @@ nonisolated enum ShootSyncChecker {
             return r
         }
         await progress(SyncProgress(phase: .listing))
-        var inventories: [URL: [String: InventoryEntry]] = [:]
-        for root in copies {
-            if Task.isCancelled || hasher.isCancelled { return nil }
-            do { inventories[root] = try inventory(root) } catch {
-                var r = ShootSyncReport(copies: copies)
-                r.notChecked = .copyUnreadable(root, error.localizedDescription)
-                return r
+        // Listing walks whole trees: keep it off the cooperative pool too.
+        let listed: ListOutcome = await withCheckedContinuation { continuation in
+            Thread.detachNewThread {
+                continuation.resume(returning: listAll(copies, hasher: hasher))
             }
+        }
+        let inventories: [URL: Inventory]
+        switch listed {
+        case .cancelled: return nil
+        case .unreadable(let root, let message):
+            var r = ShootSyncReport(copies: copies)
+            r.notChecked = .copyUnreadable(root, message)
+            return r
+        case .ok(let found): inventories = found
         }
         if Task.isCancelled || hasher.isCancelled { return nil }
 
@@ -175,16 +289,15 @@ nonisolated enum ShootSyncChecker {
         let consumer = Task { @MainActor in
             for await p in stream { progress(p) }
         }
-        let snapshot = inventories
         let outcome: HashOutcome = await withCheckedContinuation { continuation in
             Thread.detachNewThread {
-                continuation.resume(returning: hashPass(keys: toHash, inventories: snapshot, order: copies, cache: cache,
+                continuation.resume(returning: hashPass(keys: toHash, inventories: inventories, order: copies, cache: cache,
                                                         hasher: hasher, deep: deep) { _ = yield.yield($0) })
             }
         }
         yield.finish()
         await consumer.value
-        await cache.saveIfDirty()
+        await cache.saveIfDirty()   // even when cancelled: entries are per file and valid
         if outcome.cancelled || Task.isCancelled { return nil }
 
         report.conflicts.append(contentsOf: outcome.conflicts)
@@ -204,14 +317,14 @@ nonisolated enum ShootSyncChecker {
         var cancelled = false
     }
 
-    private static func hashPass(keys: [String], inventories: [URL: [String: InventoryEntry]], order: [URL],
+    private static func hashPass(keys: [String], inventories: [URL: Inventory], order: [URL],
                                  cache: ChecksumStore, hasher: FileHasher, deep: Bool,
                                  onProgress: @Sendable (SyncProgress) -> Void) -> HashOutcome {
         var outcome = HashOutcome()
         var p = SyncProgress(phase: .hashing)
         p.filesTotal = keys.count
         for key in keys {
-            for root in order { if let e = inventories[root]?[key] { p.bytesTotal += e.size } }
+            for root in order { if let e = inventories[root]?.files[key] { p.bytesTotal += e.size } }
         }
         var lastReport = Date.distantPast
         func report(force: Bool) {
@@ -225,7 +338,7 @@ nonisolated enum ShootSyncChecker {
             var failure: SyncConflict?
             var display = key
             for root in order {
-                guard let entry = inventories[root]?[key] else { continue }
+                guard let entry = inventories[root]?.files[key] else { continue }
                 display = entry.relPath
                 if hasher.isCancelled { outcome.cancelled = true; return outcome }
                 let stamp = ChecksumStore.stamp(entry.url)
