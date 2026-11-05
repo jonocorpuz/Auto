@@ -842,8 +842,8 @@ final class AppModel {
             } else {
                 card.phase = .needsBackup
             }
-            // A failed file stays failed on screen; a re-verify would turn it into "ready" again.
-            if blocked.isEmpty { recompute(card) }
+            // A failed card stays failed on screen (Retry copies again); a re-verify would turn it back into "ready".
+            if blocking.isEmpty { recompute(card) }
             // This copy may make other cards' files duplicates (or fully backed): re-verify idle cards.
             let copiedKeys = Set(outcome.copied.map(\.file.key))
             for other in cards where other !== card && !copyQueue.contains(other.id) && needsRecompute(other, afterCopyOf: copiedKeys) {
