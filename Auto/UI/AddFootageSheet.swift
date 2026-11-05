@@ -11,6 +11,7 @@ struct AddFootageSheet: View {
     @State private var selection: ShootSelection?
     @State private var error: String?
     @State private var working = false
+    @State private var copyDuplicates = false
 
     private var item: ShootItem? { model.shoots.first { $0.id == shootID } }
     private var card: Card? { model.cards.first { $0.id == cardID } }
@@ -36,9 +37,21 @@ struct AddFootageSheet: View {
         return ShootSelection.days(missing: files, cameras: cameras, calendar: model.calendar)
     }
 
+    /// Selected files not yet in the shoot.
+    private var selectedFiles: [MediaFile] {
+        guard let done, let selection else { return [] }
+        return selection.filter(done.notInShoot)
+    }
+
+    /// Duplicates among the current selection (provisional until coverage is done).
+    private var duplicates: IngestDuplicates.Report {
+        guard let cardID else { return IngestDuplicates.Report() }
+        return model.duplicates(shootID: shootID, cardID: cardID, candidates: selectedFiles)
+    }
+
     private var addCount: Int {
-        guard let done, let selection else { return 0 }
-        return selection.filter(done.notInShoot).count
+        let selected = selectedFiles.count
+        return copyDuplicates ? selected : max(0, selected - duplicates.count)
     }
 
     var body: some View {
@@ -52,6 +65,7 @@ struct AddFootageSheet: View {
 
             if card != nil {
                 banner
+                duplicatesBlock
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         if !cameras.isEmpty || !(days[ShootSelection.otherID] ?? []).isEmpty { camerasSection }
@@ -92,6 +106,7 @@ struct AddFootageSheet: View {
 
     private func load() {
         error = nil
+        copyDuplicates = false
         guard let card, let id = cardID else { cameras = []; selection = nil; return }
         cameras = card.cameras
         selection = model.shootSheetDefaults(shootID: shootID, cardID: id)
@@ -156,6 +171,31 @@ struct AddFootageSheet: View {
             Label(reason, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
         case nil:
             EmptyView()
+        }
+    }
+
+    @ViewBuilder private var duplicatesBlock: some View {
+        let report = duplicates
+        if done != nil, !report.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(report.byDrive, id: \.drive) { drive in
+                    Label("\(Format.count(drive.count, "duplicate", "duplicates")) already on \(drive.drive) (\(Format.bytes(drive.bytes)))",
+                          systemImage: "doc.on.doc")
+                        .foregroundStyle(.secondary)
+                }
+                DisclosureGroup("Where") {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(report.byPlace, id: \.place) { entry in
+                            Text("\(entry.place.title) — \(Format.count(entry.count, "file", "files"))")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
+                }
+                Toggle("Copy duplicates anyway", isOn: $copyDuplicates)
+            }
+            .font(.callout)
         }
     }
 
@@ -269,7 +309,8 @@ struct AddFootageSheet: View {
         let cams = cameras
         Task {
             do {
-                try await model.addFootage(shootID: shootID, cardID: cardID, cameras: cams, selection: selection)
+                try await model.addFootage(shootID: shootID, cardID: cardID, cameras: cams, selection: selection,
+                                           includeDuplicates: copyDuplicates)
                 model.copy(card)
                 model.shootSheet = nil
             } catch {
