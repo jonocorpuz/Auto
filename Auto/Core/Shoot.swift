@@ -6,5 +6,9 @@ nonisolated struct Shoot: Sendable, Identifiable, Hashable {
     var name: String
     /// Local start of day.
     var date: Date
+    /// The copy Auto reads from: the first online copy in record order.
     var folder: URL
+    /// The other online copies, each on a distinct volume.
+    var mirrors: [URL] = []
+    var copies: [URL] { [folder] + mirrors }
 }

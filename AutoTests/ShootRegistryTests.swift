@@ -91,10 +91,10 @@ struct ShootRegistryTests {
         let rEmpty = record(path: noSidecar.path)
         let rGone = record(path: dir.appendingPathComponent("gone").path)
         let out = await ShootStore.resolve([rOK, rMM, rEmpty, rGone], calendar: Calendar(identifier: .gregorian), cardVolumes: [])
-        if case .online(let shoot) = out[rOK.id] { #expect(shoot.id == okID) } else { Issue.record("expected online") }
-        #expect(out[rMM.id] == .mismatch)
-        #expect(out[rEmpty.id] == .missing)
-        #expect(out[rGone.id] == .missing)
+        if case .online(let shoot) = out[rOK.id]?.availability { #expect(shoot.id == okID) } else { Issue.record("expected online") }
+        #expect(out[rMM.id]?.availability == .mismatch)
+        #expect(out[rEmpty.id]?.availability == .missing)
+        #expect(out[rGone.id]?.availability == .missing)
     }
 
     @Test func resolveTreatsCardFolderAsMissing() async throws {
@@ -105,13 +105,13 @@ struct ShootRegistryTests {
         try writeSidecar(id, in: folder)
         let rec = record(id, path: folder.path)
         let out = await ShootStore.resolve([rec], calendar: Calendar(identifier: .gregorian), cardVolumes: [dir])
-        #expect(out[id] == .missing)
+        #expect(out[id]?.availability == .missing)
     }
 
     @Test func resolveOfflineForUnmountedVolume() async {
         let rec = record(path: "/Volumes/NoSuchDrive-\(UUID().uuidString)/Shoot")
         let out = await ShootStore.resolve([rec], calendar: Calendar(identifier: .gregorian), cardVolumes: [])
-        #expect(out[rec.id] == .offline)
+        #expect(out[rec.id]?.availability == .offline)
     }
 
     @Test func discoverFindsSidecarsOneLevelDeep() async throws {
@@ -396,5 +396,152 @@ struct ShootRegistryTests {
         #expect(r.records[0].mirrors.isEmpty)
         #expect(r.records[0].pendingSync.isEmpty)
         #expect(r.records[0].path == "/mine")
+    }
+
+    // MARK: Per-copy resolve
+
+    private let cal = Calendar(identifier: .gregorian)
+
+    /// Fakes one distinct drive per top-level test folder (the folder name before the copy name).
+    private func fakeDrives(_ roots: [URL]) -> @Sendable (URL) -> String? {
+        let prefixes = roots.map { $0.standardizedFileURL.path }
+        return { url in
+            let p = url.standardizedFileURL.path
+            return prefixes.firstIndex { p == $0 || p.hasPrefix($0 + "/") }.map { "drive\($0)" }
+        }
+    }
+
+    private func copyRecord(_ id: UUID, _ paths: [String]) -> ShootRecord {
+        ShootRecord(id: id, name: "S", day: "2026-01-02", path: paths[0], mirrors: Array(paths.dropFirst()),
+                    lastSeen: Date(timeIntervalSince1970: 0))
+    }
+
+    @Test func bothCopiesOnlineGivesFolderAndMirrors() async throws {
+        let a = try tempDir(), b = try tempDir()
+        defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }
+        let id = UUID()
+        try writeSidecar(id, in: a.appendingPathComponent("S"))
+        try writeSidecar(id, in: b.appendingPathComponent("S"))
+        let rec = copyRecord(id, [a.appendingPathComponent("S").path, b.appendingPathComponent("S").path])
+        let out = await ShootStore.resolve([rec], calendar: cal, cardVolumes: [], volumeID: fakeDrives([a, b]))
+        guard case .online(let shoot)? = out[id]?.availability else { Issue.record("expected online"); return }
+        #expect(shoot.folder.standardizedFileURL.path == a.appendingPathComponent("S").standardizedFileURL.path)
+        #expect(shoot.mirrors.map { $0.standardizedFileURL.path } == [b.appendingPathComponent("S").standardizedFileURL.path])
+        #expect(shoot.copies.count == 2)
+        #expect(out[id]?.copies.map(\.availability) == [.online, .online])
+        #expect(out[id]?.copies.map(\.isPrimary) == [true, false])
+        #expect(out[id]?.copies.map(\.volumeName) == ["This Mac", "This Mac"])
+    }
+
+    @Test func missingPrimaryMakesMirrorTheEffectivePrimary() async throws {
+        let a = try tempDir(), b = try tempDir()
+        defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }
+        let id = UUID()
+        try writeSidecar(id, in: b.appendingPathComponent("S"))
+        let rec = copyRecord(id, [a.appendingPathComponent("gone").path, b.appendingPathComponent("S").path])
+        let out = await ShootStore.resolve([rec], calendar: cal, cardVolumes: [], volumeID: fakeDrives([a, b]))
+        guard case .online(let shoot)? = out[id]?.availability else { Issue.record("expected online"); return }
+        #expect(shoot.folder.standardizedFileURL.path == b.appendingPathComponent("S").standardizedFileURL.path)
+        #expect(shoot.mirrors.isEmpty)
+        #expect(out[id]?.copies.map(\.availability) == [.missing, .online])
+    }
+
+    @Test func mirrorWithOtherIDIsMismatchForThatCopyOnly() async throws {
+        let a = try tempDir(), b = try tempDir()
+        defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }
+        let id = UUID()
+        try writeSidecar(id, in: a.appendingPathComponent("S"))
+        try writeSidecar(UUID(), in: b.appendingPathComponent("S"))
+        let rec = copyRecord(id, [a.appendingPathComponent("S").path, b.appendingPathComponent("S").path])
+        let out = await ShootStore.resolve([rec], calendar: cal, cardVolumes: [], volumeID: fakeDrives([a, b]))
+        guard case .online(let shoot)? = out[id]?.availability else { Issue.record("expected online"); return }
+        #expect(shoot.mirrors.isEmpty)
+        #expect(out[id]?.copies.map(\.availability) == [.online, .mismatch])
+    }
+
+    @Test func secondCopyOnSameVolumeIsNotAMirror() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let id = UUID()
+        let first = dir.appendingPathComponent("one"), second = dir.appendingPathComponent("two")
+        try writeSidecar(id, in: first)
+        try writeSidecar(id, in: second)
+        let rec = copyRecord(id, [first.path, second.path])
+        // Real volume lookup: every temp dir shares one volume.
+        let out = await ShootStore.resolve([rec], calendar: cal, cardVolumes: [])
+        guard case .online(let shoot)? = out[id]?.availability else { Issue.record("expected online"); return }
+        #expect(shoot.mirrors.isEmpty)
+        #expect(out[id]?.copies.map(\.availability) == [.online, .sameVolume(as: first.path)])
+    }
+
+    @Test func distinctFakeDrivesInOneDirAreBothOnline() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let id = UUID()
+        let first = dir.appendingPathComponent("one"), second = dir.appendingPathComponent("two")
+        try writeSidecar(id, in: first)
+        try writeSidecar(id, in: second)
+        let rec = copyRecord(id, [first.path, second.path])
+        let out = await ShootStore.resolve([rec], calendar: cal, cardVolumes: [], volumeID: fakeDrives([first, second]))
+        #expect(out[id]?.copies.map(\.availability) == [.online, .online])
+    }
+
+    @Test func unmountedVolumeCopyIsOfflineWithVolumeName() async {
+        let name = "NoSuchDrive-\(UUID().uuidString)"
+        let rec = record(path: "/Volumes/\(name)/x")
+        let out = await ShootStore.resolve([rec], calendar: cal, cardVolumes: [])
+        #expect(out[rec.id]?.copies.first?.availability == .offline)
+        #expect(out[rec.id]?.copies.first?.volumeName == name)
+    }
+
+    @Test func aggregatePriority() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let offline = "/Volumes/NoSuchDrive-\(UUID().uuidString)/x"
+        let gone = dir.appendingPathComponent("gone").path
+        let mm = dir.appendingPathComponent("mm")
+        try writeSidecar(UUID(), in: mm)
+        let ok = dir.appendingPathComponent("ok")
+
+        // offline beats missing and mismatch when nothing is online
+        let r1 = copyRecord(UUID(), [gone, offline])
+        let r2 = copyRecord(UUID(), [offline, mm.path])
+        // mismatch primary, nothing offline
+        let r3 = copyRecord(UUID(), [mm.path, gone])
+        // missing primary, mismatched mirror: missing
+        let r4 = copyRecord(UUID(), [gone, mm.path])
+        // online beats everything
+        let id5 = UUID()
+        try writeSidecar(id5, in: ok)
+        let r5 = copyRecord(id5, [offline, gone, ok.path])
+        let out = await ShootStore.resolve([r1, r2, r3, r4, r5], calendar: cal, cardVolumes: [])
+        #expect(out[r1.id]?.availability == .offline)
+        #expect(out[r2.id]?.availability == .offline)
+        #expect(out[r3.id]?.availability == .mismatch)
+        #expect(out[r4.id]?.availability == .missing)
+        if case .online(let shoot)? = out[id5]?.availability {
+            #expect(shoot.folder.standardizedFileURL.path == ok.standardizedFileURL.path)
+        } else { Issue.record("expected online") }
+    }
+
+    @Test func singleCopyResolutionHasOneStateAndNoMirrors() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let id = UUID()
+        try writeSidecar(id, in: dir)
+        let out = await ShootStore.resolve([record(id, path: dir.path)], calendar: cal, cardVolumes: [])
+        guard case .online(let shoot)? = out[id]?.availability else { Issue.record("expected online"); return }
+        #expect(shoot.mirrors.isEmpty)
+        #expect(out[id]?.copies.count == 1)
+        #expect(out[id]?.copies.first?.isPrimary == true)
+    }
+
+    @Test func registryErrorsHaveFriendlyMessages() {
+        let all: [ShootRegistry.RegistryError] = [.alreadyRegistered, .lastCopy, .unknownShoot, .notACopy]
+        for e in all {
+            let text = e.localizedDescription
+            #expect(!text.contains("RegistryError"))
+            #expect(text.hasSuffix("."))
+        }
     }
 }

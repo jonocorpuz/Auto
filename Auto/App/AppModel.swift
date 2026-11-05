@@ -949,11 +949,13 @@ extension AppModel {
         let generation = shootsGeneration
         publishShoots(previous: Dictionary(uniqueKeysWithValues: shoots.map { ($0.id, $0) }))
 
-        let availability = await ShootStore.resolve(registry.records, calendar: calendar, cardVolumes: cardVolumes())
+        let resolved = await ShootStore.resolve(registry.records, calendar: calendar, cardVolumes: cardVolumes())
+        let availability = resolved.mapValues(\.availability)
         guard generation == shootsGeneration else { return }
         for i in shoots.indices {
             let id = shoots[i].id
             shoots[i].availability = availability[id]
+            shoots[i].copies = resolved[id]?.copies ?? []
             if case .online? = availability[id] {} else { shoots[i].summary = nil; shoots[i].thumbnail = nil }
         }
         // The set of shoots that count as backup locations changed: re-verify the cards.

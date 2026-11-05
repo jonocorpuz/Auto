@@ -8,6 +8,8 @@ struct ShootItem: Identifiable {
     var date: Date
     /// nil until resolved.
     var availability: ShootAvailability?
+    /// Per-copy state from the last resolve; empty until resolved.
+    var copies: [ShootCopyState] = []
     var summary: ShootSummary?
     var thumbnail: CGImage?
 

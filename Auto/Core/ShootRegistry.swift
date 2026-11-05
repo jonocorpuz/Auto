@@ -43,11 +43,20 @@ nonisolated struct ShootRecord: Codable, Sendable, Hashable {
 
 /// The list of known shoots, persisted in Application Support.
 nonisolated struct ShootRegistry: Codable, Sendable, Equatable {
-    enum RegistryError: Error, Equatable {
+    enum RegistryError: Error, Equatable, LocalizedError {
         case alreadyRegistered
         case lastCopy
         case unknownShoot
         case notACopy
+
+        var errorDescription: String? {
+            switch self {
+            case .alreadyRegistered: "That folder is already part of a shoot in Auto."
+            case .lastCopy: "This is the only copy of the shoot, so it can't be removed. Remove the shoot instead."
+            case .unknownShoot: "Auto doesn't know that shoot any more."
+            case .notACopy: "That folder isn't one of this shoot's copies."
+            }
+        }
     }
 
     var version = 1
@@ -199,6 +208,34 @@ nonisolated enum ShootAvailability: Sendable, Equatable {
     case mismatch
 }
 
+/// How one copy of a shoot looks right now.
+nonisolated enum CopyAvailability: Sendable, Equatable {
+    case online
+    /// /Volumes/<name> isn't mounted.
+    case offline
+    /// Folder or sidecar is gone, or it sits on a card.
+    case missing
+    /// The sidecar's id differs from the record.
+    case mismatch
+    /// Shares a mounted volume with an earlier online copy, so it isn't a real mirror.
+    case sameVolume(as: String)
+}
+
+nonisolated struct ShootCopyState: Sendable, Equatable, Identifiable {
+    let path: String
+    let isPrimary: Bool
+    var availability: CopyAvailability
+    /// Lexical: "/Volumes/<name>" gives the name, anything else is "This Mac".
+    var volumeName: String
+    var id: String { path }
+}
+
+nonisolated struct ShootResolution: Sendable, Equatable {
+    /// Aggregate over all copies.
+    var availability: ShootAvailability
+    var copies: [ShootCopyState]
+}
+
 nonisolated enum ShootStore {
     static func defaultURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -271,26 +308,64 @@ nonisolated enum ShootStore {
         return !a.isEqual(b)
     }
 
-    @concurrent static func resolve(_ records: [ShootRecord], calendar: Calendar, cardVolumes: [URL]) async -> [UUID: ShootAvailability] {
-        var result: [UUID: ShootAvailability] = [:]
+    /// Runtime mount identity of the volume holding `url`.
+    nonisolated static func realVolumeID(of url: URL) -> String? {
+        guard let id = try? url.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier else { return nil }
+        return String(describing: id)
+    }
+
+    private static func volumeName(of path: String) -> String {
+        volumeRoot(of: path).map { String($0.dropFirst("/Volumes/".count)) } ?? "This Mac"
+    }
+
+    /// Resolves every copy of every record. The first online copy (record order) is the effective
+    /// primary; later online copies on an already-seen volume are `.sameVolume` and not mirrors.
+    /// `volumeID` is injectable so tests can fake distinct drives.
+    @concurrent static func resolve(
+        _ records: [ShootRecord], calendar: Calendar, cardVolumes: [URL],
+        volumeID: @Sendable (URL) -> String? = ShootStore.realVolumeID(of:)
+    ) async -> [UUID: ShootResolution] {
+        var result: [UUID: ShootResolution] = [:]
         for record in records {
-            if let root = volumeRoot(of: record.path), !isMounted(root) {
-                result[record.id] = .offline
-                continue
+            var states: [ShootCopyState] = []
+            var firstShoot: Shoot?
+            var mirrors: [URL] = []
+            var seenVolumes: [String: String] = [:]
+            for (n, path) in record.copyPaths.enumerated() {
+                var state = ShootCopyState(path: path, isPrimary: n == 0, availability: .missing, volumeName: volumeName(of: path))
+                defer { states.append(state) }
+                if let root = volumeRoot(of: path), !isMounted(root) {
+                    state.availability = .offline
+                    continue
+                }
+                let folder = URL(fileURLWithPath: path, isDirectory: true)
+                if VolumeClassifier.isOnCard(folder, cards: cardVolumes) { continue }
+                guard let data = try? Data(contentsOf: folder.appendingPathComponent(ShootSidecar.fileName)),
+                      let sidecar = try? ShootSidecar.decode(data),
+                      let shoot = sidecar.shoot(folder: folder, calendar: calendar) else { continue }
+                guard sidecar.id == record.id else { state.availability = .mismatch; continue }
+                if let vid = volumeID(folder) {
+                    if let earlier = seenVolumes[vid] {
+                        state.availability = .sameVolume(as: earlier)
+                        continue
+                    }
+                    seenVolumes[vid] = path
+                }
+                state.availability = .online
+                if firstShoot == nil { firstShoot = shoot } else { mirrors.append(folder) }
             }
-            let folder = URL(fileURLWithPath: record.path, isDirectory: true)
-            if VolumeClassifier.isOnCard(folder, cards: cardVolumes) {
-                result[record.id] = .missing
-                continue
+            let aggregate: ShootAvailability
+            if var shoot = firstShoot {
+                shoot.mirrors = mirrors
+                aggregate = .online(shoot)
+            } else if states.contains(where: { $0.availability == .offline }) {
+                aggregate = .offline
+            } else if states.first?.availability == .mismatch {
+                aggregate = .mismatch
+            } else {
+                aggregate = .missing
             }
-            let sidecarURL = folder.appendingPathComponent(ShootSidecar.fileName)
-            guard let data = try? Data(contentsOf: sidecarURL),
-                  let sidecar = try? ShootSidecar.decode(data),
-                  let shoot = sidecar.shoot(folder: folder, calendar: calendar) else {
-                result[record.id] = .missing
-                continue
-            }
-            result[record.id] = sidecar.id == record.id ? .online(shoot) : .mismatch
+            result[record.id] = ShootResolution(availability: aggregate, copies: states)
         }
         return result
     }
