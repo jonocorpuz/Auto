@@ -4,6 +4,7 @@ import Foundation
 /// Cancellable MD5 hasher: 8 MB chunks, F_NOCACHE so we hash what is on disk and don't evict the
 /// page cache with footage. Read-only. Standalone on purpose: it mirrors the private hashers in
 /// CopyEngine and BackupVerifier (duplication noted; merging them is a backlog refactor).
+/// Single-use: `cancel()` is sticky, so create a fresh hasher for every run.
 nonisolated final class FileHasher: @unchecked Sendable {
     struct Cancelled: Error, Sendable {}
 

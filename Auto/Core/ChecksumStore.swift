@@ -9,6 +9,24 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
         let size: Int64
         let mtime: Int64   // nanoseconds
         let inode: UInt64
+        /// Inode change time (ns): changes on any rewrite even if mtime was restored. Entries persisted
+        /// before this field existed decode as 0, never match a real stamp, and so are re-hashed.
+        var ctime: Int64 = 0
+
+        init(volume: String, relPath: String, size: Int64, mtime: Int64, inode: UInt64, ctime: Int64 = 0) {
+            self.volume = volume; self.relPath = relPath; self.size = size
+            self.mtime = mtime; self.inode = inode; self.ctime = ctime
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            volume = try c.decode(String.self, forKey: .volume)
+            relPath = try c.decode(String.self, forKey: .relPath)
+            size = try c.decode(Int64.self, forKey: .size)
+            mtime = try c.decode(Int64.self, forKey: .mtime)
+            inode = try c.decode(UInt64.self, forKey: .inode)
+            ctime = try c.decodeIfPresent(Int64.self, forKey: .ctime) ?? 0
+        }
     }
 
     private struct Entry: Codable {
@@ -37,7 +55,8 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
         guard lstat(url.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return nil }
         let rel = relativePath(of: url, under: volumeRoot)
         let mtime = Int64(st.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(st.st_mtimespec.tv_nsec)
-        return FileStamp(volume: volumeID, relPath: rel, size: Int64(st.st_size), mtime: mtime, inode: UInt64(st.st_ino))
+        let ctime = Int64(st.st_ctimespec.tv_sec) * 1_000_000_000 + Int64(st.st_ctimespec.tv_nsec)
+        return FileStamp(volume: volumeID, relPath: rel, size: Int64(st.st_size), mtime: mtime, inode: UInt64(st.st_ino), ctime: ctime)
     }
 
     /// Stamp using the file's volume UUID, falling back to `"path@" + absolute path` when it has none.
