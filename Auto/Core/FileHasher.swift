@@ -24,6 +24,9 @@ nonisolated final class FileHasher: @unchecked Sendable {
     /// Test hook, called synchronously on the hashing thread after each chunk with bytes read so far.
     var onChunkHashed: (@Sendable (Int64) -> Void)?
 
+    /// Test hook, called on the hashing thread each time a whole file has been hashed.
+    var onFileHashed: (@Sendable (URL) -> Void)?
+
     static let chunk = 8 << 20
 
     /// MD5 of the file. `onBytes` receives the running byte count after each chunk.
@@ -43,6 +46,8 @@ nonisolated final class FileHasher: @unchecked Sendable {
             onBytes(read)
             onChunkHashed?(read)
         }
-        return Data(md5.finalize())
+        let digest = Data(md5.finalize())
+        onFileHashed?(url)
+        return digest
     }
 }
