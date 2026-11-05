@@ -506,3 +506,151 @@ struct MirrorShootsTests {
         #expect(!report.files.contains { $0.url == sc.a })
     }
 }
+
+// MARK: Ingest fan-out to every online copy
+
+extension MirrorShootsTests {
+    private func ingestCard(_ env: Env, _ name: String, _ contents: [(String, UInt8)]) throws -> Card {
+        let dir = env.dir.appendingPathComponent("cf-\(name)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let files = try contents.map { fileName, byte -> MediaFile in
+            let url = dir.appendingPathComponent(fileName)
+            try Data(repeating: byte, count: 100).write(to: url)
+            return MediaFile(url: url, size: 100, date: day, kind: .video, cameraID: "cam")
+        }
+        let card = Card(volume: env.dir.appendingPathComponent(name), name: name, identity: "card-\(UUID().uuidString)")
+        card.files = files
+        card.missing = files
+        card.phase = .needsBackup
+        env.model._testInsert(card: card)
+        return card
+    }
+
+    private func plan(_ env: Env, _ card: Card, into shoot: Shoot) async throws {
+        let selection = env.model.shootSheetDefaults(shootID: shoot.id, cardID: card.id)
+        try await env.model.addFootage(shootID: shoot.id, cardID: card.id, cameras: [], selection: selection)
+    }
+
+    private func settled(_ card: Card) -> Bool { card.engine == nil && card.phase != .copying }
+
+    private func mp4s(_ folder: URL) -> [String] {
+        ((try? FileManager.default.subpathsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".MP4") }.sorted()
+    }
+
+    @Test func twoOnlineCopiesBothGetVerifiedFilesAndSeedChecksums() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1), ("B.MP4", 2)])
+        try await plan(env, card, into: shoot)
+        #expect(card.plan?.jobs.count == 4)
+        #expect(card.plan?.copyRoots.count == 2)
+        env.model.copy(card)
+        try await waitUntil { settled(card) && card.phase == .backed }
+        let rec = try record(env, shoot.id)
+        let copies = [URL(fileURLWithPath: rec.path), URL(fileURLWithPath: rec.mirrors[0])]
+        for copy in copies { #expect(mp4s(copy) == ["Video/CARD/A.MP4", "Video/CARD/B.MP4"]) }
+        for name in ["A.MP4", "B.MP4"] {
+            let a = try Data(contentsOf: copies[0].appendingPathComponent("Video/CARD/\(name)"))
+            let b = try Data(contentsOf: copies[1].appendingPathComponent("Video/CARD/\(name)"))
+            #expect(a == b && a.count == 100)
+        }
+        #expect(card.plan == nil && card.missing.isEmpty)
+        #expect(rec.pendingSync.isEmpty && card.mirrorNote == nil)
+        #expect(env.model.checksums.count == 4)
+    }
+
+    @Test func mirrorGoneBeforeTheCopyLeavesPrimaryCompleteAndMarksSync() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1)])
+        try await plan(env, card, into: shoot)
+        let mirror = try #require(shoot.mirrors.first)
+        try FileManager.default.removeItem(at: mirror)
+        env.model.copy(card)
+        try await waitUntil { settled(card) && card.phase == .backed }
+        #expect(mp4s(shoot.folder) == ["Video/CARD/A.MP4"])
+        #expect(!FileManager.default.fileExists(atPath: mirror.path))
+        #expect(card.plan == nil && card.missing.isEmpty && card.phase == .backed)
+        let rec = try record(env, shoot.id)
+        #expect(rec.pendingSync == [mirror.standardizedFileURL.path])
+        #expect(card.mirrorNote?.contains("sync") == true)
+    }
+
+    @Test func offlineMirrorIsSkippedAndMarkedPending() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        var reg = env.model.registry
+        try reg.addMirror(id: shoot.id, path: "/Volumes/NoSuch/S")
+        reg.setPendingSync(id: shoot.id, path: "/Volumes/NoSuch/S", false)
+        try await ShootStore.save(reg, to: env.model.registryURL)
+        await env.model.loadShoots()
+        #expect(try record(env, shoot.id).pendingSync.isEmpty)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1)])
+        try await plan(env, card, into: shoot)
+        #expect(card.plan?.copyRoots.count == 1)
+        env.model.copy(card)
+        try await waitUntil { settled(card) && card.phase == .backed }
+        #expect(mp4s(shoot.folder) == ["Video/CARD/A.MP4"])
+        #expect(!FileManager.default.fileExists(atPath: "/Volumes/NoSuch"))
+        #expect(try record(env, shoot.id).pendingSync == ["/Volumes/NoSuch/S"])
+        #expect(card.mirrorNote?.contains("NoSuch") == true)
+    }
+
+    @Test func onlyTheMirrorOnlineReceivesTheCopyAndPrimaryIsMarkedPending() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA, env.volB])
+        let primary = shoot.folder
+        let mirror = try #require(shoot.mirrors.first)
+        try FileManager.default.removeItem(at: primary.appendingPathComponent(ShootSidecar.fileName))
+        await env.model.refreshShoots()
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1)])
+        try await plan(env, card, into: shoot)
+        #expect(card.plan?.copyRoots.map(\.standardizedFileURL.path) == [mirror.standardizedFileURL.path])
+        env.model.copy(card)
+        try await waitUntil { settled(card) && card.phase == .backed }
+        #expect(mp4s(mirror) == ["Video/CARD/A.MP4"])
+        #expect(mp4s(primary).isEmpty)
+        #expect(try record(env, shoot.id).pendingSync == [primary.standardizedFileURL.path])
+    }
+
+    // MARK: Queueing
+
+    /// Shoot S plus two cards holding the same bytes (A, B), both planned into S.
+    private func queueScenario(_ env: Env) async throws -> (shoot: Shoot, card1: Card, card2: Card) {
+        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let card1 = try ingestCard(env, "CARD1", [("A.MP4", 1), ("B.MP4", 2)])
+        let card2 = try ingestCard(env, "CARD2", [("A.MP4", 1), ("B.MP4", 2)])
+        try await plan(env, card1, into: shoot)
+        try await plan(env, card2, into: shoot)
+        return (shoot, card1, card2)
+    }
+
+    @Test func secondCardWaitsThenStartsByItselfAndItsTwinsArePruned() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let sc = try await queueScenario(env)
+        env.model.copy(sc.card1)
+        env.model.copy(sc.card2)
+        #expect(sc.card2.engine == nil && sc.card2.phase == .ready)
+        #expect(sc.card2.queuedBehind == sc.card1.id)
+        #expect(sc.card2.queueNote == "Waiting for CARD1 to finish")
+        try await waitUntil { sc.card2.queuedBehind == nil && settled(sc.card1) && settled(sc.card2) && sc.card2.phase == .backed }
+        #expect(sc.card2.phase == .backed && sc.card2.plan == nil && sc.card2.queueNote == nil)
+        // Only card 1's copies exist: card 2's twins were pruned when it started.
+        #expect(mp4s(sc.shoot.folder) == ["Video/CARD1/A.MP4", "Video/CARD1/B.MP4"])
+    }
+
+    @Test func stoppingAQueuedCardDequeuesItAndItNeverStarts() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let sc = try await queueScenario(env)
+        env.model.copy(sc.card1)
+        env.model.copy(sc.card2)
+        #expect(sc.card2.queuedBehind != nil)
+        env.model.stop(sc.card2)
+        #expect(sc.card2.queuedBehind == nil && sc.card2.queueNote == nil)
+        #expect(sc.card2.plan != nil && sc.card2.phase == .ready)
+        try await waitUntil { settled(sc.card1) && sc.card1.phase == .backed }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(sc.card2.engine == nil && sc.card2.plan != nil)
+        #expect(mp4s(sc.shoot.folder) == ["Video/CARD1/A.MP4", "Video/CARD1/B.MP4"])
+    }
+}
