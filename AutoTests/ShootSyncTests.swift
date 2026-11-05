@@ -351,6 +351,45 @@ private final class Roots {
         #expect(report.conflicts.map(\.kind) == [.content])
     }
 
+    @Test func folderVersusSymlinkToFolderIsTypeMismatch() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        try r.put(r.a, "D1/clip.mov", "data")
+        try r.put(r.b, "Real/clip.mov", "data")
+        try FileManager.default.createSymbolicLink(at: r.b.appendingPathComponent("D1"),
+                                                   withDestinationURL: r.b.appendingPathComponent("Real"))
+        let report = try #require(await check([r.a, r.b]))
+        #expect(report.conflicts.contains { $0.kind == .typeMismatch && $0.relPath.lowercased() == "d1" })
+        #expect(report.missing.values.allSatisfy { list in !list.contains { $0.file.relPath.lowercased().hasPrefix("d1") } })
+        #expect(!report.isInSync)
+    }
+
+    @Test func nestedShootVersusRegularFileIsMismatch() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        try r.put(r.a, "Nested/inner.mov", "a")
+        try r.put(r.a, "Nested/\(ShootSidecar.fileName)", "{}")
+        try r.put(r.b, "Nested", "plain file")
+        let report = try #require(await check([r.a, r.b]))
+        #expect(report.conflicts.map(\.kind) == [.nestedShootMismatch])
+        #expect(report.missing.values.allSatisfy { $0.isEmpty })
+    }
+
+    @Test func oldFormatChecksumEntryLoadsButNeverMatchesARealStamp() async throws {
+        let r = try Roots(); defer { r.cleanup() }
+        try r.put(r.a, "clip.mov", "data")
+        let file = r.a.appendingPathComponent("clip.mov")
+        let real = try #require(ChecksumStore.stamp(file))
+        #expect(real.ctime != 0)
+        let json = """
+        {"version":1,"entries":[{"md5":"00ff","stamp":{"volume":"\(real.volume)","relPath":"\(real.relPath)","size":\(real.size),"mtime":\(real.mtime),"inode":\(real.inode)}}]}
+        """
+        let storeURL = r.top.appendingPathComponent("old-checksums.json")
+        try Data(json.utf8).write(to: storeURL)
+        let store = ChecksumStore(url: storeURL)
+        await store.load()
+        #expect(store.count == 1)
+        #expect(store.checksum(for: real) == nil)
+    }
+
     @Test func foldedKeyIgnoresCaseAndNormalization() {
         #expect(ShootSyncChecker.foldedKey("D1/Clip.MOV") == "d1/clip.mov")
         #expect(ShootSyncChecker.foldedKey("\u{c4}BC.mov") == ShootSyncChecker.foldedKey("a\u{308}bc.MOV"))
