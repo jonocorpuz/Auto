@@ -6,6 +6,7 @@ struct ShootTile: View {
     let item: ShootItem
     @State private var showSync = false
     @State private var copyToRemove: ShootCopyState?
+    @State private var removeError: String?
 
     private var isOnline: Bool {
         switch item.availability {
@@ -81,12 +82,24 @@ struct ShootTile: View {
         }
         .alert("Remove this copy from Auto?", isPresented: removeAlertShown, presenting: copyToRemove) { copy in
             Button("Remove Copy", role: .destructive) {
-                Task { try? await model.removeCopy(shootID: item.id, path: copy.path) }
+                Task {
+                    do { try await model.removeCopy(shootID: item.id, path: copy.path) }
+                    catch { removeError = error.localizedDescription }
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: { copy in
             Text("\(copy.path) will no longer be tracked as a copy of this shoot. Files on disk are not deleted.")
         }
+        .alert("Couldn't remove copy", isPresented: removeErrorShown) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(removeError ?? "")
+        }
+    }
+
+    private var removeErrorShown: Binding<Bool> {
+        Binding(get: { removeError != nil }, set: { if !$0 { removeError = nil } })
     }
 
     private var removeAlertShown: Binding<Bool> {
