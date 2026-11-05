@@ -85,8 +85,11 @@ struct CardRow: View {
         var text = parts.joined(separator: " · ")
         switch card.phase {
         case .needsBackup, .ready, .copying, .failed:
-            if model.workingVolume != nil {
-                text += " · \(card.missing.count) not on \(model.workingDriveName) yet (\(Format.bytes(card.missingBytes)))"
+            let backed = card.files.count - card.missing.count
+            if backed > 0 && !card.missing.isEmpty {
+                text += " · \(card.missing.count) not backed up (\(Format.bytes(card.missingBytes))) · \(backed) already backed up"
+            } else if model.workingVolume != nil {
+                text += " · \(card.missing.count) not backed up (\(Format.bytes(card.missingBytes)))"
             }
         default: break
         }
