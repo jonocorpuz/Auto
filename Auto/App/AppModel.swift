@@ -229,6 +229,31 @@ final class AppModel {
     /// Cards waiting for another card's copy into an overlapping folder, in the order they asked.
     @ObservationIgnored private var copyQueue: [Card.ID] = []
 
+    // MARK: Mirror sync state (see the "Mirror sync" extension)
+    /// Where each shoot's mirror check / Sync Now stands. Absent until first scheduled.
+    private(set) var syncStates: [UUID: ShootSyncState] = [:]
+    /// When each shoot's contents were last fully re-read (a deep check that came back in sync). Persisted.
+    private(set) var lastDeepVerify: [UUID: Date] = [:]
+    /// Failures from the last Sync Now per shoot (e.g. a different file appeared at the destination).
+    private(set) var syncNotes: [UUID: String] = [:]
+    /// Quiet period before a scheduled check starts; requests inside it coalesce.
+    @ObservationIgnored var syncDebounce: Duration = .seconds(2)
+    /// A non-forced check is skipped when the last complete one is younger than this and the copies are unchanged.
+    @ObservationIgnored var syncThrottle: TimeInterval = 600
+    /// Runs one check. Injectable so tests can hold or fake it; the default is `ShootSyncChecker.run`.
+    @ObservationIgnored var syncChecker: SyncCheckRunner = AppModel.realSyncChecker
+    /// Checks actually started (a throttled, deferred or offline request doesn't count). For tests.
+    @ObservationIgnored private(set) var syncChecksStarted = 0
+    @ObservationIgnored fileprivate var syncWork: [SyncWork] = []
+    @ObservationIgnored fileprivate var syncRunner: Task<Void, Never>?
+    @ObservationIgnored fileprivate var syncSleeper: Task<Void, Never>?
+    @ObservationIgnored fileprivate var syncRunning: (id: UUID, task: Task<ShootSyncReport?, Never>)?
+    @ObservationIgnored fileprivate var syncGenerations: [UUID: Int] = [:]
+    @ObservationIgnored fileprivate var syncEngines: [UUID: CopyEngine] = [:]
+    @ObservationIgnored fileprivate var syncStopped: Set<UUID> = []
+    @ObservationIgnored fileprivate var syncSignatures: [UUID: [String]] = [:]
+    @ObservationIgnored fileprivate var startupLoad: Task<Void, Never>?
+
     init(registryURL: URL = ShootStore.defaultURL(),
          thumbnails: any ThumbnailProvider = QLThumbnailProvider(),
          defaults: UserDefaults = .standard) {
@@ -318,7 +343,12 @@ final class AppModel {
         }
         watcher.start()
         rebuildIndex()
-        Task { await checksums.load() }
+        let metaURL = syncMetaURL
+        startupLoad = Task {
+            await checksums.load()
+            let saved = await Task.detached { SyncMetaStore.load(from: metaURL) }.value
+            for (id, date) in saved where lastDeepVerify[id] == nil { lastDeepVerify[id] = date }
+        }
         Task { await loadShoots() }
     }
 
@@ -804,6 +834,18 @@ final class AppModel {
             if !landed.isEmpty, card.id != browsingCardID { refreshBrowserMembership(force: true) }
             if marked { await saveRegistry() }
             if !landed.isEmpty || marked { await refreshShoots() }
+            // The copies of a shoot that just received files may now differ: check them (forced).
+            var toCheck = Set(landed.map(\.id))
+            if !outcome.copied.isEmpty {
+                // Includes flat Choose Folder plans whose root is inside any copy (not only the primary).
+                let written = plan.copyRoots + [plan.destinationRoot]
+                for item in shoots {
+                    guard case .online(let shoot)? = item.availability else { continue }
+                    if shoot.copies.contains(where: { copy in written.contains { Self.overlap($0, copy) } }) { toCheck.insert(item.id) }
+                }
+            }
+            if !outcome.copied.isEmpty, let shootID = plan.shootID { toCheck.insert(shootID) }
+            if !toCheck.isEmpty { scheduleSyncCheck(toCheck, force: true) }
             if !outcome.cancelled { openMainWindow() }
         }
     }
@@ -1139,6 +1181,7 @@ extension AppModel {
                                                 volumeID: volumeIDProvider)
         let availability = resolved.mapValues(\.availability)
         guard generation == shootsGeneration else { return }
+        var syncChanged = Set<UUID>()
         for i in shoots.indices {
             let id = shoots[i].id
             // The copy Auto reads from changed (failover to a mirror, or back): coverage and add plans aimed at
@@ -1149,8 +1192,13 @@ extension AppModel {
             }
             shoots[i].availability = availability[id]
             shoots[i].copies = resolved[id]?.copies ?? []
+            let signature = shoots[i].copies.map { "\($0.path)|\($0.availability)" }
+            if syncSignatures[id] != signature { syncSignatures[id] = signature; syncChanged.insert(id) }
             if case .online? = availability[id] {} else { shoots[i].summary = nil; shoots[i].thumbnail = nil }
         }
+        // A copy came, went or changed: check (or re-evaluate) the shoots whose copies changed. Covers launch.
+        syncSignatures = syncSignatures.filter { key, _ in shoots.contains { $0.id == key } }
+        if !syncChanged.isEmpty { scheduleSyncCheck(syncChanged, force: false) }
         // The set of shoots that count as backup locations changed: re-verify the cards.
         for item in shoots {
             if case .online? = item.availability { continue }
@@ -1343,6 +1391,7 @@ extension AppModel {
         try registry.relocate(id: id, from: current.path, to: folder.standardizedFileURL.path)
         await saveRegistry()
         await refreshShoots()
+        scheduleSyncCheck([id], force: true)
     }
 
     /// Asks the user for the shoot's new folder.
@@ -1399,6 +1448,7 @@ extension AppModel {
         do { try registry.addMirror(id: shootID, path: folder.standardizedFileURL.path) } catch { throw mapRegistryError(error) }
         await saveRegistry()
         await refreshShoots()
+        scheduleSyncCheck([shootID], force: true)
     }
 
     /// Off main. Returns the mirror folder, created, adopted or linked, with its sidecar verified.
@@ -1526,6 +1576,7 @@ extension AppModel {
         registry = again
         await saveRegistry()
         await refreshShoots()
+        scheduleSyncCheck([shootID], force: true)
     }
 
     private func isEffectivePrimary(_ shootID: UUID, path: String) -> Bool {
@@ -1548,6 +1599,7 @@ extension AppModel {
         registry = trial
         await saveRegistry()
         await refreshShoots()
+        scheduleSyncCheck([shootID], force: true)
     }
 
     /// Asks the user where one copy of the shoot is now.
@@ -1574,6 +1626,7 @@ extension AppModel {
     func forgetShoot(id: UUID) async {
         cancelCoverage { $0.shootID == id }
         discardAddPlans(forShoot: id)
+        forgetSyncState(id)
         registry.remove(id: id)
         await saveRegistry()
         await refreshShoots()
@@ -1886,6 +1939,352 @@ extension AppModel {
 
     #if DEBUG
     func _testInsert(card: Card) { cards.append(card) }
+    #endif
+}
+
+/// Runs one mirror check: `copies[0]` is the effective primary.
+typealias SyncCheckRunner = @Sendable (_ copies: [URL], _ cache: ChecksumStore, _ deep: Bool,
+                                       _ onSizePass: @escaping @MainActor @Sendable (ShootSyncReport) -> Void,
+                                       _ progress: @escaping @MainActor @Sendable (SyncProgress) -> Void) async -> ShootSyncReport?
+
+/// One queued check or Sync Now. Checks for the same shoot coalesce.
+fileprivate struct SyncWork {
+    enum Kind { case check, sync }
+    var id: UUID
+    var kind: Kind
+    var force: Bool
+    var deep: Bool
+    var notBefore: ContinuousClock.Instant
+}
+
+extension AppModel {
+    // MARK: Mirror sync
+
+    nonisolated static let realSyncChecker: SyncCheckRunner = { copies, cache, deep, onSizePass, progress in
+        await ShootSyncChecker.run(copies: copies, cache: cache, hasher: FileHasher(), deep: deep,
+                                   onSizePass: onSizePass, progress: progress)
+    }
+
+    var syncMetaURL: URL { registryURL.deletingLastPathComponent().appendingPathComponent("sync-meta.json") }
+
+    private static func copyKey(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+
+    /// What the UI shows for a shoot.
+    func syncBadge(for shootID: UUID) -> SyncBadge {
+        func counts(_ r: ShootSyncReport) -> SyncBadge {
+            .outOfSync(missing: r.missing.values.reduce(0) { $0 + $1.count }, conflicts: r.conflicts.count)
+        }
+        switch syncStates[shootID] {
+        case nil:
+            guard let record = registry.records.first(where: { $0.id == shootID }), record.copyPaths.count >= 2 else { return .none }
+            return .unknown(reason: "Not checked yet")
+        case .single?:
+            return .none
+        case .unknown(let reason)?:
+            return .unknown(reason: reason)
+        case .failed(let message)?:
+            return .unknown(reason: message)
+        case .checking(let progress, let partial)?:
+            if let partial, partial.isOutOfSync { return counts(partial) }
+            return .checking(progress)
+        case .done(let report, let at)?:
+            if report.isOutOfSync { return counts(report) }
+            if report.isInSync {
+                return .inSync(copies: report.copies.count, checkedAt: at, deepVerifiedAt: lastDeepVerify[shootID])
+            }
+            return .unknown(reason: "Not fully checked yet")
+        case .syncing(let progress)?:
+            return .syncing(progress)
+        }
+    }
+
+    /// Queues a check for each shoot (debounced; coalesced per shoot). `force` skips the throttle; `deep`
+    /// re-reads every byte (and implies `force`). A newer request cancels a check of the same shoot that is running.
+    func scheduleSyncCheck(_ ids: Set<UUID>, force: Bool, deep: Bool = false) {
+        enqueueSync(ids, kind: .check, force: force || deep, deep: deep, delay: syncDebounce)
+    }
+
+    /// User-initiated check ("Check Again", with `deep` for "Verify Contents"): forced, starts right away.
+    func checkSync(shootID: UUID, deep: Bool = false) {
+        enqueueSync([shootID], kind: .check, force: true, deep: deep, delay: .zero)
+    }
+
+    /// Copies what is missing between the copies of a shoot. Only acts on a complete `.checksums` report that
+    /// is out of sync; it re-checks first (cache hits) so it never plans from a stale report. Returns whether it was
+    /// queued: false while a check is still at the size pass, while syncing, or when nothing is missing.
+    @discardableResult
+    func syncNow(shootID: UUID) -> Bool {
+        guard case .done(let report, _)? = syncStates[shootID], report.notChecked == nil, report.depth == .checksums,
+              report.missing.values.contains(where: { !$0.isEmpty }) else { return false }
+        enqueueSync([shootID], kind: .sync, force: true, deep: false, delay: .zero)
+        return true
+    }
+
+    /// Stops a running check or Sync Now (files already copied stay; nothing is removed) and drops queued work.
+    func stopSync(shootID: UUID) {
+        syncWork.removeAll { $0.id == shootID }
+        syncGenerations[shootID, default: 0] += 1
+        if let running = syncRunning, running.id == shootID { running.task.cancel() }
+        if let engine = syncEngines[shootID] {
+            engine.cancel()
+        } else if case .syncing? = syncStates[shootID] {
+            syncStopped.insert(shootID)   // still preparing: the job notices before it writes
+        } else if case .checking? = syncStates[shootID] {
+            syncStates[shootID] = .unknown("Check stopped")
+        }
+    }
+
+    fileprivate func forgetSyncState(_ id: UUID) {
+        stopSync(shootID: id)
+        syncStopped.remove(id)
+        syncStates[id] = nil
+        syncNotes[id] = nil
+        syncSignatures[id] = nil
+        if lastDeepVerify.removeValue(forKey: id) != nil { persistDeepVerify() }
+    }
+
+    private func persistDeepVerify() {
+        let dates = lastDeepVerify, url = syncMetaURL
+        Task.detached { SyncMetaStore.save(dates, to: url) }
+    }
+
+    private func enqueueSync(_ ids: Set<UUID>, kind: SyncWork.Kind, force: Bool, deep: Bool, delay: Duration) {
+        let due = ContinuousClock.now.advanced(by: delay)
+        for id in ids.sorted(by: { $0.uuidString < $1.uuidString }) {
+            if kind == .check {
+                // Anything that started before this request is stale: its result is dropped.
+                syncGenerations[id, default: 0] += 1
+                if let running = syncRunning, running.id == id { running.task.cancel() }
+            }
+            if let i = syncWork.firstIndex(where: { $0.id == id && $0.kind == kind }) {
+                syncWork[i].force = syncWork[i].force || force
+                syncWork[i].deep = syncWork[i].deep || deep
+                syncWork[i].notBefore = due
+            } else {
+                syncWork.append(SyncWork(id: id, kind: kind, force: force, deep: deep, notBefore: due))
+            }
+        }
+        if syncRunner == nil {
+            syncRunner = Task { [weak self] in
+                if let self { await self.runSyncLoop() }
+            }
+        } else {
+            syncSleeper?.cancel()   // re-evaluate what is due
+        }
+    }
+
+    /// The one serial worker: at most one check or sync at a time, app-wide.
+    private func runSyncLoop() async {
+        await startupLoad?.value
+        while true {
+            let now = ContinuousClock.now
+            guard let index = syncWork.firstIndex(where: { $0.notBefore <= now }) else {
+                guard let next = syncWork.map(\.notBefore).min() else { break }
+                let sleeper = Task<Void, Never> { _ = try? await Task.sleep(until: next, clock: .continuous) }
+                syncSleeper = sleeper
+                await sleeper.value
+                continue
+            }
+            let work = syncWork.remove(at: index)
+            switch work.kind {
+            case .check: await performCheck(work.id, force: work.force, deep: work.deep)
+            case .sync: await performSyncNow(work.id)
+            }
+        }
+        syncRunner = nil
+        syncSleeper = nil
+    }
+
+    private func isIngesting(into copies: [URL], shootID: UUID) -> Bool {
+        cards.contains { card in
+            guard card.engine != nil else { return false }
+            if addTargets[card.id] == shootID || card.plan?.shootID == shootID { return true }
+            return (card.plan?.copyRoots ?? []).contains { root in copies.contains { Self.overlap(root, $0) } }
+        }
+    }
+
+    private func unknownReason(_ item: ShootItem) -> String {
+        guard !item.copies.isEmpty else { return "Not checked yet" }
+        for copy in item.copies where copy.availability != .online {
+            let drive = copy.volumeName
+            var text: String
+            switch copy.availability {
+            case .offline: text = "\(drive) isn't connected"
+            case .missing: text = "The copy on \(drive) can't be found"
+            case .mismatch: text = "The folder on \(drive) is a different shoot"
+            case .sameVolume: text = "\(drive) holds more than one copy of this shoot, so it isn't a mirror"
+            case .online: continue
+            }
+            if item.record.pendingSync.contains(where: { Self.copyKey($0) == Self.copyKey(copy.path) }) {
+                text += " · new footage isn't on it yet"
+            }
+            return text
+        }
+        return "Not checked yet"
+    }
+
+    /// The effective-primary-first copy URLs when the shoot has 2+ copies and every one is online; otherwise
+    /// the `.single` / `.unknown` state to show.
+    private func checkableCopies(_ id: UUID) -> (copies: [URL], blocked: ShootSyncState?) {
+        guard let item = shoots.first(where: { $0.id == id }) else { return ([], .unknown("Shoot not found")) }
+        guard item.record.copyPaths.count >= 2 else { return ([], .single) }
+        guard case .online(let shoot)? = item.availability, !item.copies.isEmpty,
+              item.copies.allSatisfy({ $0.availability == .online }),
+              shoot.copies.count == item.record.copyPaths.count else { return ([], .unknown(unknownReason(item))) }
+        if isIngesting(into: shoot.copies, shootID: id) {
+            return ([], .unknown("Waiting for a copy into this shoot to finish"))
+        }
+        return (shoot.copies, nil)
+    }
+
+    private func performCheck(_ id: UUID, force: Bool, deep: Bool) async {
+        guard shoots.contains(where: { $0.id == id }) else { syncStates[id] = nil; return }
+        let (urls, blocked) = checkableCopies(id)
+        if let blocked { syncStates[id] = blocked; return }
+        if !force, case .done(let last, let at)? = syncStates[id], last.notChecked == nil, last.depth == .checksums,
+           Date().timeIntervalSince(at) < syncThrottle, last.copies.map({ Self.copyKey($0.path) }) == urls.map({ Self.copyKey($0.path) }) {
+            return
+        }
+        let gen = syncGenerations[id, default: 0]
+        syncChecksStarted += 1
+        syncStates[id] = .checking(SyncProgress(phase: .listing), partial: nil)
+        let runner = syncChecker, store = checksums
+        let onSize: @MainActor @Sendable (ShootSyncReport) -> Void = { [weak self] partial in
+            guard let self, gen == self.syncGenerations[id, default: 0], case .checking(let p, _)? = self.syncStates[id] else { return }
+            self.syncStates[id] = .checking(p, partial: partial)
+        }
+        let onProgress: @MainActor @Sendable (SyncProgress) -> Void = { [weak self] progress in
+            guard let self, gen == self.syncGenerations[id, default: 0], case .checking(_, let partial)? = self.syncStates[id] else { return }
+            self.syncStates[id] = .checking(progress, partial: partial)
+        }
+        let task = Task<ShootSyncReport?, Never> { await runner(urls, store, deep, onSize, onProgress) }
+        syncRunning = (id, task)
+        let report = await task.value
+        syncRunning = nil
+        // A newer request, a stop or a forget superseded this run: its result is dropped.
+        guard gen == syncGenerations[id, default: 0], shoots.contains(where: { $0.id == id }) else { return }
+        guard let report else { syncStates[id] = .unknown("Check cancelled"); return }
+        switch report.notChecked {
+        case .singleCopy?: syncStates[id] = .single
+        case .copyUnreadable(let url, let message)?:
+            syncStates[id] = .unknown("The copy on \(Self.driveLabel(url)) couldn't be read: \(message)")
+        case nil:
+            syncStates[id] = .done(report, at: Date())
+            if deep && report.isInSync {
+                lastDeepVerify[id] = Date()
+                persistDeepVerify()
+            }
+            await clearPendingSync(id, after: report)
+        }
+    }
+
+    /// After a complete check: a copy that is missing nothing and takes part in no conflict is no longer pending.
+    private func clearPendingSync(_ id: UUID, after report: ShootSyncReport) async {
+        guard report.notChecked == nil, report.depth == .checksums,
+              let record = registry.records.first(where: { $0.id == id }), !record.pendingSync.isEmpty else { return }
+        var changed = false
+        for path in record.pendingSync {
+            guard let root = report.copies.first(where: { Self.copyKey($0.path) == Self.copyKey(path) }) else { continue }
+            let incomplete = !(report.missing[root] ?? []).isEmpty
+                || report.conflicts.contains { $0.copies.contains { Self.copyKey($0.path) == Self.copyKey(path) } }
+            if !incomplete { registry.setPendingSync(id: id, path: path, false); changed = true }
+        }
+        guard changed else { return }
+        if let i = shoots.firstIndex(where: { $0.id == id }), let updated = registry.records.first(where: { $0.id == id }) {
+            shoots[i].record = updated
+        }
+        await saveRegistry()
+    }
+
+    // MARK: Sync Now
+
+    private func performSyncNow(_ id: UUID) async {
+        syncStopped.remove(id)
+        let (_, blocked) = checkableCopies(id)
+        if let blocked { syncStates[id] = blocked; return }
+        // Never plan from a stale report: look again first (cache hits make this cheap).
+        await performCheck(id, force: true, deep: false)
+        guard case .done(let report, _)? = syncStates[id], report.notChecked == nil, report.depth == .checksums,
+              report.missing.values.contains(where: { !$0.isEmpty }) else { return }
+        if syncStopped.remove(id) != nil { return }
+
+        let gen = syncGenerations[id, default: 0]
+        syncStates[id] = .syncing(CopyProgress())
+        let volumes = cardVolumes(), provider = volumeIDProvider, store = checksums
+        let plan: SyncPlan
+        do {
+            plan = try await Self.prepareSync(report: report, shootID: id, cache: store, cardVolumes: volumes, volumeID: provider)
+        } catch {
+            syncStates[id] = .failed(error.localizedDescription)
+            return
+        }
+        // Stopped or forgotten while preparing: nothing was written yet.
+        if syncStopped.remove(id) != nil || gen != syncGenerations[id, default: 0] || !shoots.contains(where: { $0.id == id }) {
+            if shoots.contains(where: { $0.id == id }) { syncStates[id] = .unknown("Sync stopped") }
+            return
+        }
+        let engine = CopyEngine()
+        syncEngines[id] = engine
+        syncStates[id] = .syncing(CopyProgress(filesTotal: plan.jobs.count, bytesTotal: plan.jobs.reduce(0) { $0 + $1.file.size }))
+        let outcome = await engine.run(plan.jobs) { [weak self] progress in
+            guard let self, self.syncEngines[id] === engine else { return }
+            self.syncStates[id] = .syncing(progress)
+        }
+        syncEngines[id] = nil
+
+        // Seed the cache with what landed (off main), so the re-check below is all hits.
+        let landed = outcome.copied
+        await Task.detached {
+            for copied in landed { store.record(copied) }
+            await store.saveIfDirty()
+        }.value
+
+        if outcome.failures.isEmpty {
+            syncNotes[id] = nil
+        } else {
+            let first = outcome.failures[0]
+            let more = outcome.failures.count > 1 ? " (+\(outcome.failures.count - 1) more)" : ""
+            syncNotes[id] = "\(first.name): \(first.reason)\(more)"
+        }
+        // Forced re-check: clears pendingSync for copies that are now complete, and shows what is left.
+        await performCheck(id, force: true, deep: false)
+        await refreshShoots()
+    }
+
+    /// Off main. Every copy must still be off a card, resolve to a drive of its own, and carry this shoot's
+    /// sidecar (the planner checks it); every destination folder is validated, then created below its root.
+    @concurrent
+    nonisolated private static func prepareSync(report: ShootSyncReport, shootID: UUID, cache: ChecksumStore,
+                                                cardVolumes: [URL], volumeID: @Sendable (URL) -> String?) async throws -> SyncPlan {
+        var drives = Set<String>()
+        for root in report.copies {
+            if VolumeClassifier.isOnCard(root, cards: cardVolumes) { throw ShootError.onCard }
+            guard let drive = volumeID(root) else { throw ShootError.parentMissing }
+            guard drives.insert(drive).inserted else { throw ShootError.sameVolumeAsCopy }
+        }
+        let plan = try await ShootSyncPlanner.plan(report: report, cache: cache, shootID: shootID)
+        var roots: [URL] = []
+        for job in plan.jobs {
+            guard let root = job.root else { throw SyncPlanError.destinationNotThisShoot(job.destDir.path) }
+            try ShootPlanner.checkDestination(job.destDir, root: root, cardVolumes: cardVolumes)
+            if !roots.contains(root) { roots.append(root) }
+        }
+        try await ShootSyncPlanner.checkSpace(plan, free: { url in
+            let values = try? URL(fileURLWithPath: url.path).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            return values?.volumeAvailableCapacityForImportantUsage
+        })
+        for root in roots {
+            try ShootPlanner.createDirectories(ShootPlanner.directories(for: plan.jobs.filter { $0.root == root }),
+                                               root: root, cardVolumes: cardVolumes)
+        }
+        return plan
+    }
+
+    #if DEBUG
+    /// Waits until no check or sync is queued or running.
+    func _testSyncIdle() async {
+        while let runner = syncRunner { await runner.value }
+    }
     #endif
 }
 
