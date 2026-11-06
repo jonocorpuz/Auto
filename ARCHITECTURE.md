@@ -140,6 +140,7 @@ Auto/                         # repo root
 │   │   ├── ShootItem.swift   #   ShootItem (registry record + availability, summary, thumbnail); ShootSheetRequest
 │   │   ├── ShootCoverageState.swift # CoverageKey (shoot, card) and CoverageState per pair
 │   │   ├── ShootSyncState.swift # ShootSyncState (per-shoot check/sync state), SyncBadge (green/yellow/grey), SyncMetaStore (sync-meta.json)
+│   │   ├── CullCoordinator.swift #   per-shoot cull runs, waiting on ingest/sync, app-wide cull lock
 │   │   └── Card.swift        #   one connected card: volume, files, cameras, phase, copy plan
 │   ├── UI/                   # SwiftUI views only, no I/O
 │   │   ├── MainView.swift    #   sidebar + floating content panel, switches on AppModel.selectedTab
@@ -147,7 +148,9 @@ Auto/                         # repo root
 │   │   ├── MediaView.swift   #   Media tab: stats, cards, Shoots grid, drives
 │   │   ├── ShootTile.swift   #   one shoot in the grid: thumbnail, counts, offline/missing state, sync badge, Copies menu, actions
 │   │   ├── ShootSyncPopover.swift #   per-shoot sync popover: copies, last check, Check Again (⌥ deep), Verify Contents, Sync Now, Stop
-│   │   ├── EditPlaceholderView.swift # empty Video Edit / Photo Edit tabs
+│   │   ├── EditPlaceholderView.swift # empty Video Edit tab
+│   │   ├── PhotoEditView.swift #   Photo Edit tab: photo cull, bottom progress bar, result banners
+│   │   ├── CullSettingsSheet.swift #   cull settings: criteria, aggressiveness, model, budget
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
 │   │   ├── CardRow.swift     #   per-card header, phase content and actions, Add to Shoot menu, per-camera day chips; static StatusDot
 │   │   ├── CardBrowserView.swift # read-only Finder-style card browser (icons/list, locations sidebar); opened by clicking a card
@@ -182,11 +185,30 @@ Auto/                         # repo root
 │   │   ├── ChecksumStore.swift     #   persistent MD5 cache (checksums.json), keyed by volume, path, size, mtime, inode, ctime; serialized saves
 │   │   ├── ShootSync.swift         #   ShootSyncChecker: inventories copies, size pass then checksum pass; read-only, fails closed
 │   │   └── ShootSyncPlan.swift     #   ShootSyncPlanner: Sync Now plan (copy missing files from a good copy); never deletes or overwrites
-│   │   └── MainThreadProbe.swift   #   records whether instrumented engines ran on main (tests assert it)
+│   │   ├── MainThreadProbe.swift   #   records whether instrumented engines ran on main (tests assert it)
+│   │   └── Cull/                   #   photo cull engines (pure Swift)
+│   │       ├── CullModels.swift    #   CullSettings, CullModel, PhotoRecord, PhotoMetrics, FaceInfo, FileStamp
+│   │       ├── CullCriterion.swift #   cull criteria: exposure, duplicates, unusable, horizon, cropped, eyes
+│   │       ├── PhotoCatalog.swift  #   photos on the primary copy's Photo/<cam> folders
+│   │       ├── PhotoGrouper.swift  #   burst grouping by capture time + dHash
+│   │       ├── LocalTriage.swift   #   local pre-pass (blur, clipping, eyes closed) before Claude
+│   │       ├── CullPromptBuilder.swift # cached system prompt, per-group run section, JSON schema
+│   │       ├── CullEstimator.swift #   cull cost estimate
+│   │       ├── CullDecisionValidator.swift # checks Claude's decisions before any move
+│   │       ├── CullJournal.swift   #   write-ahead journal in <shoot>/.auto-cull/ for undo
+│   │       ├── CullApplier.swift   #   moves rejects (dir-fd renames, RENAME_EXCL, rollback, undo)
+│   │       ├── LiveCullApplier.swift #   live file-system implementation of the applier
+│   │       ├── CullReplay.swift    #   replays completed cull runs onto other copies
+│   │       └── CullRunner.swift    #   one run: analyze, group, triage, Claude per group, validate, apply
 │   ├── Integrations/         # adapters behind protocols; faked in tests
 │   │   ├── ThumbnailProvider.swift #   protocol: preview image for a media file
 │   │   ├── QLThumbnailProvider.swift # QuickLookThumbnailing adapter
 │   │   ├── QuickLookPreviewer.swift # shared Quick Look panel; takes control via the responder chain (AppDelegate forwards)
+│   │   ├── ClaudeRunner.swift      #   Claude run interface used by the cull
+│   │   ├── ClaudeCLIRunner.swift   #   `claude -p` adapter (posix_spawn in its own process group, cancel/timeout)
+│   │   ├── CullWorkspace.swift     #   app-managed workspace for `claude -p` (own CLAUDE.md, Read-only settings)
+│   │   ├── PhotoAnalyzer.swift     #   photo analysis interface (local metrics + previews)
+│   │   ├── ImageIOPhotoAnalyzer.swift # ImageIO metrics, face boxes and previews for the cull
 │   │   └── (planned, Phase 3) Resolve / transcoder adapters
 │   └── Assets.xcassets
 ├── AutoTests/                # Swift Testing target (hosted in Auto.app)
@@ -209,7 +231,7 @@ Auto/                         # repo root
 | `UI` | `App` (via `@Environment(AppModel.self)`) | Touch files, volumes, processes |
 | `App` | `Core`, `Integrations` | Contain copy or pipeline logic itself |
 | `Core` | Foundation, CryptoKit, ImageIO, AVFoundation; AppKit/DiskArbitration in `VolumeWatcher` only | Import SwiftUI or reference `AppModel` |
-| `Integrations` | Foundation, `Process`, QuickLookThumbnailing | Be called directly from views |
+| `Integrations` | Foundation, `Process` / `posix_spawn`, QuickLookThumbnailing, ImageIO, Vision | Be called directly from views |
 
 ---
 
@@ -291,6 +313,21 @@ Sync Now acts only on a complete `.checksums` report with nothing "not checked".
 
 `BackupVerifier` already decides which card files have a checksum-identical copy somewhere, by name and size, then MD5. `IngestDuplicates` groups those verified files by where the copy lives (a shoot, or a plain folder on a drive) for the Add Footage block. Duplicates are left out of the plan by default. "Copy duplicates anyway" includes them. The card browser asks before copying duplicates ("Copy Anyway"). Renamed files are not detected.
 
+### Photo cull
+
+Photo cull runs per shoot. It needs the primary copy online and reads `Photo/**` from it (`_Rejects`, hidden files and symlinks are skipped).
+
+1. **Catalog:** `PhotoCatalog` lists the photos on the primary copy.
+2. **Analyze:** `ImageIOPhotoAnalyzer` makes local metrics and ~1024px previews with face strips. Nothing is moved until analysis finishes.
+3. **Group:** `PhotoGrouper` groups bursts by capture time and dHash.
+4. **Triage:** `LocalTriage` settles the obvious cases locally.
+5. **Claude, per group:** `ClaudeCLIRunner` runs `claude -p` in the isolated `CullWorkspace` with that group's previews. Each group waits while an ingest or sync runs.
+6. **Validate:** `CullDecisionValidator` checks every decision before anything moves.
+7. **Apply:** under the app-wide lock, rejects move to `Photo/<cam>/_Rejects/` on every online copy. Each move is journaled write-ahead in `<shoot>/.auto-cull/`. Stop during apply rolls the run back.
+8. **Offline copies:** a copy that is offline is marked `pendingSync`. Sync Now replays completed cull runs from the primary copy onto it before copying missing files, so rejects never come back.
+
+Details: [docs/plans/photo-cull.md](docs/plans/photo-cull.md).
+
 The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet and is not in these diagrams.
 
 ---
@@ -315,6 +352,7 @@ Files in `~/Library/Application Support/Auto/`:
 - `shoots.json`: known shoots, each with its primary `path`, `mirrors` and `pendingSync`. Records from before mirrors decode with none. A corrupt file is quarantined, never overwritten.
 - `checksums.json`: `ChecksumStore`, MD5 cache keyed by volume, path, size, mtime, inode and ctime. Only a cache: a corrupt file means an empty cache, and it never vouches for a backup.
 - `sync-meta.json`: `SyncMetaStore`, last deep-verify date per shoot, for the UI only. An unreadable file means "never verified".
+- `CullWorkspace/`: working directory for `claude -p` during a photo cull (own `CLAUDE.md`, Read-only settings). Never a source of truth for any shoot.
 
 ---
 
