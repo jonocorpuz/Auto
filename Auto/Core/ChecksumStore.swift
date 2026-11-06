@@ -41,6 +41,7 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
 
     private let url: URL?
     private let lock = NSLock()
+    private let saveGate = NSLock()
     private var map: [FileStamp: Data] = [:]
     private var dirty = false
 
@@ -132,8 +133,13 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
         }
     }
 
+    /// Saves are serialized: a snapshot taken earlier can never overwrite a later one on disk.
     @concurrent func saveIfDirty() async {
         guard let url else { return }
+        saveGate.withLock { writeSnapshot(to: url) }
+    }
+
+    private func writeSnapshot(to url: URL) {
         let snapshot: [Entry]? = lock.withLock {
             guard dirty else { return nil }
             dirty = false
