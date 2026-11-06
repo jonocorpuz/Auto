@@ -270,6 +270,27 @@ sequenceDiagram
 
 Card browser membership is a separate, read-only pass. While the browsed card is on screen and the main window is visible, `AppModel` runs `ShootMembership` once per online shoot (sequentially, off main, excluding nested shoots) and stores the verified copies in `browserMembership`. Scan, copy and recompute cancel and invalidate it, and a generation guard drops stale results. It never feeds the backed-up status or Add Footage coverage, and a partial or cancelled shoot is never reported.
 
+### Ingest fan-out
+
+A shoot can have mirror copies on other drives (`ShootRecord.mirrors`, added explicitly and never on the same drive). When footage is added, `ShootPlanner` builds one copy job per file per online copy, each with its own `CopyEngine` root. A copy that is offline, failed or left out of the run is recorded in `pendingSync`, and the tile and card show it. A card counts as backed up once a file is verified on at least one copy. Overlapping copies into a shoot queue (`queuedBehind`) instead of failing, and ingest and Sync Now never run at the same time.
+
+### Sync check
+
+`ShootSyncChecker` inventories each online copy, read-only. It skips hidden and partial files and nested shoots, and records unreadable entries rather than dropping them.
+
+1. **Size pass:** compares paths and sizes. It fires `onSizePass` at once, so the tile can show a partial result before any hashing.
+2. **Checksum pass:** MD5s each file present on two or more copies. `ChecksumStore` answers first. A file whose volume, path, size, mtime, inode and ctime match a cached entry is not re-read. A deep check (Verify Contents, or ⌥ Check Again) ignores the cache and re-reads every byte.
+
+Any uncertainty is a conflict or "not checked", never "in sync". A clean checksum check clears `pendingSync` for copies that were pending when it began. A cached green is "unchanged since last read", not proof against bit rot.
+
+### Sync Now
+
+Sync Now acts only on a complete `.checksums` report with nothing "not checked". `ShootSyncPlanner` creates one job per file missing from a copy, sourced from a verified copy, with `onCollision: .skip` and `expectedChecksum` set. The jobs run through `CopyEngine` (stream, `F_FULLFSYNC`, uncached re-read, `RENAME_EXCL`). Nothing is deleted or overwritten. A file that differs at the destination is a conflict and is left for the user. Stop keeps finished copies and drops queued work.
+
+### Duplicate detection
+
+`BackupVerifier` already decides which card files have a checksum-identical copy somewhere, by name and size, then MD5. `IngestDuplicates` groups those verified files by where the copy lives (a shoot, or a plain folder on a drive) for the Add Footage block. Duplicates are left out of the plan by default. "Copy duplicates anyway" includes them. The card browser asks before copying duplicates ("Copy Anyway"). Renamed files are not detected.
+
 The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet and is not in these diagrams.
 
 ---
