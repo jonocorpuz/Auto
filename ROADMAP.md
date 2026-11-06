@@ -158,6 +158,10 @@ Launch the app and tick each item. Build and tests are green; these are the UI c
 - Edit a shoot's name or date (v1: fixed at creation)
 - Card browser: reuse `AppModel.index` for shoots on the work volume instead of re-walking them in membership checks
 - Card browser: test that card removal clears browser membership (needs a `VolumeWatcher` seam)
+- Content index so duplicates are found after a rename (v1 matches name + size + MD5 only)
+- Scheduled periodic deep verification of shoot copies (v1: Verify Contents is manual)
+- Cross-root checksum end-to-end test (copy to two roots, then check both)
+- Busy-guard and in-flight serialization tests for mirror operations (add, locate, remove)
 
 ## Key Decisions
 
