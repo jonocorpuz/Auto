@@ -379,6 +379,31 @@ struct SyncNowTests {
         #expect(env.model.syncChecksStarted == started + 1)
     }
 
+    @Test func driveSwappedUnderTheSamePathTurnsGreyUntilRechecked() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let s = try await twoCopies(env)
+        env.model.checkSync(shootID: s.id)
+        await env.model._testSyncIdle()
+        #expect(isGreen(badge(env, s.id)))
+        let other = try await env.model.createShoot(name: "T", date: day, parents: [env.volA, env.volB])
+        await env.model._testSyncIdle()
+        let gate = Gate()
+        env.model.syncChecker = gatedChecker(gate)
+        env.model.checkSync(shootID: other.id)
+        try await waitUntil { gate.calls == 1 }
+        // Same paths, same availability, but the mirror's drive is a different mounted volume now.
+        env.model.volumeIDProvider = { url in
+            if url.pathComponents.contains("volB") { return "volB-swapped" }
+            return url.pathComponents.contains("volA") ? "volA" : nil
+        }
+        await env.model.refreshShoots()
+        guard case .unknown(let reason) = badge(env, s.id) else { Issue.record("expected grey, got \(badge(env, s.id))"); return }
+        #expect(reason.contains("remounted"))
+        gate.release()
+        await env.model._testSyncIdle()
+        #expect(isGreen(badge(env, s.id)))   // rechecked against the new volumes
+    }
+
     @Test func ingestWaitsBehindARunningSyncNow() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
         let s = try await twoCopies(env)
