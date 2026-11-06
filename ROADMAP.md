@@ -65,7 +65,6 @@ Launch the app and tick each item. These are the UI checks still open.
 - [ ] List view: whole row as a drop target (only the Name column now)
 - [ ] Cancel a pending folder-drop confirmation when leaving the browser
 - [ ] Shared thumbnail cache for the shoot browser
-- [ ] Investigate one intermittent full-suite failure seen once on 2026-11-05 (2 issues, ~75 s run)
 
 ## Phase 3: Editing pipeline
 
