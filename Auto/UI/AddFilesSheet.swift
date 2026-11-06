@@ -3,6 +3,7 @@ import SwiftUI
 /// Add Files: drop or choose files and folders, review what will be copied where, and add them to a shoot.
 struct AddFilesSheet: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
     let staging: ImportStaging
 
     @State private var error: String?
@@ -48,10 +49,7 @@ struct AddFilesSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") {
-                    staging.cancel()
-                    model.shootSheet = nil
-                }
+                Button("Cancel") { close(cancelling: true) }
                 .buttonStyle(.bordered)
                 .keyboardShortcut(.cancelAction)
                 Button(addCount == 0 ? "Add Files" : "Add \(Format.count(addCount, "file", "files"))") { add() }
@@ -223,9 +221,16 @@ struct AddFilesSheet: View {
         error = nil
         do {
             _ = try model.commitImport(staging)
-            model.shootSheet = nil
+            close(cancelling: false)
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    /// Works whichever view presented the sheet: the shoot browser (local state) or MainView (`shootSheet`).
+    private func close(cancelling: Bool) {
+        if cancelling { staging.cancel() }
+        if case .addFiles(let s)? = model.shootSheet, s.id == staging.id { model.shootSheet = nil }
+        dismiss()
     }
 }
