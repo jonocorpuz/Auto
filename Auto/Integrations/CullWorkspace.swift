@@ -10,7 +10,9 @@ nonisolated enum CullWorkspace {
 
     private struct Meta: Codable {
         var version: Int
-        var claudeMDSHA256: String
+        var previousHash: String?
+        var currentHash: String?
+        var claudeMDSHA256: String?  // legacy single-hash format
     }
 
     @discardableResult
@@ -31,16 +33,22 @@ nonisolated enum CullWorkspace {
         let metaURL = root.appendingPathComponent(".auto-workspace.json")
         let newData = Data(claudeMD.utf8)
 
+        // Crash safety: meta is written first (with old and new hash), then CLAUDE.md, so an
+        // interrupted update still reads as "unedited". Missing/unreadable meta = assume user-edited.
+        let recorded = (try? Data(contentsOf: metaURL)).flatMap { try? JSONDecoder().decode(Meta.self, from: $0) }
+        let existing = try? Data(contentsOf: mdURL)
         var shouldWrite = true
-        if let existing = try? Data(contentsOf: mdURL) {
-            let recorded = (try? Data(contentsOf: metaURL))
-                .flatMap { try? JSONDecoder().decode(Meta.self, from: $0) }
-            shouldWrite = recorded?.claudeMDSHA256 == sha256(existing)
+        var previous = recorded?.currentHash ?? recorded?.claudeMDSHA256
+        if let existing {
+            let h = sha256(existing)
+            let known = [recorded?.currentHash, recorded?.previousHash, recorded?.claudeMDSHA256]
+            shouldWrite = known.contains(h)
+            previous = h
         }
         if shouldWrite {
-            try writeAtomically(newData, to: mdURL)
-            let meta = Meta(version: version, claudeMDSHA256: sha256(newData))
+            let meta = Meta(version: version, previousHash: previous, currentHash: sha256(newData), claudeMDSHA256: nil)
             try writeAtomically(try JSONEncoder().encode(meta), to: metaURL)
+            try writeAtomically(newData, to: mdURL)
         }
         return root
     }
