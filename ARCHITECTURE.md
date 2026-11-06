@@ -136,7 +136,11 @@ Auto/                         # repo root
 │   │   ├── AutoApp.swift     #   @main; placeholder Settings scene (Cmd-comma goes to AppDelegate)
 │   │   ├── AppDelegate.swift #   NSStatusItem (left click: window, right click: menu); main window (Settings is a tab)
 │   │   ├── AppTab.swift      #   sidebar tabs + light/dark AppearanceMode
-│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage, browser membership, mirrors, ingest fan-out, copy queue, sync scheduler, Sync Now)
+│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage, manual import, browser membership, mirrors, ingest fan-out, copy queue, sync scheduler, Sync Now)
+│   │   ├── AppModel+Import.swift #   manual import scheduling: fan-out to every online copy, pendingSync, queued with card ingests, cull lock
+│   │   ├── AppModel+AddFiles.swift #   Add Files sheet and Finder drop entry points
+│   │   ├── ImportJob.swift   #   manual import job (its own job, not a pseudo-card)
+│   │   ├── ImportStaging.swift #   staged import (sources, duplicates) before commitImport
 │   │   ├── ShootItem.swift   #   ShootItem (registry record + availability, summary, thumbnail); ShootSheetRequest
 │   │   ├── ShootCoverageState.swift # CoverageKey (shoot, card) and CoverageState per pair
 │   │   ├── ShootSyncState.swift # ShootSyncState (per-shoot check/sync state), SyncBadge (green/yellow/grey), SyncMetaStore (sync-meta.json)
@@ -154,9 +158,12 @@ Auto/                         # repo root
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
 │   │   ├── CardRow.swift     #   per-card header, phase content and actions, Add to Shoot menu, per-camera day chips; static StatusDot
 │   │   ├── CardBrowserView.swift # read-only Finder-style card browser (icons/list, locations sidebar); opened by clicking a card
+│   │   ├── ImportProgressRow.swift # one import job's progress row
 │   │   ├── DayChip.swift     #   recording-day chip, shared by CardRow and the New Shoot sheet
+│   │   ├── ShootBrowserView.swift #   shoot browser: grid/list, breadcrumb, Quick Look, Finder drops
 │   │   ├── NewShootView.swift#   sheet: create mode (name, date, location) or add-footage mode
 │   │   ├── AddFootageSheet.swift #   add a card's footage to a shoot: card picker, completeness banner, Add N files
+│   │   ├── AddFilesSheet.swift #   add files or folders to a shoot: camera sort, duplicates, staging
 │   │   └── SettingsView.swift#   Settings tab; "Soon" rows persist values nothing reads yet
 │   ├── Core/                 # pure, testable engines, no SwiftUI
 │   │   ├── VolumeWatcher.swift     #   NSWorkspace mount notifications, refresh off main
@@ -178,6 +185,10 @@ Auto/                         # repo root
 │   │   ├── ShootCoverage.swift     #   checksum coverage of a card's day inside a shoot folder (cancellable, off main)
 │   │   ├── ShootMembership.swift   #   per-shoot verified copies for the card browser (sequential, read-only, excludes nested shoots, never reports partial results)
 │   │   ├── CardBrowser.swift #   groups card files: Not Backed Up / one group per shoot holding a verified copy / Backed Up Elsewhere
+│   │   ├── ShootBrowser.swift      #   shoot browser core (see docs/plans/shoot-files.md)
+│   │   ├── ImportPlanner.swift     #   manual import copy plan, reusing ShootPlanner
+│   │   ├── ImportScanner.swift     #   expands sources, detects camera, refuses in-shoot and reserved sources
+│   │   ├── ImportDuplicates.swift  #   import duplicates by checksum, anywhere in the primary copy (incl. _Rejects)
 │   │   ├── GridSelection.swift     #   Finder-style selection and arrow/Home/End navigation over sectioned grids (pure model, no AppKit)
 │   │   ├── ShootSummary.swift      #   shoot counts + representative file
 │   │   ├── IngestDuplicates.swift  #   card files already verified elsewhere (name + size + MD5), by place; nothing hashes here
@@ -312,6 +323,22 @@ Sync Now acts only on a complete `.checksums` report with nothing "not checked".
 ### Duplicate detection
 
 `BackupVerifier` already decides which card files have a checksum-identical copy somewhere, by name and size, then MD5. `IngestDuplicates` groups those verified files by where the copy lives (a shoot, or a plain folder on a drive) for the Add Footage block. Duplicates are left out of the plan by default. "Copy duplicates anyway" includes them. The card browser asks before copying duplicates ("Copy Anyway"). Renamed files are not detected.
+
+### Manual import
+
+Manual import adds footage that is not on a card, from the Add Files sheet or a Finder drop on the shoot browser. It is its own `ImportJob`, not a pseudo-card, and it reuses `ShootPlanner`, `CopyEngine`, `ShootCoverageChecker` and the ingest scheduling hooks.
+
+1. **Sources:** the picker or a drop supplies files and folders.
+2. **Scan:** `ImportScanner` expands folders, detects the camera, and refuses sources inside the shoot or in reserved folders.
+3. **Duplicates:** `ImportDuplicates` matches by checksum anywhere in the primary copy, including `_Rejects`.
+4. **Staging:** the staging sheet shows the plan. Nothing is copied yet.
+5. **Commit:** `commitImport` queues the job with card ingests, sharing their scheduling and the app-wide cull lock.
+6. **Preflight:** re-checks duplicates and changed files, and checks each destination per copy.
+7. **Copy:** `CopyEngine` writes to every online copy.
+8. **Offline copies:** a copy that is offline or missed a write is marked `pendingSync`.
+9. **Verify:** coverage and the sync check re-run for the shoot.
+
+Details: [docs/plans/shoot-files.md](docs/plans/shoot-files.md).
 
 ### Photo cull
 
