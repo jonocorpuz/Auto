@@ -156,7 +156,8 @@ private struct CreateShootSheet: View {
                     .help(dest.url?.path ?? "")
                 Spacer()
                 Button("Choose…") {
-                    if let url = model.chooseShootParent() { setURL(url, at: dest.id) }
+                    let url = index == 0 ? model.chooseShootParent() : model.chooseMirrorParent()
+                    if let url { setURL(url, at: dest.id) }
                 }
                 .buttonStyle(.bordered).controlSize(.small)
                 .disabled(working || finished)

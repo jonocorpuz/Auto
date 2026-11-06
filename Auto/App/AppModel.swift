@@ -1480,6 +1480,15 @@ extension AppModel {
     }
 
     func chooseShootParent() -> URL? {
+        guard let url = chooseParentFolder() else { return nil }
+        defaults.set(url.path, forKey: Keys.lastParent)
+        return url
+    }
+
+    /// Same panel, but doesn't remember the choice (mirror drives aren't the default parent).
+    func chooseMirrorParent() -> URL? { chooseParentFolder() }
+
+    private func chooseParentFolder() -> URL? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -1489,7 +1498,6 @@ extension AppModel {
         panel.directoryURL = defaultShootParent
         NSApp.activate()
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        defaults.set(url.path, forKey: Keys.lastParent)
         return url
     }
 
