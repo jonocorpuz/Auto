@@ -43,8 +43,10 @@ final class AppModel {
     private(set) var registry = ShootRegistry()
     /// Add Files runs (queued, copying and finished), oldest first. Driven by `AppModel+Import`.
     var imports: [ImportJob] = []
-    /// Shoot open in the Media tab's file browser; nil shows the overview.
-    var browsingShootID: UUID?
+    /// Shoot open in the Media tab's file browser. Mutually exclusive with `browsingCardID`.
+    var browsingShootID: UUID? {
+        didSet { if browsingShootID != nil, browsingCardID != nil { browsingCardID = nil } }
+    }
     private(set) var indexing = false
     /// Per (shoot, card) coverage checks for the Add Footage sheet.
     private(set) var coverage: [CoverageKey: CoverageState] = [:]
@@ -88,6 +90,7 @@ final class AppModel {
     var browsingCardID: Card.ID? {
         didSet {
             guard browsingCardID != oldValue else { return }
+            if browsingCardID != nil, browsingShootID != nil { browsingShootID = nil }
             fileThumbnails.removeAll()
             missingThumbnails.removeAll()
             browserCache = nil
