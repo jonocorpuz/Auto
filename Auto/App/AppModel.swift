@@ -1049,10 +1049,21 @@ final class AppModel {
         cards.first { $0.engine != nil && addTargets[$0.id] == shootID }
     }
 
-    /// A card is copying into, or queued to copy into, `shootID`: its copies can't be removed or moved.
+    /// A card is copying into, or queued to copy into, `shootID`, or Sync Now is running for it: its copies can't be
+    /// removed or moved.
     private func hasActiveCopy(into shootID: UUID) -> Bool {
-        syncActive.contains(shootID)
-            || cards.contains { ($0.engine != nil || $0.queuedBehind != nil) && ($0.plan?.shootID == shootID || addTargets[$0.id] == shootID) }
+        syncActive.contains(shootID) || hasActiveIngest(into: shootID)
+    }
+
+    private func hasActiveIngest(into shootID: UUID) -> Bool {
+        cards.contains { ($0.engine != nil || $0.queuedBehind != nil) && ($0.plan?.shootID == shootID || addTargets[$0.id] == shootID) }
+    }
+
+    /// Why the copies of `shootID` can't be removed or moved right now (nil: they can).
+    private func copyOpBlock(for shootID: UUID) -> Error? {
+        if hasActiveIngest(into: shootID) { return ShootBusyError() }
+        if syncActive.contains(shootID) { return SyncBusyError() }
+        return nil
     }
 
     /// Whether another card's verdict can change because files with `copiedKeys` (name+size) just landed:
@@ -1708,7 +1719,7 @@ extension AppModel {
         // Dry run on a copy: unknown copy or already-registered folder is reported before any disk checks.
         var trial = registry
         do { try trial.relocate(id: shootID, from: path, to: folder.standardizedFileURL.path) } catch { throw mapRegistryError(error) }
-        if hasActiveCopy(into: shootID) { throw ShootBusyError() }
+        if let busy = copyOpBlock(for: shootID) { throw busy }
         let fromKey = URL(fileURLWithPath: path).standardizedFileURL.path
         let others = item.copies.filter { $0.availability == .online && $0.path != path }.map { URL(fileURLWithPath: $0.path, isDirectory: true) }
         let registered = registry.records.flatMap(\.copyPaths).filter { URL(fileURLWithPath: $0).standardizedFileURL.path != fromKey }
@@ -1729,7 +1740,7 @@ extension AppModel {
         if clash { throw ShootError.sameVolumeAsCopy }
         var again = registry
         do { try again.relocate(id: shootID, from: path, to: folder.standardizedFileURL.path) } catch { throw mapRegistryError(error) }
-        if hasActiveCopy(into: shootID) { throw ShootBusyError() }
+        if let busy = copyOpBlock(for: shootID) { throw busy }
         if isEffectivePrimary(shootID, path: path) {
             // The folder Auto reads from is moving: coverage aimed at it is stale.
             cancelCoverage { $0.shootID == shootID }
@@ -1754,7 +1765,7 @@ extension AppModel {
         defer { copyOpsInFlight.remove(shootID) }
         var trial = registry
         do { try trial.removeCopy(id: shootID, path: path) } catch { throw mapRegistryError(error) }
-        if hasActiveCopy(into: shootID) { throw ShootBusyError() }
+        if let busy = copyOpBlock(for: shootID) { throw busy }
         if isEffectivePrimary(shootID, path: path) { cancelCoverage { $0.shootID == shootID } }
         // Idle plans carry this copy as a root: drop them (the user plans again).
         discardAddPlans(forShoot: shootID)
@@ -1876,6 +1887,10 @@ extension AppModel {
 
     struct ShootBusyError: LocalizedError {
         var errorDescription: String? { "Another card is copying into this shoot. Try again when it finishes." }
+    }
+
+    struct SyncBusyError: LocalizedError {
+        var errorDescription: String? { "Sync Now is running for this shoot. Try again when it finishes." }
     }
 
     /// Every shoot with all of its copy roots (primary plus mirrors).

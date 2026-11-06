@@ -550,9 +550,9 @@ struct SyncNowTests {
         let volC = env.volC
         env.model._testAfterSyncPrepare = { id in
             do { try await env.model.removeCopy(shootID: id, path: s.b.path); Issue.record("remove should be refused") }
-            catch is AppModel.ShootBusyError { refused += 1 } catch { Issue.record("unexpected \(error)") }
+            catch is AppModel.SyncBusyError { refused += 1 } catch { Issue.record("unexpected \(error)") }
             do { try await env.model.relocateCopy(shootID: id, from: s.b.path, to: volC); Issue.record("relocate should be refused") }
-            catch is AppModel.ShootBusyError { refused += 1 } catch { Issue.record("unexpected \(error)") }
+            catch is AppModel.SyncBusyError { refused += 1 } catch { Issue.record("unexpected \(error)") }
         }
         #expect(env.model.syncNow(shootID: s.id))
         await env.model._testSyncIdle()
