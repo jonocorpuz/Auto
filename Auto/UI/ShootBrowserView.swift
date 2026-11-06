@@ -18,6 +18,19 @@ struct ShootBrowserView: View {
     @AppStorage("shootBrowserMode") private var mode: Mode = .icons
     @AppStorage("shootBrowserIconSize") private var iconSize: Double = 110
     @State private var staging: ImportStaging?
+    @State private var dropHover: URL?
+    @State private var backgroundTargeted = false
+    @State private var pendingDrop: PendingDrop?
+    @State private var dropError: String?
+
+    /// A Finder drop into an exact folder, staged and waiting for the user's confirmation.
+    private struct PendingDrop: Identifiable {
+        let id = UUID()
+        let staging: ImportStaging
+        let label: String
+        let count: Int
+        let skipped: Int
+    }
 
     private static let gridSpacing = 6.0
 
@@ -75,6 +88,26 @@ struct ShootBrowserView: View {
         .sheet(item: $staging) { staging in
             AddFilesSheet(staging: staging)
         }
+        .dropDestination(for: URL.self) { urls, _ in
+            handleDrop(urls, into: folder ?? root)
+        } isTargeted: { backgroundTargeted = $0 }
+        .overlay {
+            if backgroundTargeted && dropHover == nil {
+                RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.accent, lineWidth: 2).padding(2).allowsHitTesting(false)
+            }
+        }
+        .confirmationDialog(confirmTitle, isPresented: confirmBinding, presenting: pendingDrop) { drop in
+            Button("Copy") {
+                do { try model.commitImport(drop.staging) } catch { dropError = error.localizedDescription }
+                pendingDrop = nil
+            }
+            Button("Cancel", role: .cancel) { drop.staging.cancel(); pendingDrop = nil }
+        } message: { drop in
+            Text(drop.skipped > 0 ? "\(Format.count(drop.skipped, "file", "files")) already in this shoot will be skipped." : "Files are copied; the originals are not touched.")
+        }
+        .alert("Couldn't add files", isPresented: Binding(get: { dropError != nil }, set: { if !$0 { dropError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(dropError ?? "") }
         // Esc clears the selection, then goes up a folder, then back to the shoots grid.
         .background {
             Button("") {
@@ -99,6 +132,56 @@ struct ShootBrowserView: View {
             .opacity(0)
             .accessibilityHidden(true)
         }
+    }
+
+    // MARK: Dropping
+
+    private var confirmTitle: String {
+        guard let drop = pendingDrop else { return "" }
+        return "Copy \(Format.count(drop.count, "file", "files")) into \(drop.label)?"
+    }
+
+    private var confirmBinding: Binding<Bool> {
+        Binding(get: { pendingDrop != nil },
+                set: { if !$0, let drop = pendingDrop { drop.staging.cancel(); pendingDrop = nil } })
+    }
+
+    /// Finder drops are copies only. Top level, Video and Photo open the Add Files sheet pre-staged; any
+    /// other folder is staged, then confirmed with a dialog before anything is copied.
+    private func handleDrop(_ urls: [URL], into target: URL?) -> Bool {
+        let files = urls.filter(\.isFileURL)
+        guard !files.isEmpty, let root, pendingDrop == nil else { return false }
+        let dest = target ?? root
+        switch ShootBrowser.dropTarget(for: dest, root: root) {
+        case .sorted:
+            model.addFiles(to: item.id, urls: files, target: .sorted)
+        case .exact(let exact):
+            let staged = model.beginImport(shootID: item.id, urls: files, target: .exact(exact))
+            let label = (ShootPlanner.relativeComponents(exact, to: root) ?? []).joined(separator: "/")
+            Task {
+                while true {
+                    switch staged.phase {
+                    case .ready:
+                        if staged.selected.isEmpty {
+                            dropError = staged.items.isEmpty ? "There was nothing to copy in what you dropped."
+                                : "Everything you dropped is already in this shoot."
+                            staged.cancel()
+                        } else {
+                            pendingDrop = PendingDrop(staging: staged, label: label.isEmpty ? item.record.name : label,
+                                                      count: staged.selected.count, skipped: staged.skippedDuplicateCount)
+                        }
+                        return
+                    case .failed(let message):
+                        dropError = message
+                        return
+                    default:
+                        try? await Task.sleep(for: .milliseconds(100))
+                        if Task.isCancelled { staged.cancel(); return }
+                    }
+                }
+            }
+        }
+        return true
     }
 
     // MARK: Loading
@@ -261,6 +344,7 @@ struct ShootBrowserView: View {
                                 activate(entry)
                             })
                             .contextMenu { entryMenu(targets(for: entry)) }
+                            .modifier(FolderDrop(entry: entry, hover: $dropHover, highlight: true) { handleDrop($0, into: entry.url) })
                     }
                 }
                 .onGeometryChange(for: Double.self) { $0.size.width } action: { gridWidth = $0 }
@@ -328,7 +412,10 @@ struct ShootBrowserView: View {
                 HStack(spacing: 6) {
                     Image(systemName: Self.symbol(entry)).foregroundStyle(.secondary).frame(width: 16)
                     Text(entry.name)
+                    Spacer(minLength: 0)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .modifier(FolderDrop(entry: entry, hover: $dropHover, highlight: true) { handleDrop($0, into: entry.url) })
             }
             .width(min: 140, ideal: 240)
             TableColumn("Date Modified") { entry in
@@ -405,6 +492,28 @@ struct ShootBrowserView: View {
         case nil: "Document"
         }
         return ext.isEmpty ? kind : "\(ext) \(kind)"
+    }
+}
+
+/// Makes a folder cell a drop target for Finder files, highlighted while a drag is over it.
+private struct FolderDrop: ViewModifier {
+    let entry: ShootEntry
+    @Binding var hover: URL?
+    let highlight: Bool
+    let drop: ([URL]) -> Bool
+    @State private var targeted = false
+
+    func body(content: Content) -> some View {
+        if entry.isFolder {
+            content
+                .background(targeted ? Theme.accent.opacity(0.25) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .dropDestination(for: URL.self) { urls, _ in drop(urls) } isTargeted: {
+                    targeted = $0
+                    if $0 { hover = entry.url } else if hover == entry.url { hover = nil }
+                }
+        } else {
+            content
+        }
     }
 }
 
