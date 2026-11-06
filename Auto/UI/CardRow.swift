@@ -10,6 +10,7 @@ struct CardRow: View {
             header
             if !card.cameras.isEmpty { cameraList }
             phaseContent
+            notes
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -126,6 +127,23 @@ struct CardRow: View {
         }
     }
 
+    // MARK: Notes
+
+    @ViewBuilder private var notes: some View {
+        if let queueNote = card.queueNote {
+            Label(queueNote, systemImage: "clock")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let mirrorNote = card.mirrorNote {
+            Label(mirrorNote, systemImage: "externaldrive.badge.exclamationmark")
+                .font(.callout).foregroundStyle(Theme.warning)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var isQueued: Bool { card.queuedBehind != nil }
+
     // MARK: Add to shoot
 
     private var onlineShoots: [ShootItem] {
@@ -221,8 +239,12 @@ struct CardRow: View {
                     Button("Show in Finder") { model.openInFinder(card) }
                     addToShoot
                     Spacer()
-                    Button("Copy") { model.copy(card) }
+                    if isQueued {
+                        Button("Stop") { model.stop(card) }
+                    }
+                    Button(isQueued ? "Queued" : "Copy") { model.copy(card) }
                         .buttonStyle(.borderedProminent)
+                        .disabled(isQueued)
                 }
             }
 
@@ -290,6 +312,10 @@ struct CardRow: View {
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red).font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
+            Text(card.plan != nil
+                 ? "Nothing on the card was changed. Retry copies the files that didn't verify. Don't format."
+                 : "Nothing on the card was changed. Don't format until it's backed up.")
+                .font(.caption).foregroundStyle(.secondary)
             HStack {
                 if card.plan != nil { Button("Discard") { model.discardPlan(card) } }
                 Button("Show in Finder") { model.openInFinder(card) }
@@ -298,6 +324,7 @@ struct CardRow: View {
                 Button("Choose folder…") { model.chooseFolder(for: card) }
                 Button("Retry") { model.retry(card) }
                     .buttonStyle(.borderedProminent)
+                    .disabled(isQueued)
             }
         }
     }
