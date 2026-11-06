@@ -807,6 +807,35 @@ extension MirrorShootsTests {
         #expect(card.missing.count == 2)
     }
 
+    @Test func blockedFileIsNeverRecordedAsVerifiedNorPrunedOnRetry() async throws {
+        let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
+        let (shoot, mirror) = try await twoCopyShoot(env)
+        let card = try ingestCard(env, "CARD", [("A.MP4", 1), ("B.MP4", 2)])
+        try await plan(env, card, into: shoot)
+        // Corrupt only the mirror's partials: the primary copy verifies, the mirror fails its checksum.
+        let dir = mirror.appendingPathComponent("Video/CARD", isDirectory: true)
+        env.model._testEngineHook = { engine in
+            engine.onChunkWritten = { _ in
+                for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".auto-partial") {
+                    if let handle = try? FileHandle(forWritingTo: dir.appendingPathComponent(name)) {
+                        try? handle.write(contentsOf: Data([0xFF]))
+                        try? handle.close()
+                    }
+                }
+            }
+        }
+        env.model.copy(card)
+        try await waitUntil { settled(card) }
+        if case .failed = card.phase {} else { Issue.record("expected failed, got \(card.phase)") }
+        #expect(card.plan?.jobs.isEmpty == false)
+        // Blocked files must not be remembered as verified copies, so no later recompute can lean on them.
+        #expect(env.model._testSessionCopyDestinations.isEmpty)
+        env.model.discardPlan(card)
+        try await Task.sleep(for: .milliseconds(300))
+        try await waitUntil { settled(card) && card.phase != .verifying }
+        #expect(env.model._testSessionCopyDestinations.isEmpty)
+    }
+
     @Test func cardQueuedBehindAFailingCardIsReleased() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
         let sc = try await queueScenario(env)
