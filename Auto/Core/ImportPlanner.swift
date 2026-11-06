@@ -43,10 +43,36 @@ nonisolated enum ImportPlanner {
                 return .insideShoot(name)
             }
         }
+        // Case differences and firmlink spellings (/System/Volumes/Data/...) defeat a path comparison, so also
+        // compare on-disk identity: any ancestor of the source that is a shoot copy means it is inside.
+        let rootIDs = shootRoots.compactMap { identity(of: $0) }
+        if !rootIDs.isEmpty {
+            for start in [resolvedSource, source] {
+                var probe = start
+                while true {
+                    if let id = identity(of: probe), rootIDs.contains(where: { $0.matches(id) }) { return .insideShoot(name) }
+                    let parent = probe.deletingLastPathComponent()
+                    if parent.path == probe.path || probe.path == "/" { break }
+                    probe = parent
+                }
+            }
+        }
         let components = Set(ShootPlanner.lexicalComponents(source).map { $0.lowercased() })
             .union(ShootPlanner.lexicalComponents(resolvedSource).map { $0.lowercased() })
         if !components.isDisjoint(with: reserved) { return .inReservedFolder(name) }
         return nil
+    }
+
+    private struct DiskIdentity {
+        let file: any NSObjectProtocol
+        let volume: any NSObjectProtocol
+        func matches(_ other: DiskIdentity) -> Bool { file.isEqual(other.file) && volume.isEqual(other.volume) }
+    }
+
+    private static func identity(of url: URL) -> DiskIdentity? {
+        guard let values = try? url.resourceValues(forKeys: [.fileResourceIdentifierKey, .volumeIdentifierKey]),
+              let file = values.fileResourceIdentifier, let volume = values.volumeIdentifier else { return nil }
+        return DiskIdentity(file: file, volume: volume)
     }
 
     /// Camera folder names already in the shoot: "Video" / "Photo" -> folder names.

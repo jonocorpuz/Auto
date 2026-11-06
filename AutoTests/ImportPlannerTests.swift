@@ -33,6 +33,19 @@ struct ImportPlannerTests {
         #expect(ImportPlanner.refusal(for: other, shootRoots: [shoot]) == nil)
     }
 
+    @Test func differentlyCasedPathIntoTheShootIsRefused() throws {
+        let base = try tempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let shoot = base.appendingPathComponent("Shoot")
+        try make(shoot.appendingPathComponent("Video"))
+        try Data("x".utf8).write(to: shoot.appendingPathComponent("Video/clip.mov"))
+        let cased = base.appendingPathComponent("SHOOT/video/clip.mov")
+        // Only meaningful on a case-insensitive volume (the default).
+        guard FileManager.default.fileExists(atPath: cased.path) else { return }
+        #expect(ImportPlanner.refusal(for: cased, shootRoots: [shoot]) == .insideShoot("clip.mov"))
+        #expect(ImportPlanner.refusal(for: base.appendingPathComponent("SHOOT"), shootRoots: [shoot]) == .insideShoot("SHOOT"))
+    }
+
     @Test func sourceInsideAnyCopyIsRefused() throws {
         let base = try tempDir()
         defer { try? FileManager.default.removeItem(at: base) }
