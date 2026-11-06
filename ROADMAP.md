@@ -107,6 +107,20 @@ A shoot can have mirror copies on other drives. Copies are checked and synced on
 - [x] CardRow shows an "already backed up" count, a queue note and a mirror note; Add Footage shows copy and mirror notices
 - [x] Card browser asks before copying duplicates ("Copy Anyway")
 
+### Verify on screen (developer, remote; nothing here has been seen in a running app yet)
+
+Launch the app and tick each item. Build and tests are green; these are the UI checks still open.
+
+- [ ] New Shoot destinations list: add and remove rows, collision line per row, primary first
+- [ ] Shoot tile badge: green, yellow and grey each render; hover shows the tooltip (copies, checked time, "Contents fully verified" line)
+- [ ] Shoot popover: Check Again, ⌥ Check Again (deep), Verify Contents, Sync Now, Stop
+- [ ] Shoot tile "Copies" context submenu: lists every copy, Locate…, remove copy
+- [ ] Add Footage duplicates block; "Copy duplicates anyway" toggles what gets copied
+- [ ] Add Footage copy and mirror notices
+- [ ] CardRow: "already backed up" count, queue note ("Queued" button), mirror note
+- [ ] Card browser duplicate confirmation ("Copy Anyway") before copying
+- [ ] Dual-card scenario with two real cards into one shoot with a mirror: no double copies, second card queues behind the first
+
 ## Phase 3: Editing pipeline
 
 - [ ] `PipelineStep` protocol + `Pipeline` runner (ordered, per-step result, re-runnable, cancellable)
