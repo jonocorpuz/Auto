@@ -109,7 +109,7 @@ A shoot can have mirror copies on other drives. Copies are checked and synced on
 
 ### Verify on screen (developer, remote; nothing here has been seen in a running app yet)
 
-Launch the app and tick each item. Build and tests are green; these are the UI checks still open.
+Launch the app and tick each item. These are the UI checks still open.
 
 - [ ] New Shoot destinations list: add and remove rows, collision line per row, primary first
 - [ ] Shoot tile badge: green, yellow and grey each render; hover shows the tooltip (copies, checked time, "Contents fully verified" line)
