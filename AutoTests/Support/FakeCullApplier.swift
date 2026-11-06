@@ -9,6 +9,7 @@ nonisolated final class FakeCullApplier: CullApplying, @unchecked Sendable {
     private var _reverts: [UUID] = []
     private var _applyStarted = false
     private var _revertWasCancelled: [Bool] = []
+    private var _applyOnMain: [Bool] = []
     private let waitForCancelInApply: Bool
     private let applyError: Error?
 
@@ -19,11 +20,13 @@ nonisolated final class FakeCullApplier: CullApplying, @unchecked Sendable {
 
     var plans: [CullPlan] { lock.withLock { _plans } }
     var reverts: [UUID] { lock.withLock { _reverts } }
+    /// `Thread.isMainThread` at each `apply` call.
+    var applyOnMainThread: [Bool] { lock.withLock { _applyOnMain } }
     var applyStarted: Bool { lock.withLock { _applyStarted } }
     var revertWasCancelled: [Bool] { lock.withLock { _revertWasCancelled } }
 
     func apply(_ plan: CullPlan, copies: [URL], cardVolumes: [URL], onMoved: @escaping @Sendable (Int, Int) -> Void) throws -> Int {
-        lock.withLock { _plans.append(plan); _applyStarted = true }
+        lock.withLock { _plans.append(plan); _applyStarted = true; _applyOnMain.append(Thread.isMainThread) }
         if let applyError { throw applyError }
         if waitForCancelInApply {
             let deadline = Date().addingTimeInterval(10)

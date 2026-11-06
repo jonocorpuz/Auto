@@ -28,7 +28,7 @@ nonisolated struct CullRunner: Sendable {
         cardVolumes: [URL],
         settings rawSettings: CullSettings,
         gate: @escaping @Sendable () async -> Void,
-        withApplyLock: @escaping @Sendable (@Sendable () async throws -> Void) async throws -> Void,
+        withApplyLock: @escaping @Sendable (@concurrent @Sendable () async throws -> Void) async throws -> Void,
         onProgress: @escaping @MainActor @Sendable (CullProgress) -> Void
     ) async -> CullOutcome {
         // Progress flows through a stream consumed on the main actor and awaited before returning.
@@ -51,7 +51,7 @@ nonisolated struct CullRunner: Sendable {
         cardVolumes: [URL],
         settings: CullSettings,
         gate: @escaping @Sendable () async -> Void,
-        withApplyLock: @escaping @Sendable (@Sendable () async throws -> Void) async throws -> Void,
+        withApplyLock: @escaping @Sendable (@concurrent @Sendable () async throws -> Void) async throws -> Void,
         tracker: ProgressTracker
     ) async -> CullOutcome {
         guard let primary = copies.first else { return .failed(.noCopiesOnline, nil) }
