@@ -202,8 +202,6 @@ final class AppModel {
     @ObservationIgnored private var membershipTask: Task<Void, Never>?
     @ObservationIgnored private var membershipGeneration = 0
     @ObservationIgnored private var membershipInputs: MembershipInputs?
-    /// Cards whose recompute (stat-triage Task) is in flight: the verdict isn't settled yet even though
-    /// `verifier` is nil.
     #if DEBUG
     @ObservationIgnored var _testEngineHook: ((CopyEngine) -> Void)?
     var _testSessionCopyDestinations: [URL] { sessionCopies.map(\.destination) }
@@ -213,6 +211,8 @@ final class AppModel {
     @ObservationIgnored var _testSyncEngineHook: ((CopyEngine) -> Void)?
     @ObservationIgnored fileprivate var _testMembershipRunner: MembershipRunner?
     #endif
+    /// Cards whose recompute (stat-triage Task) is in flight: the verdict isn't settled yet even though
+    /// `verifier` is nil.
     @ObservationIgnored private var recomputePending: Set<Card.ID> = []
     /// The card whose browser is on screen (nil: none). Membership only runs while it is the browsed card.
     @ObservationIgnored private var browserOnScreen: Card.ID?
@@ -225,10 +225,10 @@ final class AppModel {
     @ObservationIgnored private var recomputeAfterAdd: Set<Card.ID> = []
     /// Online shoot folders the current backup verification considered (to detect changes).
     @ObservationIgnored private var backupShootFolders: Set<String> = []
-    /// Runtime mount identity of the volume holding a URL (nil: unknown). Injectable so tests can fake
-    /// distinct drives; every mirror / same-volume decision goes through it.
     /// Shoots with a mirror operation (add / relocate / remove copy) in flight; one at a time per shoot.
     @ObservationIgnored private var copyOpsInFlight: Set<UUID> = []
+    /// Runtime mount identity of the volume holding a URL (nil: unknown). Injectable so tests can fake
+    /// distinct drives; every mirror / same-volume decision goes through it.
     @ObservationIgnored var volumeIDProvider: @Sendable (URL) -> String? = ShootStore.realVolumeID(of:)
     /// MD5 cache (`checksums.json` next to the registry). Seeded by every verified copy so a later sync check is all hits.
     @ObservationIgnored let checksums: ChecksumStore
