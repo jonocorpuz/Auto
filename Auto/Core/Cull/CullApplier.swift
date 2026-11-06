@@ -31,7 +31,7 @@ nonisolated enum CullApplier {
         return parts.joined(separator: "/")
     }
 
-    private struct Info {
+    struct Info {
         let dev: dev_t
         let ino: ino_t
         let size: Int64
@@ -39,21 +39,21 @@ nonisolated enum CullApplier {
         let mode: mode_t
     }
 
-    private static func statAt(_ dir: Int32, _ name: String) -> Info? {
+    static func statAt(_ dir: Int32, _ name: String) -> Info? {
         var st = stat()
         guard fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else { return nil }
         let t = Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9
         return Info(dev: st.st_dev, ino: st.st_ino, size: Int64(st.st_size), mtime: t, mode: st.st_mode)
     }
 
-    private static func isRegular(_ i: Info) -> Bool { (i.mode & S_IFMT) == S_IFREG }
+    static func isRegular(_ i: Info) -> Bool { (i.mode & S_IFMT) == S_IFREG }
 
-    private static let dirFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+    static let dirFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW
 
     /// Walks `parts` from `parent` through real directories only. With `create`, missing folders
     /// are made with mkdirat (EEXIST just re-opens). Returns an owned fd, or nil on any symlink,
     /// non-directory or error.
-    private static func openDir(_ parent: Int32, _ parts: ArraySlice<String>, create: Bool) -> Int32? {
+    static func openDir(_ parent: Int32, _ parts: ArraySlice<String>, create: Bool) -> Int32? {
         var cur = dup(parent)
         guard cur >= 0 else { return nil }
         for p in parts {
@@ -70,7 +70,7 @@ nonisolated enum CullApplier {
     }
 
     /// Components of a shoot-relative path under `Photo/`, or nil if any is unsafe.
-    private static func safeParts(_ rel: String, allowRejects: Bool) -> [String]? {
+    static func safeParts(_ rel: String, allowRejects: Bool) -> [String]? {
         guard !rel.hasPrefix("/") else { return nil }
         let parts = rel.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard parts.count >= 2, parts[0] == "Photo" else { return nil }
@@ -81,17 +81,17 @@ nonisolated enum CullApplier {
         return parts
     }
 
-    private static func openCopy(_ copy: URL) -> Int32? {
+    static func openCopy(_ copy: URL) -> Int32? {
         let fd = open(copy.path, O_RDONLY | O_DIRECTORY)
         return fd >= 0 ? fd : nil
     }
 
-    private enum RenameResult { case success, exists, failed }
+    enum RenameResult { case success, exists, failed }
 
     /// Exclusive rename on dir fds. A volume without RENAME_EXCL (ENOTSUP) fails the move: a
     /// plain `renameat` could replace a file created in the check-to-rename window, and Auto
     /// never overwrites (same policy as CopyEngine).
-    private static func renameExclusive(_ io: CullIO, _ sd: Int32, _ sn: String, _ dd: Int32, _ dn: String) -> RenameResult {
+    static func renameExclusive(_ io: CullIO, _ sd: Int32, _ sn: String, _ dd: Int32, _ dn: String) -> RenameResult {
         if io.renameExclusive(sd, sn, dd, dn) == 0 { return .success }
         switch errno {
         case EEXIST:
@@ -112,7 +112,7 @@ nonisolated enum CullApplier {
         return dir.isEmpty ? name : dir + "/" + name
     }
 
-    private static func checkCopies(_ copies: [URL], cardVolumes: [URL]) throws -> [URL] {
+    static func checkCopies(_ copies: [URL], cardVolumes: [URL]) throws -> [URL] {
         var online: [URL] = []
         for copy in copies {
             var isDir: ObjCBool = false
@@ -485,7 +485,7 @@ nonisolated enum CullApplier {
     }
 
     /// Removes now-empty folders from the file's `_Rejects` location up through `_Rejects` itself.
-    private static func pruneRejects(copy: URL, rel: String) {
+    static func pruneRejects(copy: URL, rel: String) {
         guard let parts = safeParts(rel, allowRejects: true), let idx = parts.firstIndex(of: "_Rejects") else { return }
         var dirParts = Array(parts.dropLast())
         while dirParts.count > idx {
