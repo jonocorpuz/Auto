@@ -143,7 +143,7 @@ struct ClaudeCLIRunnerTests {
         let pidFile = dir.appendingPathComponent("gpid")
         let exe = try script(in: dir, "sleep 60 &\necho $! > '\(pidFile.path)'\nwait")
         await #expect(throws: ClaudeRunnerError.timedOut) {
-            try await ClaudeCLIRunner(executable: exe).run(request(dir, timeout: .seconds(2)))
+            try await ClaudeCLIRunner(executable: exe).run(request(dir, timeout: .seconds(5)))
         }
         let pid = try #require(Int32(String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
         var dead = false
