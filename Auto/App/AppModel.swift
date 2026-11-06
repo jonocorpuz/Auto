@@ -264,6 +264,7 @@ final class AppModel {
     @ObservationIgnored fileprivate var syncActive: Set<UUID> = []
     /// Mount identity of each copy and the time of the last complete check, for the throttle.
     @ObservationIgnored fileprivate var syncMounts: [UUID: [String]] = [:]
+    @ObservationIgnored fileprivate var syncCurrentMounts: [UUID: [String]] = [:]
     @ObservationIgnored fileprivate var syncDoneAt: [UUID: ContinuousClock.Instant] = [:]
     @ObservationIgnored fileprivate var metaSave: Task<Void, Never>?
 
@@ -1305,6 +1306,12 @@ extension AppModel {
 
         let resolved = await ShootStore.resolve(registry.records, calendar: calendar, cardVolumes: cardVolumes(),
                                                 volumeID: volumeIDProvider)
+        // Mounted volume of every copy of each multi-copy shoot: a swapped or remounted drive changes these.
+        let provider = volumeIDProvider
+        let copyPaths = registry.records.filter { $0.copyPaths.count >= 2 }.map { ($0.id, $0.copyPaths) }
+        let mountsByShoot: [UUID: [String]] = await Task.detached {
+            Dictionary(uniqueKeysWithValues: copyPaths.map { ($0.0, Self.mountIDs($0.1, provider)) })
+        }.value
         let availability = resolved.mapValues(\.availability)
         guard generation == shootsGeneration else { return }
         var syncChanged = Set<UUID>()
@@ -1318,7 +1325,8 @@ extension AppModel {
             }
             shoots[i].availability = availability[id]
             shoots[i].copies = resolved[id]?.copies ?? []
-            let signature = shoots[i].copies.map { "\($0.path)|\($0.availability)" }
+            syncCurrentMounts[id] = mountsByShoot[id]
+            let signature = shoots[i].copies.map { "\($0.path)|\($0.availability)" } + (mountsByShoot[id] ?? [])
             if syncSignatures[id] != signature { syncSignatures[id] = signature; syncChanged.insert(id) }
             if case .online? = availability[id] {} else { shoots[i].summary = nil; shoots[i].thumbnail = nil }
         }
@@ -1326,6 +1334,10 @@ extension AppModel {
         syncSignatures = syncSignatures.filter { key, _ in shoots.contains { $0.id == key } }
         var syncForced = Set<UUID>()
         for id in syncChanged {
+            if let checked = syncMounts[id], let now = syncCurrentMounts[id], checked != now {
+                syncForced.insert(id)   // a drive was swapped or remounted under the same path
+                if !syncActive.contains(id) { syncStates[id] = .unknown("A drive was remounted · checking again") }
+            }
             guard let item = shoots.first(where: { $0.id == id }), item.record.copyPaths.count >= 2,
                   item.copies.contains(where: { $0.availability != .online }) else { continue }
             syncForced.insert(id)
@@ -2146,8 +2158,15 @@ extension AppModel {
               shoot.copies.map({ Self.copyKey($0.path) }) == report.copies.map({ Self.copyKey($0.path) }) else {
             return "The copies changed · checking again"
         }
+        if let checked = syncMounts[id], let now = syncCurrentMounts[id], checked != now {
+            return "A drive was remounted · checking again"
+        }
         if isIngesting(into: shoot.copies, shootID: id) { return "Copying footage…" }
         return nil
+    }
+
+    nonisolated static func mountIDs(_ paths: [String], _ provider: @Sendable (URL) -> String?) -> [String] {
+        paths.map { provider(URL(fileURLWithPath: $0, isDirectory: true)) ?? "?" }
     }
 
     /// A card is about to write into these roots: checks of the overlapping shoots are stale, so cancel them.
@@ -2228,6 +2247,7 @@ extension AppModel {
         syncNotes[id] = nil
         syncSignatures[id] = nil
         syncMounts[id] = nil
+        syncCurrentMounts[id] = nil
         syncDoneAt[id] = nil
         syncDeferred.remove(id)
         if lastDeepVerify.removeValue(forKey: id) != nil { persistDeepVerify() }
@@ -2339,7 +2359,8 @@ extension AppModel {
         // the synchronous part below, so the generation captured there cannot miss a bump.
         let provider = volumeIDProvider
         let paths = item.record.copyPaths
-        let mounts = await Task.detached { paths.map { provider(URL(fileURLWithPath: $0, isDirectory: true)) ?? "?" } }.value
+        let mounts = await Task.detached { Self.mountIDs(paths, provider) }.value
+        syncCurrentMounts[id] = mounts
         let (urls, blocked) = checkableCopies(id)
         if let blocked { syncStates[id] = blocked; return }
         if !force, case .done(let last, _)? = syncStates[id], last.notChecked == nil, last.depth == .checksums,
