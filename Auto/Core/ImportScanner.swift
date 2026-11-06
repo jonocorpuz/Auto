@@ -29,11 +29,18 @@ nonisolated enum ImportScanner {
     }
 
     /// Read-only: expands files and folders, never writes or moves anything.
-    @concurrent static func scan(_ roots: [URL], shootRoots: [URL], onProgress: @escaping @Sendable (Int) -> Void) async -> ImportScan {
+    @concurrent static func scan(_ roots: [URL], shootRoots: [URL], onProgress: @escaping @Sendable (Int) -> Void) async throws -> ImportScan {
         var result = ImportScan()
         var candidates: [Candidate] = []
         var seen = Set<String>()
         var count = 0
+        var lastReport = ContinuousClock.now
+        func report(force: Bool = false) {
+            let now = ContinuousClock.now
+            guard force || count % 200 == 0 || now - lastReport >= .milliseconds(100) else { return }
+            lastReport = now
+            onProgress(count)
+        }
 
         func add(_ url: URL, origin: URL, kind: MediaKind, values: URLResourceValues) {
             let key = ShootPlanner.resolvedPath(url).path
@@ -41,7 +48,7 @@ nonisolated enum ImportScanner {
             let date = values.contentModificationDate ?? values.creationDate ?? Date()
             candidates.append(Candidate(url: url, origin: origin, size: Int64(values.fileSize ?? 0), date: date, kind: kind))
             count += 1
-            onProgress(count)
+            report()
         }
 
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey]
@@ -49,6 +56,7 @@ nonisolated enum ImportScanner {
         let fm = FileManager.default
 
         for root in roots {
+            try Task.checkCancellation()
             let top = root.standardizedFileURL
             if let refusal = ImportPlanner.refusal(for: top, shootRoots: shootRoots) {
                 result.refused.append((top, refusal))
@@ -73,6 +81,7 @@ nonisolated enum ImportScanner {
                     continue
                 }
                 while let url = walker.nextObject() as? URL {
+                    try Task.checkCancellation()
                     guard let values = try? url.resourceValues(forKeys: keySet) else {
                         result.ignoredCount += 1
                         continue
@@ -117,9 +126,12 @@ nonisolated enum ImportScanner {
             }
         }
 
+        report(force: true)
+        try Task.checkCancellation()
+
         // Detect the camera per file with bounded concurrency.
         var detected = [Camera?](repeating: nil, count: candidates.count)
-        await withTaskGroup(of: (Int, Camera).self) { group in
+        try await withThrowingTaskGroup(of: (Int, Camera).self) { group in
             var next = 0
             func launch() {
                 guard next < candidates.count else { return }
@@ -129,7 +141,8 @@ nonisolated enum ImportScanner {
                 group.addTask { (index, await CardScanner.detectCamera(c.url, kind: c.kind, fallback: ImportPlanner.fallbackFolder)) }
             }
             for _ in 0..<min(concurrency, candidates.count) { launch() }
-            while let (index, camera) = await group.next() {
+            while let (index, camera) = try await group.next() {
+                try Task.checkCancellation()
                 detected[index] = camera
                 launch()
             }
