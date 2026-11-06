@@ -66,7 +66,7 @@ struct MainView: View {
         case .videoEdit:
             EditPlaceholderView(tab: .videoEdit, message: "Proxies, organizing and DaVinci Resolve project setup will live here.")
         case .photoEdit:
-            EditPlaceholderView(tab: .photoEdit, message: "Culling and photo edits will live here.")
+            PhotoEditView()
         case .settings:
             SettingsView()
         }
