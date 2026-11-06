@@ -15,8 +15,14 @@ nonisolated enum CullWorkspace {
         var claudeMDSHA256: String?  // legacy single-hash format
     }
 
+    /// Concurrent culls share one workspace; the check-then-move in `writeAtomically` and the meta/CLAUDE.md
+    /// read-modify-write must not interleave.
+    private static let prepareLock = NSLock()
+
     @discardableResult
     static func prepare(at root: URL, claudeMD: String, version: Int) throws -> URL {
+        prepareLock.lock()
+        defer { prepareLock.unlock() }
         let fm = FileManager.default
         let claudeDir = root.appendingPathComponent(".claude", isDirectory: true)
         try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true)

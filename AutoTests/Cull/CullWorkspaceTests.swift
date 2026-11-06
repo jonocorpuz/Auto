@@ -77,4 +77,21 @@ struct CullWorkspaceTests {
         CullWorkspace.removeRun(root, runID: id)
         #expect(!FileManager.default.fileExists(atPath: dir.path))
     }
+
+    /// Two culls prepare the shared workspace at once; the check-then-move used to throw "item already exists".
+    @Test func concurrentPrepareNeverThrows() async throws {
+        for _ in 0..<20 {
+            let root = tempRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let failures = await withTaskGroup(of: Bool.self) { tg in
+                for _ in 0..<8 {
+                    tg.addTask { (try? CullWorkspace.prepare(at: root, claudeMD: "rules", version: 1)) == nil }
+                }
+                var n = 0
+                for await failed in tg where failed { n += 1 }
+                return n
+            }
+            #expect(failures == 0)
+        }
+    }
 }
