@@ -1507,8 +1507,9 @@ extension AppModel {
         return shoot
     }
 
-    func classifyShootFolder(parent: URL, name: String) -> ShootFolders.FolderCollision {
-        ShootFolders.classify(parent: parent, name: name)
+    /// Checks the folder off the main actor.
+    func classifyShootFolder(parent: URL, name: String) async -> ShootFolders.FolderCollision {
+        await Task.detached { ShootFolders.classify(parent: parent, name: name) }.value
     }
 
     /// Where new shoot folders go by default: the last chosen parent, else the work folder.

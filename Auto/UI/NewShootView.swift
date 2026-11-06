@@ -33,6 +33,7 @@ private struct CreateShootSheet: View {
     @State private var name = ""
     @State private var date = Date()
     @State private var destinations = [Destination()]
+    @State private var classified: [UUID: Classified] = [:]
     @State private var error: String?
     @State private var finished = false
     @State private var working = false
@@ -40,9 +41,37 @@ private struct CreateShootSheet: View {
 
     private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
 
+    /// The folder check for one row, made off main by the `.task` below and reused across renders.
+    private struct Classified {
+        let url: URL
+        let name: String
+        let result: ShootFolders.FolderCollision
+    }
+
+    /// Re-runs the checks when a row's folder, the set of rows, or the name changes.
+    private struct CollisionKey: Hashable {
+        let urls: [URL?]
+        let name: String
+    }
+
+    private var collisionKey: CollisionKey { CollisionKey(urls: destinations.map(\.url), name: trimmed) }
+
+    /// nil until the check for this row's current folder and name has finished.
     private func collision(_ dest: Destination) -> ShootFolders.FolderCollision? {
-        guard let url = dest.url, !trimmed.isEmpty else { return nil }
-        return model.classifyShootFolder(parent: url, name: trimmed)
+        guard let url = dest.url, !trimmed.isEmpty, let known = classified[dest.id],
+              known.url == url, known.name == trimmed else { return nil }
+        return known.result
+    }
+
+    private func classifyDestinations() async {
+        let name = trimmed
+        guard !name.isEmpty else { classified = [:]; return }
+        for dest in destinations {
+            guard let url = dest.url else { continue }
+            let result = await model.classifyShootFolder(parent: url, name: name)
+            guard !Task.isCancelled else { return }
+            classified[dest.id] = Classified(url: url, name: name, result: result)
+        }
     }
 
     /// Index of the earlier row sharing this row's drive, if any.
@@ -139,6 +168,7 @@ private struct CreateShootSheet: View {
         .padding(24)
         .frame(width: 480)
         .background(Theme.panel)
+        .task(id: collisionKey) { await classifyDestinations() }
         .onAppear {
             if let parent = model.defaultShootParent { setURL(parent, at: destinations[0].id) }
             nameFocused = true
