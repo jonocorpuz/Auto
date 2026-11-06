@@ -378,6 +378,7 @@ final class AppModel {
             card.engine?.cancel(); card.verifier?.cancel()
             cancelCoverage { $0.cardID == card.id }
             addTargets[card.id] = nil
+            includeDuplicatePlans.remove(card.id)
             dequeue(card)
             recomputePending.remove(card.id)
         }
@@ -429,6 +430,8 @@ final class AppModel {
         card.verifier?.cancel()
         card.verifier = nil
         card.plan = nil
+        addTargets[card.id] = nil
+        includeDuplicatePlans.remove(card.id)
         dequeue(card)
         scan(card)
     }
@@ -685,6 +688,7 @@ final class AppModel {
         card.plan = nil
         dequeue(card)
         addTargets[card.id] = nil
+        includeDuplicatePlans.remove(card.id)
         recompute(card)
     }
 
@@ -1935,9 +1939,14 @@ extension AppModel {
     /// Drops pending (not yet running) add-footage plans aimed at `shootID`.
     private func discardAddPlans(forShoot shootID: UUID) {
         for (cardID, target) in addTargets where target == shootID {
-            guard let card = cards.first(where: { $0.id == cardID }) else { addTargets[cardID] = nil; continue }
+            guard let card = cards.first(where: { $0.id == cardID }) else {
+                addTargets[cardID] = nil
+                includeDuplicatePlans.remove(cardID)
+                continue
+            }
             guard card.engine == nil else { continue }
             addTargets[cardID] = nil
+            includeDuplicatePlans.remove(cardID)
             card.plan = nil
             dequeue(card)
             if card.phase == .ready { recompute(card) }
@@ -2252,6 +2261,17 @@ extension AppModel {
     /// Copies what is missing between the copies of a shoot. Only acts on a complete `.checksums` report that
     /// is out of sync; it re-checks first (cache hits) so it never plans from a stale report. Returns whether it was
     /// queued: false while a check is still at the size pass, while syncing, or when nothing is missing.
+    @discardableResult
+    /// Whether Sync Now can be offered for `shootID`: a finished checksum check found files missing and every
+    /// copy is online. Shared by the popover and the shoot tile's menu.
+    func canSyncNow(shootID: UUID) -> Bool {
+        guard let item = shoots.first(where: { $0.id == shootID }),
+              !item.copies.isEmpty, item.copies.allSatisfy({ $0.availability == .online }) else { return false }
+        guard case .outOfSync(let missing, _) = syncBadge(for: shootID), missing > 0 else { return false }
+        guard case .done(let report, _)? = syncStates[shootID] else { return false }
+        return report.depth == .checksums && report.notChecked == nil
+    }
+
     @discardableResult
     func syncNow(shootID: UUID) -> Bool {
         guard case .done(let report, _)? = syncStates[shootID], report.notChecked == nil, report.depth == .checksums,
