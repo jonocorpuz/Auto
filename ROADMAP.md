@@ -108,7 +108,7 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 
 - [ ] Notifications on completion / failure
 - [ ] Ingest history + resumable index
-- [ ] Optional second backup destination
+- [x] Optional second backup destination (shipped as shoot mirrors, see Phase 2b)
 - [ ] Launch at login
 - [ ] App icon
 - [ ] Developer ID signing + notarization; release build script
