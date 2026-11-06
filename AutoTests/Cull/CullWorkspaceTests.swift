@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import Auto
@@ -41,6 +42,30 @@ struct CullWorkspaceTests {
         try "my edits".write(to: root.appendingPathComponent("CLAUDE.md"), atomically: true, encoding: .utf8)
         try CullWorkspace.prepare(at: root, claudeMD: "v2", version: 2)
         #expect(try String(contentsOf: root.appendingPathComponent("CLAUDE.md"), encoding: .utf8) == "my edits")
+    }
+
+    private func hash(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    @Test func crashAfterMetaBeforeClaudeMDStillRewrites() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try CullWorkspace.prepare(at: root, claudeMD: "v1", version: 1)
+        // Simulate a crash: meta already records v2, file still holds v1.
+        let meta = #"{"version":2,"previousHash":"\#(hash("v1"))","currentHash":"\#(hash("v2"))"}"#
+        try meta.write(to: root.appendingPathComponent(".auto-workspace.json"), atomically: true, encoding: .utf8)
+        try CullWorkspace.prepare(at: root, claudeMD: "v2", version: 2)
+        #expect(try String(contentsOf: root.appendingPathComponent("CLAUDE.md"), encoding: .utf8) == "v2")
+    }
+
+    @Test func missingMetaKeepsExistingClaudeMD() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try CullWorkspace.prepare(at: root, claudeMD: "v1", version: 1)
+        try FileManager.default.removeItem(at: root.appendingPathComponent(".auto-workspace.json"))
+        try CullWorkspace.prepare(at: root, claudeMD: "v2", version: 2)
+        #expect(try String(contentsOf: root.appendingPathComponent("CLAUDE.md"), encoding: .utf8) == "v1")
     }
 
     @Test func runDirectoryCreateAndRemove() throws {

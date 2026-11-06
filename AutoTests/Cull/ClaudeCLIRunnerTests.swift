@@ -92,10 +92,13 @@ struct ClaudeCLIRunnerTests {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let out = dir.appendingPathComponent("env.txt")
         let exe = try script(in: dir, "cat >/dev/null\nenv > '\(out.path)'\necho '\(success)'")
-        let env = ["ANTHROPIC_API_KEY": "sk-secret", "FOO": "bar", "PATH": "/usr/bin:/bin"]
+        let env = ["ANTHROPIC_API_KEY": "sk-secret", "ANTHROPIC_AUTH_TOKEN": "t", "CLAUDE_CODE_X": "1",
+                   "CLAUDECODE": "1", "FOO": "bar", "PATH": "/usr/bin:/bin"]
         _ = try await ClaudeCLIRunner(executable: exe, environment: env).run(request(dir))
         let text = try String(contentsOf: out, encoding: .utf8)
-        #expect(!text.contains("ANTHROPIC_API_KEY"))
+        #expect(!text.contains("ANTHROPIC_"))
+        #expect(!text.contains("CLAUDE_CODE_X"))
+        #expect(!text.contains("CLAUDECODE"))
         #expect(text.contains("FOO=bar"))
         #expect(text.contains("/opt/homebrew/bin"))
     }
@@ -105,5 +108,62 @@ struct ClaudeCLIRunnerTests {
         await #expect(throws: ClaudeRunnerError.notInstalled) {
             try await ClaudeCLIRunner(executable: dir.appendingPathComponent("nope")).run(request(dir))
         }
+    }
+
+    @Test func earlyExitWithLargePromptDoesNotCrash() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let exe = try script(in: dir, "exit 0")
+        var req = request(dir)
+        req = ClaudeRequest(model: "haiku", systemPrompt: "s", appendSystemPrompt: "a",
+                            userPrompt: String(repeating: "x", count: 1_000_000),
+                            jsonSchema: "{}", workspace: dir, maxBudgetUSD: 1, timeout: .seconds(30))
+        _ = try? await ClaudeCLIRunner(executable: exe).run(req)
+    }
+
+    @Test func invalidExecutableThrowsPromptly() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let exe = dir.appendingPathComponent("bad")
+        try "not a program".write(to: exe, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: exe.path)
+        let start = ContinuousClock.now
+        await #expect(throws: (any Error).self) { try await ClaudeCLIRunner(executable: exe).run(request(dir)) }
+        #expect(ContinuousClock.now - start < .seconds(5))
+    }
+
+    @Test func grandchildHoldingStdoutDoesNotHang() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let exe = try script(in: dir, "sleep 30 &\necho '{}'\nexit 0")
+        let start = ContinuousClock.now
+        _ = try? await ClaudeCLIRunner(executable: exe).run(request(dir, timeout: .seconds(2)))
+        #expect(ContinuousClock.now - start < .seconds(4))
+    }
+
+    @Test func timeoutKillsGrandchildren() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let pidFile = dir.appendingPathComponent("gpid")
+        let exe = try script(in: dir, "sleep 60 &\necho $! > '\(pidFile.path)'\nwait")
+        await #expect(throws: ClaudeRunnerError.timedOut) {
+            try await ClaudeCLIRunner(executable: exe).run(request(dir, timeout: .seconds(2)))
+        }
+        let pid = try #require(Int32(String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        var dead = false
+        for _ in 0..<60 {
+            if kill(pid, 0) != 0 { dead = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(dead)
+    }
+
+    @Test func cancelledBeforeStartDoesNotLaunch() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = dir.appendingPathComponent("ran")
+        let exe = try script(in: dir, "touch '\(marker.path)'\necho '\(success)'")
+        let req = request(dir)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await ClaudeCLIRunner(executable: exe).run(req)
+        }
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
     }
 }
