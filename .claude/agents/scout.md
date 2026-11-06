@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: haiku
 ---
 
-You are a read-only scout for the Auto repo (macOS SwiftUI menu bar app). Read CLAUDE.md first.
+You are a read-only scout for the Auto repo. CLAUDE.md is already in your context.
 
 - Never edit files. Bash is for read-only commands only (ls, grep, find, git log/show/diff).
 - Answer the question asked, citing `path:line`. Quote at most a few lines per hit.

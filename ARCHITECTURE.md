@@ -4,7 +4,7 @@ The architectural blueprint, module boundaries, data flows and design principles
 
 See also: [CLAUDE.md](CLAUDE.md), [ROADMAP.md](ROADMAP.md).
 
-> **Status:** Boilerplate. Only `App/` and `UI/` exist today. `Core/` and `Integrations/` describe the target design and get built phase by phase (see ROADMAP.md). Keep this file in sync as modules land.
+> **Status:** `App/`, `UI/` and `Core/` exist (Phase 2 ingest parity, in progress). `Integrations/` has the thumbnail adapter; Resolve and transcoding, and the Phase 3 pipeline, are still the target design (see ROADMAP.md). Keep this file in sync as modules land.
 
 ---
 
@@ -15,48 +15,112 @@ Auto is a single-process macOS menu bar app (`LSUIElement`, no Dock icon). It cl
 ```mermaid
 flowchart TD
     subgraph UILayer ["UI (Auto/UI)"]
-        Menu["MenuView\nMenuBarExtra popover"]
-        Settings["SettingsView\nSettings scene"]
+        Main["MainView\nsidebar + content panel"]
+        Sidebar["Sidebar\ntabs, New Shoot, account"]
+        Media["MediaView\ncards, Shoots grid (ShootTile), drives"]
+        CardRow["CardRow\nper-card phase, Add to Shoot, actions"]
+        NewShoot["NewShootView\nsheet: create shoot"]
+        AddFootage["AddFootageSheet\ncopy a card into a shoot, duplicates, notices"]
+        SyncPopover["ShootSyncPopover\nCheck Again, Verify Contents, Sync Now, Stop"]
+        Settings["SettingsView"]
     end
 
     subgraph AppLayer ["App (Auto/App)"]
-        Entry["AutoApp\n@main, scenes"]
+        Delegate["AppDelegate\nNSStatusItem, main window"]
+        Entry["AutoApp\n@main, placeholder Settings scene"]
         Model["AppModel\n@Observable state + orchestration"]
+        CardModel["Card\none connected card"]
+        SyncState["ShootSyncState / SyncBadge\nper-shoot sync state, SyncMetaStore"]
     end
 
     subgraph CoreLayer ["Core engines (Auto/Core)"]
-        Watcher["VolumeWatcher\ncard mount / unmount"]
+        Watcher["VolumeWatcher\nmount / unmount"]
+        Classifier["VolumeClassifier\ncards vs drives"]
         Scanner["CardScanner\nmedia + camera detection"]
+        Index["DriveIndex\nwork folder, name+size keys"]
+        Verifier["BackupVerifier\nhash-compares card files"]
         Copy["CopyEngine\nverified copy"]
-        Pipeline["Pipeline\nordered PipelineSteps"]
+        Planner["ShootPlanner\nfolder layout, copy jobs, status"]
+        ShootFs["ShootFolders\ncreate / adopt, sidecar write"]
+        Registry["ShootRegistry / ShootStore\nknown shoots, availability"]
+        Coverage["ShootCoverageChecker\nchecksum coverage inside a shoot"]
+        Membership["ShootMembership\nper-shoot verified copies for the card browser"]
+        Dupes["IngestDuplicates\ncard files already verified elsewhere"]
+        Hasher["FileHasher\ncancellable MD5, uncached reads"]
+        Cache["ChecksumStore\npersistent MD5 cache"]
+        SyncCheck["ShootSyncChecker\nsize pass, then checksum pass, read-only"]
+        SyncPlan["ShootSyncPlanner\nSync Now plan: copy missing, never delete"]
     end
 
     subgraph Integrations ["Integrations (Auto/Integrations)"]
-        Resolve["ResolveClient\nDaVinci Resolve scripting"]
-        Transcode["Transcoder\nAVFoundation / ffmpeg"]
+        Thumbs["ThumbnailProvider\nQuickLook adapter"]
+        Resolve["ResolveClient\nDaVinci Resolve scripting (planned)"]
+        Transcode["Transcoder\nAVFoundation / ffmpeg (planned)"]
     end
 
     subgraph External ["Outside the app"]
         Cards[("Camera cards\n/Volumes/*")]
-        Work[("Work folder\nClient/Shoot/...")]
+        Work[("Work folder\nShoot/Video|Photo/Camera/...")]
+        ShootReg[("~/Library/Application Support/Auto/shoots.json\nshoots, mirrors, pendingSync")]
+        ChecksumFile[("~/Library/Application Support/Auto/checksums.json")]
+        SyncMetaFile[("~/Library/Application Support/Auto/sync-meta.json")]
         DR["DaVinci Resolve"]
     end
 
-    Menu --> Model
+    Entry --> Delegate
+    Delegate --> Model
+    Delegate --> Main
+    Delegate --> Settings
+    Main --> CardRow
+    CardRow --> AddFootage
+    CardRow --> NewShoot
+    Main --> Model
+    CardRow --> Model
+    NewShoot --> Model
     Settings --> Model
-    Entry --> Model
+    Model --> CardModel
     Model --> Watcher
+    Watcher --> Classifier
     Model --> Scanner
+    Model --> Index
+    Model --> Verifier
     Model --> Copy
-    Model --> Pipeline
+    Model --> Planner
+    Model --> ShootFs
+    Model --> Registry
+    Model --> Coverage
+    Model --> Membership
+    Model --> Dupes
+    Model --> Hasher
+    Model --> Cache
+    Model --> SyncCheck
+    Model --> SyncPlan
+    Model --> SyncState
+    Model --> Thumbs
+    Media --> SyncPopover
     Watcher -.-> Cards
     Scanner --> Cards
+    Verifier --> Cards
     Copy --> Cards
+    Index --> Work
+    Verifier --> Work
     Copy --> Work
-    Pipeline --> Transcode
-    Pipeline --> Resolve
-    Transcode --> Work
-    Resolve --> DR
+    ShootFs --> Work
+    Coverage --> Work
+    Membership --> Work
+    Registry --> ShootReg
+    Hasher --> Work
+    SyncCheck --> Work
+    SyncPlan --> Work
+    Cache --> ChecksumFile
+    SyncState --> SyncMetaFile
+    Model -.-> Transcode
+    Model -.-> Resolve
+    Transcode -.-> Work
+    Resolve -.-> DR
+
+    classDef planned stroke-dasharray: 5 5
+    class Transcode,Resolve planned
 ```
 
 ---
@@ -69,15 +133,87 @@ Auto/                         # repo root
 │   └── xcshareddata/xcschemes/Auto.xcscheme   # shared scheme: Auto + AutoTests
 ├── Auto/                     # App target sources
 │   ├── App/                  # Entry point + shared state (thin)
-│   │   ├── AutoApp.swift     #   MenuBarExtra + Settings scenes
-│   │   └── AppModel.swift    #   @Observable state; orchestrates Core
+│   │   ├── AutoApp.swift     #   @main; placeholder Settings scene (Cmd-comma goes to AppDelegate)
+│   │   ├── AppDelegate.swift #   NSStatusItem (left click: window, right click: menu); main window (Settings is a tab)
+│   │   ├── AppTab.swift      #   sidebar tabs + light/dark AppearanceMode
+│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage, browser membership, mirrors, ingest fan-out, copy queue, sync scheduler, Sync Now)
+│   │   ├── ShootItem.swift   #   ShootItem (registry record + availability, summary, thumbnail); ShootSheetRequest
+│   │   ├── ShootCoverageState.swift # CoverageKey (shoot, card) and CoverageState per pair
+│   │   ├── ShootSyncState.swift # ShootSyncState (per-shoot check/sync state), SyncBadge (green/yellow/grey), SyncMetaStore (sync-meta.json)
+│   │   ├── CullCoordinator.swift #   per-shoot cull runs, waiting on ingest/sync, app-wide cull lock
+│   │   └── Card.swift        #   one connected card: volume, files, cameras, phase, copy plan
 │   ├── UI/                   # SwiftUI views only, no I/O
-│   │   ├── MenuView.swift
-│   │   └── SettingsView.swift
-│   ├── Core/                 # (planned) pure, testable engines, no SwiftUI
-│   ├── Integrations/         # (planned) Resolve / transcoder adapters behind protocols
+│   │   ├── MainView.swift    #   sidebar + floating content panel, switches on AppModel.selectedTab
+│   │   ├── Sidebar.swift     #   logo, tabs, New Shoot button, account row (appearance menu)
+│   │   ├── MediaView.swift   #   Media tab: stats, cards, Shoots grid, drives
+│   │   ├── ShootTile.swift   #   one shoot in the grid: thumbnail, counts, offline/missing state, sync badge, Copies menu, actions
+│   │   ├── ShootSyncPopover.swift #   per-shoot sync popover: copies, last check, Check Again (⌥ deep), Verify Contents, Sync Now, Stop
+│   │   ├── EditPlaceholderView.swift # empty Video Edit tab
+│   │   ├── PhotoEditView.swift #   Photo Edit tab: photo cull, bottom progress bar, result banners
+│   │   ├── CullSettingsSheet.swift #   cull settings: criteria, aggressiveness, model, budget
+│   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
+│   │   ├── CardRow.swift     #   per-card header, phase content and actions, Add to Shoot menu, per-camera day chips; static StatusDot
+│   │   ├── CardBrowserView.swift # read-only Finder-style card browser (icons/list, locations sidebar); opened by clicking a card
+│   │   ├── DayChip.swift     #   recording-day chip, shared by CardRow and the New Shoot sheet
+│   │   ├── NewShootView.swift#   sheet: create mode (name, date, location) or add-footage mode
+│   │   ├── AddFootageSheet.swift #   add a card's footage to a shoot: card picker, completeness banner, Add N files
+│   │   └── SettingsView.swift#   Settings tab; "Soon" rows persist values nothing reads yet
+│   ├── Core/                 # pure, testable engines, no SwiftUI
+│   │   ├── VolumeWatcher.swift     #   NSWorkspace mount notifications, refresh off main
+│   │   ├── VolumeClassifier.swift  #   card vs work/backup drive vs ignored volume
+│   │   ├── VolumeIdentity.swift    #   card / volume identity (volume UUID + normalized path)
+│   │   ├── MediaTypes.swift        #   extensions → MediaKind, skipped folders
+│   │   ├── MediaFile.swift         #   MediaFile, MediaKind, Camera models
+│   │   ├── CardScanner.swift       #   enumerate media, camera detection, shoot date
+│   │   ├── DriveIndex.swift        #   work-folder media grouped by name+size
+│   │   ├── BackupVerifier.swift    #   checksum-compares card files with drive candidates
+│   │   ├── CopyEngine.swift        #   verified copy with cancel, collision skip, expected-checksum guard, copy-root containment
+│   │   ├── ShootDays.swift         #   recording days per camera (ShootDays.byCamera)
+│   │   ├── ShootSelection.swift    #   (camera, day) include-set for a shoot; unselected files stay on the card
+│   │   ├── ShootPlanner.swift      #   shoot folder naming, planned folder rows, copy jobs, destination checks (checkDestination/createDirectories), CardPhase, StatusAggregator
+│   │   ├── Shoot.swift             #   Shoot model (id, name, day, folder)
+│   │   ├── ShootSidecar.swift      #   `.auto-shoot.json` codec, versioned (v1)
+│   │   ├── ShootFolders.swift      #   classify names/folders, create shoots (exclusive mkdir, sidecar write), adopt
+│   │   ├── ShootRegistry.swift     #   registry records (path, mirrors, pendingSync), ShootStore (load/save/quarantine), per-copy availability, discovery
+│   │   ├── ShootCoverage.swift     #   checksum coverage of a card's day inside a shoot folder (cancellable, off main)
+│   │   ├── ShootMembership.swift   #   per-shoot verified copies for the card browser (sequential, read-only, excludes nested shoots, never reports partial results)
+│   │   ├── CardBrowser.swift #   groups card files: Not Backed Up / one group per shoot holding a verified copy / Backed Up Elsewhere
+│   │   ├── GridSelection.swift     #   Finder-style selection and arrow/Home/End navigation over sectioned grids (pure model, no AppKit)
+│   │   ├── ShootSummary.swift      #   shoot counts + representative file
+│   │   ├── IngestDuplicates.swift  #   card files already verified elsewhere (name + size + MD5), by place; nothing hashes here
+│   │   ├── FileHasher.swift        #   cancellable MD5 of a file (8 MB chunks, F_NOCACHE)
+│   │   ├── ChecksumStore.swift     #   persistent MD5 cache (checksums.json), keyed by volume, path, size, mtime, inode, ctime; serialized saves
+│   │   ├── ShootSync.swift         #   ShootSyncChecker: inventories copies, size pass then checksum pass; read-only, fails closed
+│   │   └── ShootSyncPlan.swift     #   ShootSyncPlanner: Sync Now plan (copy missing files from a good copy); never deletes or overwrites
+│   │   ├── MainThreadProbe.swift   #   records whether instrumented engines ran on main (tests assert it)
+│   │   └── Cull/                   #   photo cull engines (pure Swift)
+│   │       ├── CullModels.swift    #   CullSettings, CullModel, PhotoRecord, PhotoMetrics, FaceInfo, FileStamp
+│   │       ├── CullCriterion.swift #   cull criteria: exposure, duplicates, unusable, horizon, cropped, eyes
+│   │       ├── PhotoCatalog.swift  #   photos on the primary copy's Photo/<cam> folders
+│   │       ├── PhotoGrouper.swift  #   burst grouping by capture time + dHash
+│   │       ├── LocalTriage.swift   #   local pre-pass (blur, clipping, eyes closed) before Claude
+│   │       ├── CullPromptBuilder.swift # cached system prompt, per-group run section, JSON schema
+│   │       ├── CullEstimator.swift #   cull cost estimate
+│   │       ├── CullDecisionValidator.swift # checks Claude's decisions before any move
+│   │       ├── CullJournal.swift   #   write-ahead journal in <shoot>/.auto-cull/ for undo
+│   │       ├── CullApplier.swift   #   moves rejects (dir-fd renames, RENAME_EXCL, rollback, undo)
+│   │       ├── LiveCullApplier.swift #   live file-system implementation of the applier
+│   │       ├── CullReplay.swift    #   replays completed cull runs onto other copies
+│   │       └── CullRunner.swift    #   one run: analyze, group, triage, Claude per group, validate, apply
+│   ├── Integrations/         # adapters behind protocols; faked in tests
+│   │   ├── ThumbnailProvider.swift #   protocol: preview image for a media file
+│   │   ├── QLThumbnailProvider.swift # QuickLookThumbnailing adapter
+│   │   ├── QuickLookPreviewer.swift # shared Quick Look panel; takes control via the responder chain (AppDelegate forwards)
+│   │   ├── ClaudeRunner.swift      #   Claude run interface used by the cull
+│   │   ├── ClaudeCLIRunner.swift   #   `claude -p` adapter (posix_spawn in its own process group, cancel/timeout)
+│   │   ├── CullWorkspace.swift     #   app-managed workspace for `claude -p` (own CLAUDE.md, Read-only settings)
+│   │   ├── PhotoAnalyzer.swift     #   photo analysis interface (local metrics + previews)
+│   │   ├── ImageIOPhotoAnalyzer.swift # ImageIO metrics, face boxes and previews for the cull
+│   │   └── (planned, Phase 3) Resolve / transcoder adapters
 │   └── Assets.xcassets
 ├── AutoTests/                # Swift Testing target (hosted in Auto.app)
+│   ├── Support/FixtureCard.swift   #   builds a fake card in a temp dir
+│   └── *Tests.swift          #   one file per Core engine, plus AppModelTests
 ├── .claude/agents/           # Routed subagents: scout (haiku), architect (opus),
 │                             #   implementer (sonnet), reviewer (opus), docs-keeper (haiku)
 ├── .claude/skills/           # Claude Code skills
@@ -94,8 +230,8 @@ Auto/                         # repo root
 | :--- | :--- | :--- |
 | `UI` | `App` (via `@Environment(AppModel.self)`) | Touch files, volumes, processes |
 | `App` | `Core`, `Integrations` | Contain copy or pipeline logic itself |
-| `Core` | Foundation, CryptoKit, ImageIO, AVFoundation | Import SwiftUI or reference `AppModel` |
-| `Integrations` | Foundation, `Process` | Be called directly from views |
+| `Core` | Foundation, CryptoKit, ImageIO, AVFoundation; AppKit/DiskArbitration in `VolumeWatcher` only | Import SwiftUI or reference `AppModel` |
+| `Integrations` | Foundation, `Process` / `posix_spawn`, QuickLookThumbnailing, ImageIO, Vision | Be called directly from views |
 
 ---
 
@@ -107,32 +243,92 @@ sequenceDiagram
     actor User
     participant Watcher as VolumeWatcher
     participant Model as AppModel
-    participant UI as Menu bar UI
     participant Scanner as CardScanner
+    participant Index as DriveIndex
+    participant Verify as BackupVerifier
+    participant UI as MainView / CardRow / sheets
+    participant Folders as ShootFolders
+    participant Coverage as ShootCoverageChecker
     participant Copy as CopyEngine
-    participant Pipe as Pipeline
-    participant Resolve as ResolveClient
 
     Watcher->>Model: Card mounted (/Volumes/X)
     Model->>Scanner: scan(volume)
     Scanner-->>Model: media files, cameras, shoot date
-    Model->>Model: Diff against work-folder index (what isn't backed up yet)
-    Model->>UI: Status = unbacked, show popover
-    User->>UI: Pick / create Client → Shoot
-    UI->>Model: startIngest(shoot)
-    Model->>Copy: run(jobs)
-    loop each file
-        Copy->>Copy: copy → fsync → size + hash verify
-        Copy-->>Model: progress
+    Model->>Index: build(work folder), when the work drive is ready
+    Index-->>Model: candidates keyed by name+size
+    Model->>Verify: triage files, hash candidates (cached by drive mtime)
+    Verify-->>Model: matched / missing per file
+    alt every file matched by hash
+        Model->>UI: Status = backed (green)
+    else files missing
+        Model->>UI: Status = unbacked, offer Add to Shoot or New Shoot
+        alt New Shoot (name, date, location)
+            User->>UI: Enter name, pick date and location
+            UI->>Model: createShoot(name, date, parent)
+            Model->>Folders: create: exclusive mkdir (parent must exist), sidecar O_EXCL temp, RENAME_EXCL
+            Folders-->>Model: Shoot (sidecar written)
+            Model->>Model: save registry (serialized)
+        else Add to Shoot (existing shoot, same or other card)
+            User->>UI: Pick shoot, check files in the shoot's date
+            UI->>Model: addFootage(shoot, card, selection)
+            Model->>Coverage: fresh coverage (checksum, only inside the shoot folder)
+            Coverage-->>Model: copies per card file
+            Model->>Model: re-read sidecar, plan only files not in the shoot
+            Model->>Model: create Video/Photo/<camera> inside the shoot
+            Model->>Copy: run(jobs), each destination re-checked
+            loop each file
+                Copy->>Copy: stream to unique O_EXCL partial, hash while reading
+                Copy->>Copy: F_FULLFSYNC, re-read uncached, compare hashes
+                Copy->>Copy: renamex_np RENAME_EXCL to final name
+                Copy-->>Model: progress
+            end
+            Copy-->>Model: outcome (copied keys, failures)
+            Model->>Coverage: re-check coverage for the shoot and card
+        end
+        Model->>Verify: re-verify card files (verified copies in any online shoot count)
+        Model->>UI: Status = backed, or Not backed up (unselected files remain missing)
     end
-    Copy-->>Model: outcome (copied, failures)
-    Model->>Pipe: run(steps, on: shoot)
-    Pipe->>Pipe: organize → proxies → …
-    Pipe->>Resolve: create project, import media, build bins
-    Resolve-->>Pipe: done / unavailable
-    Pipe-->>Model: per-step results
-    Model->>UI: Status = done (or error with reason)
 ```
+
+Card browser membership is a separate, read-only pass. While the browsed card is on screen and the main window is visible, `AppModel` runs `ShootMembership` once per online shoot (sequentially, off main, excluding nested shoots) and stores the verified copies in `browserMembership`. Scan, copy and recompute cancel and invalidate it, and a generation guard drops stale results. It never feeds the backed-up status or Add Footage coverage, and a partial or cancelled shoot is never reported.
+
+### Ingest fan-out
+
+A shoot can have mirror copies on other drives (`ShootRecord.mirrors`, added explicitly and never on the same drive). When footage is added, `ShootPlanner` builds one copy job per file per online copy, each with its own `CopyEngine` root. A copy that is offline, failed or left out of the run is recorded in `pendingSync`, and the tile and card show it. A card counts as backed up once a file is verified on at least one copy. Overlapping copies into a shoot queue (`queuedBehind`) instead of failing, and ingest and Sync Now never run at the same time.
+
+### Sync check
+
+`ShootSyncChecker` inventories each online copy, read-only. It skips hidden and partial files and nested shoots, and records unreadable entries rather than dropping them.
+
+1. **Size pass:** compares paths and sizes. It fires `onSizePass` at once, so the tile can show a partial result before any hashing.
+2. **Checksum pass:** MD5s each file present on two or more copies. `ChecksumStore` answers first. A file whose volume, path, size, mtime, inode and ctime match a cached entry is not re-read. A deep check (Verify Contents, or ⌥ Check Again) ignores the cache and re-reads every byte.
+
+Any uncertainty is a conflict or "not checked", never "in sync". A clean checksum check clears `pendingSync` for copies that were pending when it began. A cached green is "unchanged since last read", not proof against bit rot.
+
+### Sync Now
+
+Sync Now acts only on a complete `.checksums` report with nothing "not checked". `ShootSyncPlanner` creates one job per file missing from a copy, sourced from a verified copy, with `onCollision: .skip` and `expectedChecksum` set. The jobs run through `CopyEngine` (stream, `F_FULLFSYNC`, uncached re-read, `RENAME_EXCL`). Nothing is deleted or overwritten. A file that differs at the destination is a conflict and is left for the user. Stop keeps finished copies and drops queued work.
+
+### Duplicate detection
+
+`BackupVerifier` already decides which card files have a checksum-identical copy somewhere, by name and size, then MD5. `IngestDuplicates` groups those verified files by where the copy lives (a shoot, or a plain folder on a drive) for the Add Footage block. Duplicates are left out of the plan by default. "Copy duplicates anyway" includes them. The card browser asks before copying duplicates ("Copy Anyway"). Renamed files are not detected.
+
+### Photo cull
+
+Photo cull runs per shoot. It needs the primary copy online and reads `Photo/**` from it (`_Rejects`, hidden files and symlinks are skipped).
+
+1. **Catalog:** `PhotoCatalog` lists the photos on the primary copy.
+2. **Analyze:** `ImageIOPhotoAnalyzer` makes local metrics and ~1024px previews with face strips. Nothing is moved until analysis finishes.
+3. **Group:** `PhotoGrouper` groups bursts by capture time and dHash.
+4. **Triage:** `LocalTriage` settles the obvious cases locally.
+5. **Claude, per group:** `ClaudeCLIRunner` runs `claude -p` in the isolated `CullWorkspace` with that group's previews. Each group waits while an ingest or sync runs.
+6. **Validate:** `CullDecisionValidator` checks every decision before anything moves.
+7. **Apply:** under the app-wide lock, rejects move to `Photo/<cam>/_Rejects/` on every online copy. Each move is journaled write-ahead in `<shoot>/.auto-cull/`. Stop during apply rolls the run back.
+8. **Offline copies:** a copy that is offline is marked `pendingSync`. Sync Now replays completed cull runs from the primary copy onto it before copying missing files, so rejects never come back.
+
+Details: [docs/plans/photo-cull.md](docs/plans/photo-cull.md).
+
+The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet and is not in these diagrams.
 
 ---
 
@@ -140,29 +336,38 @@ sequenceDiagram
 
 | Concern | Choice | Rationale |
 | :--- | :--- | :--- |
-| UI | SwiftUI `MenuBarExtra` (`.window` style) + `Settings` scene | Native menu bar app with no AppKit status-item boilerplate (Backed used `NSStatusItem` + `NSPopover`). |
+| UI | SwiftUI windows hosted by an AppKit `AppDelegate` with an `NSStatusItem` | The status item opens a real window instead of a dropdown. `MenuBarExtra` was dropped; SwiftUI's `openSettings` is unreliable from an accessory-app menu, so AppDelegate routes Cmd-comma to the Settings tab of the main window. |
 | State | `@Observable` `AppModel`, injected with `.environment` | Modern Observation; less boilerplate than Backed's `ObservableObject`/Combine. |
 | Concurrency | Swift concurrency; default `MainActor` isolation, heavy work `nonisolated` | Keeps UI correct by default while copying runs off-main. |
-| Volume detection | `NSWorkspace` mount notifications / DiskArbitration | Auto-detect cards on insert. |
-| Copy verification | Streamed copy + CryptoKit hash (or xxHash later for speed) | Backed's proven approach: verify before marking backed. |
+| Volume detection | `NSWorkspace` mount/unmount notifications; `FileManager.mountedVolumeURLs` on refresh, off the main actor | Auto-detect cards on insert; generation guard drops stale refreshes. |
+| Copy verification | Streamed CryptoKit hash on write, `F_FULLFSYNC`, uncached read-back (`F_NOCACHE`) hash compare (xxHash later for speed) | Backed's proven approach, hardened: verify what is on disk before marking backed. |
 | Metadata | ImageIO (EXIF), AVFoundation (QuickTime), Sony XML sidecars | Camera model / serial detection, carried over from Backed. |
 | Proxies | AVFoundation export (ffmpeg optional) | No bundled dependency for the default path. |
 | Resolve | DaVinci Resolve scripting API via `Process` (Python) | Same API the `davinci-resolve` MCP uses. Studio for external scripting. |
 | Tests | Swift Testing | Parameterized tests, clean `#expect` diagnostics. |
-| Persistence | `UserDefaults` for settings; JSON index file in the work folder | Simple, inspectable, no database. |
+| Persistence | `UserDefaults` for settings (work folder, auto-open, appearance); the drive index is rebuilt by scanning the work folder; known shoots in `~/Library/Application Support/Auto/shoots.json`; each shoot's identity in `.auto-shoot.json` in its folder | Simple, no database. A persisted, resumable index is Phase 4. The registry is a list of known shoots; the sidecar makes a shoot findable after a relocate or rescan. |
+
+Files in `~/Library/Application Support/Auto/`:
+
+- `shoots.json`: known shoots, each with its primary `path`, `mirrors` and `pendingSync`. Records from before mirrors decode with none. A corrupt file is quarantined, never overwritten.
+- `checksums.json`: `ChecksumStore`, MD5 cache keyed by volume, path, size, mtime, inode and ctime. Only a cache: a corrupt file means an empty cache, and it never vouches for a backup.
+- `sync-meta.json`: `SyncMetaStore`, last deep-verify date per shoot, for the UI only. An unreadable file means "never verified".
+- `CullWorkspace/`: working directory for `claude -p` during a photo cull (own `CLAUDE.md`, Read-only settings). Never a source of truth for any shoot.
 
 ---
 
 ## 5. Resiliency & Failure Defense
 
 1. **Read-only sources:** Auto never writes to, renames or deletes anything on a card.
-2. **Verify before trust:** A file counts as backed up only after size and checksum match. Partial copies go to a temp name and are renamed atomically on success.
-3. **Never overwrite:** Name collisions at the destination get a unique suffix.
+2. **Verify before trust:** A card is backed up only when every file has a checksum-identical copy on the work drive or in an online registered shoot (`BackupVerifier`). Shoot coverage (`ShootCoverageChecker`) reads only inside the shoot folder and never counts card files. Name and size only pick candidates. Copies stream into a unique `O_EXCL` partial, are flushed with `F_FULLFSYNC`, re-read uncached, and are hashed again before they count.
+3. **Never overwrite:** The final name is claimed with `renamex_np(RENAME_EXCL)`, so an existing file is never replaced. A name collision gets a unique suffix instead. An identical file from an earlier run is kept.
 4. **Fixture cards (the "mock mode"):**
-   - Tests build a fake card in a temp directory (DCIM / PRIVATE/M4ROOT layouts, tiny media files and sidecars).
-   - For manual runs, launch with `-AutoFixtureCard <path>` (UserDefaults launch argument) to treat a folder as a mounted card. *(planned)*
-5. **Integration fallbacks:** If Resolve isn't running or scripting is unavailable, the Resolve step reports "skipped: Resolve unavailable" and the ingest still counts as a success. Pipeline steps are independent and re-runnable.
-6. **Cancellation:** Copy and pipeline runs are cancellable. Cancelling leaves no half-written files under their final names.
+   - Tests build a fake card in a temp directory (DCIM / PRIVATE/M4ROOT layouts, tiny media files and sidecars) via `AutoTests/Support/FixtureCard.swift`.
+   - For manual runs, launch with `-AutoFixtureCard <path>` (UserDefaults launch argument) to treat a folder as a mounted card. The window also opens at launch, since no mount event fires for it.
+5. **Integration fallbacks:** *(Phase 3, planned)* If Resolve isn't running or scripting is unavailable, the Resolve step reports "skipped: Resolve unavailable" and the ingest still counts as a success. Pipeline steps are independent and re-runnable.
+6. **Cancellation:** Copy and verification runs are cancellable. A failed or cancelled copy removes its partial file, so nothing half-written is left under a final name.
+7. **Destination checks:** Before any folder is created and again before each copy, the destination must resolve (symlinks resolved through the nearest existing ancestor) to inside the work folder, must not be on a card, and must not have a file where a folder should be (`ShootPlanner.checkDestination` / `createDirectories`). Path containment is lexical. Dangling symlinks are rejected, and the work folder itself is never created: if it is missing (drive unplugged), New Shoot and Copy stop with an error.
+8. **Shoot folders:** `ShootFolders` applies the same rules. The chosen parent must exist and is never created, each folder is made with an exclusive mkdir, and the sidecar is written with `O_EXCL` and `RENAME_EXCL` through a directory fd, after a card check. An existing folder is adopted only through the explicit "Use this folder". Forgetting a shoot removes its registry entry only. A corrupt registry is kept as `shoots.json.corrupt-<ts>`, never overwritten.
 
 ---
 
@@ -171,6 +376,6 @@ sequenceDiagram
 Phases and their checklists live in [ROADMAP.md](ROADMAP.md). In summary:
 
 - **Phase 1: Foundation.** Menu bar shell, settings, work folder, test target. *(done)*
-- **Phase 2: Ingest parity with Backed.** Card detection, scanning, verified copy, client/shoot folders.
+- **Phase 2: Ingest parity with Backed.** Card detection, scanning, verified copy, shoot folders. *(engines and app wiring landed; manual end-to-end test pending)*
 - **Phase 3: Editing pipeline.** Organize, proxies, Resolve project setup.
 - **Phase 4: Polish & release.** Notifications, history, signing/notarization.
