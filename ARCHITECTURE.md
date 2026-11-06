@@ -20,7 +20,8 @@ flowchart TD
         Media["MediaView\ncards, Shoots grid (ShootTile), drives"]
         CardRow["CardRow\nper-card phase, Add to Shoot, actions"]
         NewShoot["NewShootView\nsheet: create shoot"]
-        AddFootage["AddFootageSheet\ncopy a card into a shoot"]
+        AddFootage["AddFootageSheet\ncopy a card into a shoot, duplicates, notices"]
+        SyncPopover["ShootSyncPopover\nCheck Again, Verify Contents, Sync Now, Stop"]
         Settings["SettingsView"]
     end
 
@@ -29,6 +30,7 @@ flowchart TD
         Entry["AutoApp\n@main, placeholder Settings scene"]
         Model["AppModel\n@Observable state + orchestration"]
         CardModel["Card\none connected card"]
+        SyncState["ShootSyncState / SyncBadge\nper-shoot sync state, SyncMetaStore"]
     end
 
     subgraph CoreLayer ["Core engines (Auto/Core)"]
@@ -43,6 +45,11 @@ flowchart TD
         Registry["ShootRegistry / ShootStore\nknown shoots, availability"]
         Coverage["ShootCoverageChecker\nchecksum coverage inside a shoot"]
         Membership["ShootMembership\nper-shoot verified copies for the card browser"]
+        Dupes["IngestDuplicates\ncard files already verified elsewhere"]
+        Hasher["FileHasher\ncancellable MD5, uncached reads"]
+        Cache["ChecksumStore\npersistent MD5 cache"]
+        SyncCheck["ShootSyncChecker\nsize pass, then checksum pass, read-only"]
+        SyncPlan["ShootSyncPlanner\nSync Now plan: copy missing, never delete"]
     end
 
     subgraph Integrations ["Integrations (Auto/Integrations)"]
@@ -54,7 +61,9 @@ flowchart TD
     subgraph External ["Outside the app"]
         Cards[("Camera cards\n/Volumes/*")]
         Work[("Work folder\nShoot/Video|Photo/Camera/...")]
-        ShootReg[("~/Library/Application Support/Auto/shoots.json")]
+        ShootReg[("~/Library/Application Support/Auto/shoots.json\nshoots, mirrors, pendingSync")]
+        ChecksumFile[("~/Library/Application Support/Auto/checksums.json")]
+        SyncMetaFile[("~/Library/Application Support/Auto/sync-meta.json")]
         DR["DaVinci Resolve"]
     end
 
@@ -81,7 +90,14 @@ flowchart TD
     Model --> Registry
     Model --> Coverage
     Model --> Membership
+    Model --> Dupes
+    Model --> Hasher
+    Model --> Cache
+    Model --> SyncCheck
+    Model --> SyncPlan
+    Model --> SyncState
     Model --> Thumbs
+    Media --> SyncPopover
     Watcher -.-> Cards
     Scanner --> Cards
     Verifier --> Cards
@@ -93,6 +109,11 @@ flowchart TD
     Coverage --> Work
     Membership --> Work
     Registry --> ShootReg
+    Hasher --> Work
+    SyncCheck --> Work
+    SyncPlan --> Work
+    Cache --> ChecksumFile
+    SyncState --> SyncMetaFile
     Model -.-> Transcode
     Model -.-> Resolve
     Transcode -.-> Work
@@ -115,15 +136,17 @@ Auto/                         # repo root
 │   │   ├── AutoApp.swift     #   @main; placeholder Settings scene (Cmd-comma goes to AppDelegate)
 │   │   ├── AppDelegate.swift #   NSStatusItem (left click: window, right click: menu); main window (Settings is a tab)
 │   │   ├── AppTab.swift      #   sidebar tabs + light/dark AppearanceMode
-│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage, browser membership)
+│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage, browser membership, mirrors, ingest fan-out, copy queue, sync scheduler, Sync Now)
 │   │   ├── ShootItem.swift   #   ShootItem (registry record + availability, summary, thumbnail); ShootSheetRequest
 │   │   ├── ShootCoverageState.swift # CoverageKey (shoot, card) and CoverageState per pair
+│   │   ├── ShootSyncState.swift # ShootSyncState (per-shoot check/sync state), SyncBadge (green/yellow/grey), SyncMetaStore (sync-meta.json)
 │   │   └── Card.swift        #   one connected card: volume, files, cameras, phase, copy plan
 │   ├── UI/                   # SwiftUI views only, no I/O
 │   │   ├── MainView.swift    #   sidebar + floating content panel, switches on AppModel.selectedTab
 │   │   ├── Sidebar.swift     #   logo, tabs, New Shoot button, account row (appearance menu)
 │   │   ├── MediaView.swift   #   Media tab: stats, cards, Shoots grid, drives
-│   │   ├── ShootTile.swift   #   one shoot in the grid: thumbnail, counts, offline/missing state, actions
+│   │   ├── ShootTile.swift   #   one shoot in the grid: thumbnail, counts, offline/missing state, sync badge, Copies menu, actions
+│   │   ├── ShootSyncPopover.swift #   per-shoot sync popover: copies, last check, Check Again (⌥ deep), Verify Contents, Sync Now, Stop
 │   │   ├── EditPlaceholderView.swift # empty Video Edit / Photo Edit tabs
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
 │   │   ├── CardRow.swift     #   per-card header, phase content and actions, Add to Shoot menu, per-camera day chips; static StatusDot
@@ -141,19 +164,24 @@ Auto/                         # repo root
 │   │   ├── CardScanner.swift       #   enumerate media, camera detection, shoot date
 │   │   ├── DriveIndex.swift        #   work-folder media grouped by name+size
 │   │   ├── BackupVerifier.swift    #   checksum-compares card files with drive candidates
-│   │   ├── CopyEngine.swift        #   verified copy with cancel
+│   │   ├── CopyEngine.swift        #   verified copy with cancel, collision skip, expected-checksum guard, copy-root containment
 │   │   ├── ShootDays.swift         #   recording days per camera (ShootDays.byCamera)
 │   │   ├── ShootSelection.swift    #   (camera, day) include-set for a shoot; unselected files stay on the card
 │   │   ├── ShootPlanner.swift      #   shoot folder naming, planned folder rows, copy jobs, destination checks (checkDestination/createDirectories), CardPhase, StatusAggregator
 │   │   ├── Shoot.swift             #   Shoot model (id, name, day, folder)
 │   │   ├── ShootSidecar.swift      #   `.auto-shoot.json` codec, versioned (v1)
 │   │   ├── ShootFolders.swift      #   classify names/folders, create shoots (exclusive mkdir, sidecar write), adopt
-│   │   ├── ShootRegistry.swift     #   registry records, ShootStore (load/save/quarantine), availability, discovery
+│   │   ├── ShootRegistry.swift     #   registry records (path, mirrors, pendingSync), ShootStore (load/save/quarantine), per-copy availability, discovery
 │   │   ├── ShootCoverage.swift     #   checksum coverage of a card's day inside a shoot folder (cancellable, off main)
 │   │   ├── ShootMembership.swift   #   per-shoot verified copies for the card browser (sequential, read-only, excludes nested shoots, never reports partial results)
 │   │   ├── CardBrowser.swift #   groups card files: Not Backed Up / one group per shoot holding a verified copy / Backed Up Elsewhere
 │   │   ├── GridSelection.swift     #   Finder-style selection and arrow/Home/End navigation over sectioned grids (pure model, no AppKit)
 │   │   ├── ShootSummary.swift      #   shoot counts + representative file
+│   │   ├── IngestDuplicates.swift  #   card files already verified elsewhere (name + size + MD5), by place; nothing hashes here
+│   │   ├── FileHasher.swift        #   cancellable MD5 of a file (8 MB chunks, F_NOCACHE)
+│   │   ├── ChecksumStore.swift     #   persistent MD5 cache (checksums.json), keyed by volume, path, size, mtime, inode, ctime; serialized saves
+│   │   ├── ShootSync.swift         #   ShootSyncChecker: inventories copies, size pass then checksum pass; read-only, fails closed
+│   │   └── ShootSyncPlan.swift     #   ShootSyncPlanner: Sync Now plan (copy missing files from a good copy); never deletes or overwrites
 │   │   └── MainThreadProbe.swift   #   records whether instrumented engines ran on main (tests assert it)
 │   ├── Integrations/         # adapters behind protocols; faked in tests
 │   │   ├── ThumbnailProvider.swift #   protocol: preview image for a media file
