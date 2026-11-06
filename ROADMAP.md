@@ -88,6 +88,25 @@ Plug in a card and Auto does the rest: it backs the footage up safely, files it 
 - [ ] Move `shootPreview`/`createDirectories` file checks off the main actor (debounce preview); `shootPreview` is gone, so re-check the same checks in `ShootFolders` and `addFootage`
 - [ ] Harden `CopyEngine` against symlink swaps between check and write (`O_NOFOLLOW`/`openat`)
 
+## Phase 2b: Mirrors, sync and duplicates
+
+A shoot can have mirror copies on other drives. Copies are checked and synced on demand, and ingest skips footage that is already backed up.
+
+- [x] Mirrors are explicit (New Shoot destinations, Add Mirror, Locate…); discovery never adds them. `ShootRecord` carries `mirrors` and `pendingSync`; an older `shoots.json` decodes with none
+- [x] Same-drive copies are refused as mirrors (`.sameVolume`)
+- [x] Ingest fans out to every online copy of a shoot; an unreached copy is marked `pendingSync` and shows a yellow badge
+- [x] Overlapping copies queue (`queuedBehind`) instead of failing
+- [x] `FileHasher`: cancellable MD5, uncached reads, 8 MB chunks
+- [x] `ChecksumStore`: persistent MD5 cache in `checksums.json`; saves are serialized; verified copies seed it
+- [x] `ShootSyncChecker`: size pass, then checksum pass; strictly read-only; any uncertainty is a conflict or "not checked", never "in sync"; nested shoots are not descended into
+- [x] `ShootSyncPlanner` / Sync Now: copies files missing from a good copy; never deletes or overwrites; leaves conflicts for the user
+- [x] Sync Now and ingest exclude each other (one serial scheduler in `AppModel`)
+- [x] Shoot tile badge: green (all copies match), yellow (out of sync), grey (unknown), with a tooltip; "Copies" context submenu
+- [x] Shoot popover: Check Again (⌥ for a deep check), Verify Contents, Sync Now, Stop; last full verify kept in `sync-meta.json`
+- [x] Duplicate detection at ingest (`IngestDuplicates`): card files already verified elsewhere by name + size + MD5 are skipped by default; "Copy duplicates anyway" toggle in Add Footage
+- [x] CardRow shows an "already backed up" count, a queue note and a mirror note; Add Footage shows copy and mirror notices
+- [x] Card browser asks before copying duplicates ("Copy Anyway")
+
 ## Phase 3: Editing pipeline
 
 - [ ] `PipelineStep` protocol + `Pipeline` runner (ordered, per-step result, re-runnable, cancellable)
