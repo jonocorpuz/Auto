@@ -19,11 +19,15 @@ struct MediaView: View {
         } else if let card = model.browsingCard {
             CardBrowserView(card: card)
                 .id(card.id)
+        } else if let id = model.browsingShootID, let item = model.shoots.first(where: { $0.id == id }) {
+            ShootBrowserView(item: item)
+                .id(id)
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     stats
                     cardsSection
+                    importsSection
                     shootsSection
                     drivesSection
                 }
@@ -70,6 +74,16 @@ struct MediaView: View {
                 }
             } else {
                 ForEach(model.cards) { card in CardRow(card: card) }
+            }
+        }
+    }
+
+    // MARK: Imports
+
+    @ViewBuilder private var importsSection: some View {
+        if !model.imports.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(model.imports) { job in ImportProgressRow(job: job) }
             }
         }
     }

@@ -50,8 +50,12 @@ struct ShootTile: View {
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
         .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.border))
         .opacity(isOnline ? 1 : 0.55)
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        .onTapGesture { model.browsingShootID = item.id }
         .contextMenu {
             Button("Add footage") { model.addFootage(to: item.id) }
+                .disabled(!canAdd)
+            Button("Add Files…") { model.addFiles(to: item.id) }
                 .disabled(!canAdd)
             Button("Locate…") { model.locateShoot(id: item.id) }
             Divider()
