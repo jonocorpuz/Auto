@@ -560,6 +560,8 @@ extension MirrorShootsTests {
         }
         #expect(card.plan == nil && card.missing.isEmpty)
         #expect(rec.pendingSync.isEmpty && card.mirrorNote == nil)
+        // The cache is seeded off main without the copy waiting for it.
+        try await waitUntil { env.model.checksums.count == 4 }
         #expect(env.model.checksums.count == 4)
     }
 
