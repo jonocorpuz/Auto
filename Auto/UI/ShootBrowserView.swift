@@ -63,6 +63,13 @@ struct ShootBrowserView: View {
                 VStack(spacing: 0) {
                     content(root: root)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    let jobs = model.imports.filter { $0.shootID == item.id }
+                    if !jobs.isEmpty {
+                        VStack(spacing: 8) {
+                            ForEach(jobs) { ImportProgressRow(job: $0) }
+                        }
+                        .padding(12)
+                    }
                     Divider().overlay(Theme.border)
                     statusBar
                 }
