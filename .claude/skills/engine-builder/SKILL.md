@@ -43,7 +43,7 @@ AutoTests/<Area>/
    - Use `@Test(arguments:)` for camera/layout variants.
    - Tests should run in < 2 seconds; use tiny files.
 6. **Wire into `AppModel`.** `AppModel` owns the engine instance, calls it, and maps results into UI state. Keep that glue thin.
-7. **Verify:** build + `xcodebuild test` pass. Then update ARCHITECTURE.md (module map) and ROADMAP.md (tick the item).
+7. **Verify:** build + `xcodebuild test` pass. Then update ARCHITECTURE.md (module map) and move the ROADMAP.md item to docs/ROADMAP-done.md.
 
 ---
 

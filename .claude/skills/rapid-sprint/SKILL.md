@@ -41,4 +41,4 @@ For every slice:
 1. **Spec:** add or confirm a 1-line checklist item in `ROADMAP.md` with clear done-criteria.
 2. **Build:** engine in `Core/` (see `engine-builder`), glue in `AppModel`, view in `UI/`.
 3. **Verify:** build + tests pass; for UI, launch the app and click through the popover.
-4. **Record:** tick the item in `ROADMAP.md` and commit (`feat: ...`).
+4. **Record:** move the item from `ROADMAP.md` to `docs/ROADMAP-done.md` and commit (`feat: ...`).

@@ -26,7 +26,7 @@ Use this skill to harden Auto, confirm error-free runs, and prepare a release or
 - [ ] **Real card smoke test:** one real card from each supported camera.
 - [ ] **Console clean:** no unexpected errors in Console.app filtered to `Auto` (ignore `linkd` noise).
 - [ ] **Signed & notarized:** `codesign --verify --deep --strict Auto.app` and `spctl -a -vv Auto.app` pass.
-- [ ] **Docs:** ROADMAP.md phase ticked; ARCHITECTURE.md matches the code; README run instructions still accurate.
+- [ ] **Docs:** ROADMAP.md phase items moved to docs/ROADMAP-done.md; ARCHITECTURE.md matches the code; README run instructions still accurate.
 
 ---
 
