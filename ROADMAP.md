@@ -57,6 +57,16 @@ Launch the app and tick each item. These are the UI checks still open.
 - [ ] Card browser duplicate confirmation ("Copy Anyway") before copying
 - [ ] Dual-card scenario with two real cards into one shoot with a mirror: no double copies, second card queues behind the first
 
+## Phase 2c: Manual import and shoot browser
+
+- [ ] Verify on screen: shoot browser (grid/list, breadcrumb, Quick Look, Esc), Add Files sheet, Finder drops (sorted → sheet; folder → confirmation), import progress rows
+- [ ] Move commitImport's card/symlink checks off the main actor (same pattern as card ingest)
+- [ ] Fair ordering between queued imports and queued card copies (imports currently go first)
+- [ ] List view: whole row as a drop target (only the Name column now)
+- [ ] Cancel a pending folder-drop confirmation when leaving the browser
+- [ ] Shared thumbnail cache for the shoot browser
+- [ ] Investigate one intermittent full-suite failure seen once on 2026-11-05 (2 issues, ~75 s run)
+
 ## Phase 3: Editing pipeline
 
 - [ ] `PipelineStep` protocol + `Pipeline` runner (ordered, per-step result, re-runnable, cancellable)
@@ -147,3 +157,6 @@ Launch the app and tick each item. These are the UI checks still open.
 | 2026-11-05 | Stop reverts: nothing moves until analysis finishes; stop during apply reverts the run | Developer preference |
 | 2026-11-05 | Ingest has priority: culls wait for ingest/sync before analyzing each group and before applying; cull apply, undo, replay and sync share one app-wide lock | Developer preference |
 | 2026-11-05 | Token efficiency: local pre-pass (ImageIO/Vision metrics, burst grouping by time + dHash, local triage) so Claude sees only ~1024px previews + face strips per group, with a cached system prompt and JSON schema output | Cost |
+| 2026-11-05 | Manual import (Add Files sheet + Finder drops) is its own `ImportJob`, not a pseudo-card; it reuses ShootPlanner, CopyEngine, ShootCoverageChecker and the ingest scheduling hooks | Card is tied to volumes; reuse at the seams |
+| 2026-11-05 | Drops on a shoot/Video/Photo sort by camera via the Add Files sheet; drops on a deeper folder copy exactly there after a confirmation; always copy, never move | Developer preference; no undo in the browser |
+| 2026-11-05 | Import duplicates are matched by checksum anywhere in the primary copy, including `_Rejects` | Culled photos can't come back via a drop |

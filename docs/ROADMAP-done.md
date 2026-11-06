@@ -73,6 +73,16 @@ Archive of shipped ROADMAP.md items, by phase. Not needed for day-to-day work; g
 
 ### Verify on screen (developer, remote; nothing here has been seen in a running app yet)
 
+## Phase 2c: Manual import and shoot browser
+- [x] `ImportPlanner`: manual import copy plan, reusing `ShootPlanner`
+- [x] `ImportScanner`: expands sources, detects camera, refuses in-shoot and reserved sources
+- [x] `ImportDuplicateFinder`: checksum duplicate matching anywhere in the primary copy, including `_Rejects`
+- [x] `ShootBrowser` core
+- [x] `ImportJob` / `ImportStaging` / `AppModel+Import` scheduling: fan-out to every online copy, `pendingSync`, shared queue with card ingests, cull lock
+- [x] `AddFilesSheet` + `ImportProgressRow`
+- [x] `ShootBrowserView`: grid/list, breadcrumb, Quick Look, Esc
+- [x] Finder drag and drop onto the shoot browser
+
 ## Phase 3b: Photo cull
 - [x] Cull models/settings
 - [x] PhotoCatalog
