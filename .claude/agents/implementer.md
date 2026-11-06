@@ -14,6 +14,7 @@ You implement exactly one slice in the Auto repo. Follow CLAUDE.md (already in y
    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
    xcodebuild test -project Auto.xcodeproj -scheme Auto -destination 'platform=macOS' -only-testing:AutoTests/<YourSuite> 2>&1 | grep -E "error|warning:|✘|failed|TEST|BUILD"
    ```
+   When other implementers may run in parallel, add `-derivedDataPath <your scratchpad>/dd` so you don't block on the shared build database lock.
    Iterate on your own suite; run the full suite (drop `-only-testing`) once at the end.
    If a parallel agent's unrelated in-progress work breaks the build, report it rather than editing their files.
 4. Don't commit. Report tersely: files changed, tests added, the final build/test summary lines, open questions. No code recap.
