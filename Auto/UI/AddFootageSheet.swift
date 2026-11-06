@@ -64,6 +64,7 @@ struct AddFootageSheet: View {
             cardPicker
 
             if card != nil {
+                shootNotices
                 banner
                 duplicatesBlock
                 ScrollView {
@@ -171,6 +172,44 @@ struct AddFootageSheet: View {
             Label(reason, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
         case nil:
             EmptyView()
+        }
+    }
+
+    @ViewBuilder private var shootNotices: some View {
+        let busy = model.isCopyingInto(shootID: shootID).flatMap { $0.id == cardID ? nil : $0 }
+        let copies = item?.copies ?? []
+        let online = copies.filter { $0.availability == .online }
+        let offline = copies.filter { $0.availability == .offline }
+        if busy != nil || copies.count > 1 {
+            VStack(alignment: .leading, spacing: 6) {
+                if let busy {
+                    Label("\(busy.name) is copying into this shoot. Files it brings will be skipped when this copy starts.",
+                          systemImage: "clock")
+                        .foregroundStyle(.secondary)
+                }
+                if copies.count > 1, !online.isEmpty {
+                    Label("Copies to \(Self.list(online.map(\.volumeName)))", systemImage: "externaldrive")
+                        .foregroundStyle(.secondary)
+                }
+                if !offline.isEmpty {
+                    let names = Self.list(offline.map(\.volumeName))
+                    Label("\(names) \(offline.count == 1 ? "isn't" : "aren't") connected; it'll be marked to sync.",
+                          systemImage: "externaldrive.badge.exclamationmark")
+                        .foregroundStyle(Theme.warning)
+                }
+            }
+            .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private static func list(_ names: [String]) -> String {
+        var seen = Set<String>()
+        let unique = names.filter { seen.insert($0).inserted }
+        switch unique.count {
+        case 0: return ""
+        case 1: return unique[0]
+        default: return unique.dropLast().joined(separator: ", ") + " and " + unique[unique.count - 1]
         }
     }
 
