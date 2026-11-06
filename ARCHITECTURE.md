@@ -310,6 +310,12 @@ The Phase 3 pipeline (organize → proxies → Resolve project) is not built yet
 | Tests | Swift Testing | Parameterized tests, clean `#expect` diagnostics. |
 | Persistence | `UserDefaults` for settings (work folder, auto-open, appearance); the drive index is rebuilt by scanning the work folder; known shoots in `~/Library/Application Support/Auto/shoots.json`; each shoot's identity in `.auto-shoot.json` in its folder | Simple, no database. A persisted, resumable index is Phase 4. The registry is a list of known shoots; the sidecar makes a shoot findable after a relocate or rescan. |
 
+Files in `~/Library/Application Support/Auto/`:
+
+- `shoots.json`: known shoots, each with its primary `path`, `mirrors` and `pendingSync`. Records from before mirrors decode with none. A corrupt file is quarantined, never overwritten.
+- `checksums.json`: `ChecksumStore`, MD5 cache keyed by volume, path, size, mtime, inode and ctime. Only a cache: a corrupt file means an empty cache, and it never vouches for a backup.
+- `sync-meta.json`: `SyncMetaStore`, last deep-verify date per shoot, for the UI only. An unreadable file means "never verified".
+
 ---
 
 ## 5. Resiliency & Failure Defense
