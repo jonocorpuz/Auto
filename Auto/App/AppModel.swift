@@ -206,6 +206,7 @@ final class AppModel {
     /// `verifier` is nil.
     #if DEBUG
     @ObservationIgnored var _testEngineHook: ((CopyEngine) -> Void)?
+    var _testSessionCopyDestinations: [URL] { sessionCopies.map(\.destination) }
     @ObservationIgnored var _testFreeSpace: ((URL) -> Int64?)?
     /// Sync Now: awaited after the plan is prepared and before the engine is created.
     @ObservationIgnored var _testAfterSyncPrepare: (@MainActor (UUID) async -> Void)?
@@ -822,8 +823,8 @@ final class AppModel {
                 for copied in landedFiles { store.record(copied) }
                 await store.saveIfDirty()
             }
-            sessionCopies.append(contentsOf: outcome.copied)
-            verifications.record(outcome.copied)
+            sessionCopies.append(contentsOf: landedFiles)
+            verifications.record(landedFiles)
 
             // A file is done once it reached at least one copy; the others are marked for sync.
             let done = Set(landedFiles.map(\.file.url))
