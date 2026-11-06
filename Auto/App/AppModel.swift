@@ -41,6 +41,10 @@ final class AppModel {
     /// Known shoots for the Shoots grid, newest first.
     private(set) var shoots: [ShootItem] = []
     private(set) var registry = ShootRegistry()
+    /// Add Files runs (queued, copying and finished), oldest first. Driven by `AppModel+Import`.
+    var imports: [ImportJob] = []
+    /// Shoot open in the Media tab's file browser; nil shows the overview.
+    var browsingShootID: UUID?
     private(set) var indexing = false
     /// Per (shoot, card) coverage checks for the Add Footage sheet.
     private(set) var coverage: [CoverageKey: CoverageState] = [:]
@@ -78,7 +82,7 @@ final class AppModel {
 
     /// Sidebar selection in the main window.
     var selectedTab: AppTab = .media {
-        didSet { if selectedTab != .media { browsingCardID = nil } }
+        didSet { if selectedTab != .media { browsingCardID = nil; browsingShootID = nil } }
     }
     /// Card open in the Media tab's file browser; nil shows the overview.
     var browsingCardID: Card.ID? {
@@ -178,9 +182,9 @@ final class AppModel {
     @ObservationIgnored var openSettings: () -> Void = {}
 
     @ObservationIgnored private var index: [String: [URL]] = [:]
-    @ObservationIgnored private let verifications = VerificationCache()
+    @ObservationIgnored let verifications = VerificationCache()
     /// Files CopyEngine copied and verified this session, with their exact destinations.
-    @ObservationIgnored private var sessionCopies: [CopiedFile] = []
+    @ObservationIgnored var sessionCopies: [CopiedFile] = []
     @ObservationIgnored private var indexGeneration = 0
     /// Identity of the working volume the current index was built for (nil: none).
     @ObservationIgnored private var indexedVolumeID: String?
@@ -221,8 +225,8 @@ final class AppModel {
     /// Cards whose current plan was made with "copy duplicates anyway" (no copy-time pruning).
     @ObservationIgnored private var includeDuplicatePlans: Set<Card.ID> = []
     /// Cards with an addFootage/addFiles call in flight, and those that should be recomputed when it ends.
-    @ObservationIgnored private var addInFlight: Set<Card.ID> = []
-    @ObservationIgnored private var recomputeAfterAdd: Set<Card.ID> = []
+    @ObservationIgnored var addInFlight: Set<Card.ID> = []
+    @ObservationIgnored var recomputeAfterAdd: Set<Card.ID> = []
     /// Online shoot folders the current backup verification considered (to detect changes).
     @ObservationIgnored private var backupShootFolders: Set<String> = []
     /// Shoots with a mirror operation (add / relocate / remove copy) in flight; one at a time per shoot.
@@ -233,7 +237,7 @@ final class AppModel {
     /// MD5 cache (`checksums.json` next to the registry). Seeded by every verified copy so a later sync check is all hits.
     @ObservationIgnored let checksums: ChecksumStore
     /// Cards waiting for another card's copy into an overlapping folder, in the order they asked.
-    @ObservationIgnored private var copyQueue: [Card.ID] = []
+    @ObservationIgnored var copyQueue: [Card.ID] = []
 
     // MARK: Mirror sync state (see the "Mirror sync" extension)
     /// Where each shoot's mirror check / Sync Now stands. Absent until first scheduled.
@@ -287,11 +291,11 @@ final class AppModel {
     @ObservationIgnored let cullApplier: any CullApplying
     @ObservationIgnored let cullWorkspaceRoot: URL
     @ObservationIgnored fileprivate var cullTasks: [UUID: Task<Void, Never>] = [:]
-    @ObservationIgnored fileprivate let cullWaiters = CullWaiters()
+    @ObservationIgnored let cullWaiters = CullWaiters()
     /// The app-wide mutex for anything that moves or reads files being moved: cull apply/undo, and each sync-loop job.
     @ObservationIgnored fileprivate var applyLockHeld = false
     /// True while a cull apply/undo holds the mutex: ingest queues behind it.
-    @ObservationIgnored fileprivate var cullApplying = false
+    @ObservationIgnored var cullApplying = false
     /// Number of CopyEngine runs in flight (engine.run started, not yet returned). The cull gate and apply lock wait on it.
     @ObservationIgnored var ingestRunCount = 0
     /// Shoots whose cull reached the apply step (files may have moved even if the run then failed or was stopped).
@@ -497,7 +501,7 @@ final class AppModel {
 
     /// A card is backed up only when every file is checksum-verified against a copy on the work drive.
     /// Name+size hits are just candidates; `BackupVerifier` hashes them off the main actor.
-    private func recompute(_ card: Card) {
+    func recompute(_ card: Card) {
         if case .copying = card.phase { return }
         stopVerifier(card)
         invalidateBrowserMembership(for: card)
@@ -706,7 +710,7 @@ final class AppModel {
     }
 
     /// Whether `url` is on any connected card (the source card included).
-    private func isOnCard(_ url: URL) -> Bool {
+    func isOnCard(_ url: URL) -> Bool {
         VolumeClassifier.isOnCard(url, cards: cards.map(\.volume))
     }
 
@@ -754,6 +758,7 @@ final class AppModel {
         }
         if syncBusyOverlapping(myRoots) { enqueueBehindSync(card); return }
         if cullApplying { enqueueBehindCull(card); return }
+        if importBusyOverlapping(myRoots) { enqueueBehindImport(card); return }
         dequeue(card)
         card.mirrorNote = nil
         stopVerifier(card)
@@ -953,9 +958,10 @@ final class AppModel {
 
     /// An engine just ended. Re-verify each waiting card, since the copy that finished may have made its files
     /// duplicates; `finishRecompute` then starts it (and `copy` prunes the twins from its plan).
-    private func releaseQueuedCopies() {
+    func releaseQueuedCopies() {
         cullWaiters.wake()
         flushDeferredSyncChecks()
+        startQueuedImports()
         for id in copyQueue {
             guard let queued = cards.first(where: { $0.id == id }) else { copyQueue.removeAll { $0 == id }; continue }
             guard queued.engine == nil else { continue }
@@ -963,13 +969,13 @@ final class AppModel {
         }
     }
 
-    nonisolated private struct NotEnoughSpaceError: LocalizedError {
+    nonisolated struct NotEnoughSpaceError: LocalizedError {
         let needed: Int64
         let free: Int64
         var errorDescription: String? { "Not enough space: needs \(Format.bytes(needed)), \(Format.bytes(free)) free." }
     }
 
-    private static func overlap(_ a: URL, _ b: URL) -> Bool {
+    static func overlap(_ a: URL, _ b: URL) -> Bool {
         a.standardizedFileURL == b.standardizedFileURL || ShootPlanner.isInside(a, root: b) || ShootPlanner.isInside(b, root: a)
     }
 
@@ -980,7 +986,7 @@ final class AppModel {
         return jobs.filter { job in job.root.map { keys.contains(VolumeClassifier.normalizedPath($0)) } ?? false }
     }
 
-    nonisolated private static func copyLabel(_ path: String) -> String {
+    nonisolated static func copyLabel(_ path: String) -> String {
         let parts = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
         return parts.count > 2 && parts[1] == "Volumes" ? parts[2] : "This Mac"
     }
@@ -990,7 +996,15 @@ final class AppModel {
     /// whether the registry changed (the caller saves it).
     private func markUnreachedCopies(of card: Card, plan: CopyPlan, runRoots: [URL], outcome: CopyOutcome,
                                      done: Set<URL>, blocked: Set<URL>) -> Bool {
-        guard !done.isEmpty, let shootID = plan.shootID, let record = registry.records.first(where: { $0.id == shootID }) else { return false }
+        guard let marks = pendingSync(shootID: plan.shootID, runRoots: runRoots, outcome: outcome, done: done, blocked: blocked) else { return false }
+        card.mirrorNote = marks.note
+        return true
+    }
+
+    /// Shared by cards and imports: marks every copy of `shootID` that didn't get every landed file as
+    /// `pendingSync` and returns the user-facing note (nil: nothing was short, the registry is unchanged).
+    func pendingSync(shootID: UUID?, runRoots: [URL], outcome: CopyOutcome, done: Set<URL>, blocked: Set<URL>) -> (note: String, reached: [String])? {
+        guard !done.isEmpty, let shootID, let record = registry.records.first(where: { $0.id == shootID }) else { return nil }
         let ran = Set(runRoots.map(VolumeClassifier.normalizedPath))
         var short = record.copyPaths.filter { !ran.contains(VolumeClassifier.normalizedPath(URL(fileURLWithPath: $0))) }
         var reached: [String] = []
@@ -998,16 +1012,16 @@ final class AppModel {
             let landed = Set(outcome.copied.filter { !blocked.contains($0.file.url) && ShootPlanner.isInside($0.destination, root: root) }.map(\.file.url))
             if done.isSubset(of: landed) { reached.append(Self.copyLabel(root.path)) } else { short.append(root.path) }
         }
-        guard !short.isEmpty else { return false }
+        guard !short.isEmpty else { return nil }
         for path in short { registry.setPendingSync(id: shootID, path: path, true) }
         let missing = Self.unique(short.map(Self.copyLabel)).joined(separator: " and ")
-        card.mirrorNote = reached.isEmpty
+        let note = reached.isEmpty
             ? "\(missing) didn't get every file; sync the shoot when it's connected."
             : "Copied to \(Self.unique(reached).joined(separator: " and ")). \(missing) wasn't updated; sync the shoot when it's connected."
-        return true
+        return (note, reached)
     }
 
-    nonisolated private static func unique(_ names: [String]) -> [String] {
+    nonisolated static func unique(_ names: [String]) -> [String] {
         var seen = Set<String>()
         return names.filter { seen.insert($0).inserted }
     }
@@ -1029,7 +1043,7 @@ final class AppModel {
 
     /// The plan's copy roots that are still copies of its shoot (a copy removed or moved since planning is dropped).
     /// Plans without a shoot keep all roots.
-    private func currentRoots(of plan: CopyPlan) -> [URL] {
+    func currentRoots(of plan: CopyPlan) -> [URL] {
         guard let id = plan.shootID else { return plan.copyRoots }
         guard let record = registry.records.first(where: { $0.id == id }) else { return [] }
         let current = Set(record.copyPaths.map(cmpKey))
@@ -1038,7 +1052,7 @@ final class AppModel {
 
     /// Free bytes on the volume holding `url` (nil: unknown). Injectable for tests.
     /// The free-space lookup to use off main (the test fake in DEBUG builds).
-    private func freeSpaceProvider() -> @Sendable (URL) -> Int64? {
+    func freeSpaceProvider() -> @Sendable (URL) -> Int64? {
         #if DEBUG
         if let fake = _testFreeSpace {
             nonisolated(unsafe) let hook = fake // test-only closure; tests pass pure functions
@@ -1103,8 +1117,9 @@ final class AppModel {
         syncActive.contains(shootID) || hasActiveIngest(into: shootID)
     }
 
-    private func hasActiveIngest(into shootID: UUID) -> Bool {
-        cards.contains { ($0.engine != nil || $0.queuedBehind != nil) && ($0.plan?.shootID == shootID || addTargets[$0.id] == shootID) }
+    func hasActiveIngest(into shootID: UUID) -> Bool {
+        hasActiveImport(into: shootID)
+            || cards.contains { ($0.engine != nil || $0.queuedBehind != nil) && ($0.plan?.shootID == shootID || addTargets[$0.id] == shootID) }
     }
 
     /// Why the copies of `shootID` can't be removed or moved right now (nil: they can).
@@ -1117,7 +1132,7 @@ final class AppModel {
     /// Whether another card's verdict can change because files with `copiedKeys` (name+size) just landed:
     /// it has no engine, isn't copying or backed, and some missing file shares a key. A running verifier is
     /// fine: recompute restarts it, and the verification cache keeps what it already proved.
-    private func needsRecompute(_ card: Card, afterCopyOf copiedKeys: Set<String>) -> Bool {
+    func needsRecompute(_ card: Card, afterCopyOf copiedKeys: Set<String>) -> Bool {
         guard card.engine == nil else { return false }
         switch card.phase {
         case .copying, .backed: return false
@@ -1127,7 +1142,7 @@ final class AppModel {
         return card.missing.contains { copiedKeys.contains($0.key) }
     }
 
-    nonisolated private static func preflight(workRoot: URL?, shootID: UUID?) throws {
+    nonisolated static func preflight(workRoot: URL?, shootID: UUID?) throws {
         guard let root = workRoot else { return }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else {
@@ -1333,7 +1348,7 @@ extension AppModel {
         await refreshShoots()
     }
 
-    private func saveRegistry() async {
+    func saveRegistry() async {
         do { try await ShootStore.save(registry, to: registryURL) } catch {
             NSLog("Auto: couldn't save shoots.json: \(error)")
         }
@@ -2257,7 +2272,7 @@ extension AppModel {
     }
 
     /// A card is about to write into these roots: checks of the overlapping shoots are stale, so cancel them.
-    fileprivate func noteIngestStarting(roots: [URL]) {
+    func noteIngestStarting(roots: [URL]) {
         for item in shoots {
             guard item.record.copyPaths.contains(where: { path in roots.contains { Self.overlap($0, URL(fileURLWithPath: path)) } }) else { continue }
             let id = item.id
@@ -2277,7 +2292,7 @@ extension AppModel {
         scheduleSyncCheck(ids, force: true)
     }
 
-    fileprivate func syncBusyOverlapping(_ roots: [URL]) -> Bool {
+    func syncBusyOverlapping(_ roots: [URL]) -> Bool {
         syncActive.contains { id in
             guard let item = shoots.first(where: { $0.id == id }) else { return false }
             return item.record.copyPaths.contains { path in roots.contains { Self.overlap($0, URL(fileURLWithPath: path)) } }
