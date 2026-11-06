@@ -135,6 +135,7 @@ nonisolated struct CullPlan: Sendable {
     let settings: CullSettings
     let decisions: [CullDecision]
     let records: [String: PhotoRecord]
+    var catalogCopy: URL? = nil
 }
 
 nonisolated enum CullPhase: Sendable, Equatable {
