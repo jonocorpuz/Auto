@@ -93,7 +93,17 @@ struct AppCullTests {
         }
         #expect(summary.photos == 3)
         #expect(env.applier.plans.count == 1)
+        #expect(env.applier.applyOnMainThread == [false])
         #expect(env.model.cullBlockReason(shootID: shoot.id) == nil)
+    }
+
+    @Test func engineAssignmentAloneIsNotARunningIngest() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.dir) }
+        let card = Card(volume: env.dir.appendingPathComponent("CARD"), name: "CARD", identity: "card-\(UUID().uuidString)")
+        card.engine = CopyEngine()   // preflight: not counted until engine.run starts
+        env.model._testInsert(card: card)
+        #expect(env.model.cullBusyNotice() == nil)
     }
 
     @Test func busyNoticeWhileIngesting() async throws {
@@ -101,10 +111,10 @@ struct AppCullTests {
         defer { try? FileManager.default.removeItem(at: env.dir) }
         #expect(env.model.cullBusyNotice() == nil)
         let card = Card(volume: env.dir.appendingPathComponent("CARD"), name: "CARD", identity: "card-\(UUID().uuidString)")
-        card.engine = CopyEngine()
+        env.model.ingestRunCount = 1
         env.model._testInsert(card: card)
         #expect(env.model.cullBusyNotice() == "Ingest in progress. The cull will start when it finishes.")
-        card.engine = nil
+        env.model.ingestRunCount = 0
         #expect(env.model.cullBusyNotice() == nil)
     }
 
@@ -113,7 +123,7 @@ struct AppCullTests {
         defer { try? FileManager.default.removeItem(at: env.dir) }
         let shoot = try await makeShoot(env, name: "Wait")
         let card = Card(volume: env.dir.appendingPathComponent("CARD"), name: "CARD", identity: "card-\(UUID().uuidString)")
-        card.engine = CopyEngine()
+        env.model.ingestRunCount = 1
         env.model._testInsert(card: card)
         #expect(env.model.startCull(shootID: shoot.id))
         guard case .waiting? = env.model.cullStates[shoot.id] else { Issue.record("expected waiting"); return }
@@ -126,7 +136,7 @@ struct AppCullTests {
             return false
         }
         #expect(stopped)
-        card.engine = nil
+        env.model.ingestRunCount = 0
     }
 
     @Test func twoShootsConcurrentSameShootRefused() async throws {

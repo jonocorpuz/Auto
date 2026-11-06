@@ -292,6 +292,10 @@ final class AppModel {
     @ObservationIgnored fileprivate var applyLockHeld = false
     /// True while a cull apply/undo holds the mutex: ingest queues behind it.
     @ObservationIgnored fileprivate var cullApplying = false
+    /// Number of CopyEngine runs in flight (engine.run started, not yet returned). The cull gate and apply lock wait on it.
+    @ObservationIgnored var ingestRunCount = 0
+    /// Shoots whose cull reached the apply step (files may have moved even if the run then failed or was stopped).
+    @ObservationIgnored fileprivate var cullApplyEntered: Set<UUID> = []
     /// Most relevant run per shoot, read from the primary's journal by `loadLastCullRun`.
     private(set) var cullLastRuns: [UUID: CullRunSummary] = [:]
 
@@ -848,8 +852,11 @@ final class AppModel {
             }
             let runJobs = Self.jobs(in: card.plan?.jobs ?? plan.jobs, roots: runRoots, of: myRoots)
             card.progress = CopyProgress(filesTotal: runJobs.count, bytesTotal: runJobs.reduce(0) { $0 + $1.file.size })
+            ingestRunCount += 1
             let outcome = await engine.run(runJobs) { progress in card.progress = progress }
             card.engine = nil
+            ingestRunCount -= 1
+            releaseQueuedCopies()
             // A file with a failed checksum on any copy, or copies that disagree, is not done: its jobs stay.
             let blocked = Self.integrityBlocked(outcome)
             let landedFiles = outcome.copied.filter { !blocked.contains($0.file.url) }
@@ -2395,11 +2402,12 @@ extension AppModel {
             let work = syncWork.remove(at: index)
             // Checks and syncs read or write the shoot's files: never alongside a cull apply or undo.
             let locked = await acquireApplyLock(excludingIngest: false)
+            guard locked else { break }
             switch work.kind {
             case .check: await performCheck(work.id, force: work.force, deep: work.deep)
             case .sync: await performSyncNow(work.id)
             }
-            if locked { releaseApplyLock() }
+            releaseApplyLock()
         }
         syncRunner = nil
         syncSleeper = nil
@@ -2537,7 +2545,14 @@ extension AppModel {
             return
         }
         // Bring every copy up to date with the cull journals first, so rejects are never copied back.
-        let replayNote = await Self.replayCullJournals(copies: syncCopies, cardVolumes: cardVolumes())
+        // Mirrors follow the main copy: the registry's primary is always the replay source.
+        let replayNote: String?
+        if let primary = primaryCopyURL(id, among: syncCopies) {
+            let mirrors = syncCopies.filter { $0.standardizedFileURL != primary.standardizedFileURL }
+            replayNote = await Self.replayCullJournals(primary: primary, mirrors: mirrors, cardVolumes: cardVolumes())
+        } else {
+            replayNote = "Cull replay skipped: the main copy isn't online."
+        }
         // Never plan from a stale report: look again first (cache hits make this cheap).
         await performCheck(id, force: true, deep: false)
         guard case .done(let report, _)? = syncStates[id], report.notChecked == nil, report.depth == .checksums,
@@ -2662,7 +2677,7 @@ extension AppModel {
 extension AppModel {
     // MARK: Locking
 
-    private var ingestRunning: Bool { cards.contains { $0.engine != nil } }
+    private var ingestRunning: Bool { ingestRunCount > 0 }
 
     /// Takes the app-wide mutex. With `excludingIngest` (a cull apply/undo) it also waits for every running ingest
     /// and makes new ingests queue until `releaseApplyLock`. Returns false if the task was cancelled while waiting.
@@ -2698,9 +2713,11 @@ extension AppModel {
         }
     }
 
-    fileprivate func cullWithApplyLock(_ body: @Sendable () async throws -> Void) async throws {
+    /// `body` is `@concurrent`: it runs off the main actor even though this method is main-actor isolated.
+    fileprivate func cullWithApplyLock(shootID: UUID, _ body: @concurrent @Sendable () async throws -> Void) async throws {
         guard await acquireApplyLock(excludingIngest: true) else { throw CancellationError() }
         defer { releaseApplyLock() }
+        cullApplyEntered.insert(shootID)
         try await body()
     }
 
@@ -2715,6 +2732,7 @@ extension AppModel {
         }
         if cullTasks[shootID] != nil { return "Already culling this shoot" }
         guard item.copies.contains(where: { $0.availability == .online }) else { return "Shoot is offline" }
+        guard item.copies.first(where: \.isPrimary)?.availability == .online else { return "Connect the main copy of this shoot to cull" }
         return nil
     }
 
@@ -2744,6 +2762,14 @@ extension AppModel {
         let volumes = cardVolumes()
         guard let count = await Self.countPhotos(primary, cardVolumes: volumes) else { return nil }
         return (count, CullEstimator.estimate(photoCount: count, model: cullSettings.model, settings: cullSettings.clamped()))
+    }
+
+    /// The registry's primary folder, when it is among `copies` (standardized path match).
+    private func primaryCopyURL(_ shootID: UUID, among copies: [URL]) -> URL? {
+        guard let item = shoots.first(where: { $0.id == shootID }),
+              let primary = item.copies.first(where: \.isPrimary) else { return nil }
+        let url = URL(fileURLWithPath: primary.path, isDirectory: true).standardizedFileURL
+        return copies.first { $0.standardizedFileURL == url }
     }
 
     /// Online copies of the shoot, primary first.
@@ -2777,12 +2803,17 @@ extension AppModel {
             await self?.cullGate()
             if Task.isCancelled { await self?.finishCull(shootID, .stopped(nil)); return }
             self?.cullStates[shootID] = .running(CullProgress(phase: .cataloging, fraction: 0, spentUSD: 0))
+            // Mirrors follow the main copy: bring any mirror that lacks the primary's earlier culls up to date first.
+            if copies.count > 1, let replayed = await self?.replayBeforeCull(primary: copies[0], mirrors: Array(copies.dropFirst()), volumes: volumes) {
+                if let note = replayed.note { self?.cullNotes[shootID] = note }
+                if replayed.failed { await self?.finishCull(shootID, .stopped(nil)); return }
+            }
             let outcome = await runner.run(
                 shoot: shoot, copies: copies, cardVolumes: volumes, settings: settings,
                 gate: { [weak self] in await self?.cullGate() },
                 withApplyLock: { [weak self] body in
                     guard let self else { throw CancellationError() }
-                    try await self.cullWithApplyLock(body)
+                    try await self.cullWithApplyLock(shootID: shootID, body)
                 },
                 onProgress: { [weak self] progress in
                     guard let self, self.cullTasks[shootID] != nil else { return }
@@ -2798,11 +2829,26 @@ extension AppModel {
         cullTasks[shootID]?.cancel()
     }
 
+    /// Replays the primary's journal onto lagging mirrors under the apply lock. Nil when no mirror lags.
+    private func replayBeforeCull(primary: URL, mirrors: [URL], volumes: [URL]) async -> (note: String?, failed: Bool)? {
+        guard await Self.mirrorsLag(primary: primary, mirrors: mirrors) else { return nil }
+        guard await acquireApplyLock(excludingIngest: true) else { return (nil, true) }
+        let note = await Self.replayCullJournals(primary: primary, mirrors: mirrors, cardVolumes: volumes)
+        releaseApplyLock()
+        return (note, note?.hasPrefix("Cull replay:") == true)
+    }
+
     private func finishCull(_ shootID: UUID, _ outcome: CullOutcome) async {
         cullTasks[shootID] = nil
         cullStates[shootID] = .finished(outcome)
-        guard case .completed(let summary) = outcome else { return }
-        await afterCullChangedFiles(shootID, moved: summary.rejected > 0)
+        // Files may have moved on completion, on a failure after apply started, and on a stop (rollback may be partial).
+        switch outcome {
+        case .completed(let summary):
+            cullApplyEntered.remove(shootID)
+            await afterCullChangedFiles(shootID, moved: summary.rejected > 0)
+        case .failed, .stopped:
+            if cullApplyEntered.remove(shootID) != nil { await afterCullChangedFiles(shootID, moved: true) }
+        }
     }
 
     /// Offline copies missed the moves (sync replays the journal later), the summaries/thumbnails change,
@@ -2835,7 +2881,7 @@ extension AppModel {
         guard await acquireApplyLock(excludingIngest: true) else { cullStates[shootID] = nil; return false }
         cullStates[shootID] = .running(CullProgress(phase: .undoing(done: 0, total: 0), fraction: 0, spentUSD: 0))
         let volumes = cardVolumes()
-        let result = await Self.performUndo(copies: copies, cardVolumes: volumes) { [weak self] done, total in
+        let result = await Self.performUndo(runID: cullLastRuns[shootID]?.runID, copies: copies, cardVolumes: volumes) { [weak self] done, total in
             Task { @MainActor [weak self] in
                 guard let self, case .running? = self.cullStates[shootID] else { return }
                 self.cullStates[shootID] = .running(CullProgress(
@@ -2850,6 +2896,8 @@ extension AppModel {
             return true
         case .failure(let error):
             cullNotes[shootID] = error.localizedDescription
+            // Undo can fail after partial progress: refresh and re-check regardless.
+            await afterCullChangedFiles(shootID, moved: true)
             return false
         }
     }
@@ -2857,9 +2905,9 @@ extension AppModel {
     // MARK: Off-main work
 
     @concurrent
-    nonisolated private static func performUndo(copies: [URL], cardVolumes: [URL],
+    nonisolated private static func performUndo(runID: UUID?, copies: [URL], cardVolumes: [URL],
                                                 onProgress: @escaping @Sendable (Int, Int) -> Void) async -> Result<CullRunSummary, Error> {
-        do { return .success(try CullApplier.undo(runID: nil, copies: copies, cardVolumes: cardVolumes, onProgress: onProgress)) }
+        do { return .success(try CullApplier.undo(runID: runID, copies: copies, cardVolumes: cardVolumes, onProgress: onProgress)) }
         catch { return .failure(error) }
     }
 
@@ -2873,22 +2921,23 @@ extension AppModel {
         (try? PhotoCatalog.scan(shoot: copy, cardVolumes: cardVolumes))?.count
     }
 
-    /// Sync Now step: copies the most advanced cull journal onto the other copies (moves only; nothing is
-    /// copied or deleted), so the sync planner sees matching paths. Returns a note when pairs couldn't be replayed.
+    /// True when an online mirror's journal lacks a run the primary has.
     @concurrent
-    nonisolated fileprivate static func replayCullJournals(copies: [URL], cardVolumes: [URL]) async -> String? {
-        guard copies.count >= 2 else { return nil }
-        var best = copies[0]
-        var bestCount = -1
-        for copy in copies {
-            let n = (try? CullJournal.runs(in: copy).count) ?? 0
-            if n > bestCount { best = copy; bestCount = n }
-        }
-        guard bestCount > 0 else { return nil }
+    nonisolated fileprivate static func mirrorsLag(primary: URL, mirrors: [URL]) async -> Bool {
+        let source = Set(((try? CullJournal.runs(in: primary)) ?? []).map(\.runID))
+        guard !source.isEmpty else { return false }
+        return mirrors.contains { !source.isSubset(of: Set(((try? CullJournal.runs(in: $0)) ?? []).map(\.runID))) }
+    }
+
+    /// Copies the primary's cull journal onto the mirrors (moves only; nothing is copied or deleted), so the
+    /// sync planner sees matching paths. The primary is always the source. Returns a note when pairs couldn't be replayed.
+    @concurrent
+    nonisolated fileprivate static func replayCullJournals(primary: URL, mirrors: [URL], cardVolumes: [URL]) async -> String? {
+        guard !mirrors.isEmpty, ((try? CullJournal.runs(in: primary).count) ?? 0) > 0 else { return nil }
         var skipped = 0
         var failed: String?
-        for copy in copies where copy.standardizedFileURL != best.standardizedFileURL {
-            do { skipped += try CullReplay.replay(from: best, to: copy, cardVolumes: cardVolumes).skipped.count }
+        for copy in mirrors {
+            do { skipped += try CullReplay.replay(from: primary, to: copy, cardVolumes: cardVolumes).skipped.count }
             catch { failed = error.localizedDescription }
         }
         if let failed { return "Cull replay: \(failed)" }
