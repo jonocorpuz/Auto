@@ -207,7 +207,7 @@ final class AppModel {
     #if DEBUG
     @ObservationIgnored var _testEngineHook: ((CopyEngine) -> Void)?
     var _testSessionCopyDestinations: [URL] { sessionCopies.map(\.destination) }
-    @ObservationIgnored var _testFreeSpace: ((URL) -> Int64?)?
+    @ObservationIgnored var _testFreeSpace: (@Sendable (URL) -> Int64?)?
     /// Sync Now: awaited after the plan is prepared and before the engine is created.
     @ObservationIgnored var _testAfterSyncPrepare: (@MainActor (UUID) async -> Void)?
     @ObservationIgnored var _testSyncEngineHook: ((CopyEngine) -> Void)?
@@ -721,28 +721,15 @@ final class AppModel {
         // Destinations and free space are checked per copy. A copy that fails is left out (marked for sync
         // afterwards) as long as another one can take the files; if none can, the card fails.
         let volumes = volumes(including: card)
-        var usable: [URL] = []
-        var firstError: String?
-        for root in currentRoots(of: plan) {
-            let rootJobs = Self.jobs(in: plan.jobs, roots: [root], of: myRoots)
-            do {
-                for dir in ShootPlanner.directories(for: rootJobs) {
-                    try ShootPlanner.checkDestination(dir, root: root, cardVolumes: volumes)
-                }
-                let needed = rootJobs.reduce(Int64(0)) { $0 + $1.file.size }
-                if let free = freeSpace(root), free < needed {
-                    throw NotEnoughSpaceError(needed: needed, free: free)
-                }
-                usable.append(root)
-            } catch {
-                firstError = firstError ?? error.localizedDescription
-            }
-        }
+        // The checks themselves run off main in the task below, with the preflight.
+        let usable = currentRoots(of: plan)
         guard !usable.isEmpty else {
-            card.phase = .failed(firstError ?? "No copy folder is available.")
+            card.phase = .failed("No copy folder is available.")
             cardSettledAfterStop(card)
             return
         }
+        let rootChecks: [(root: URL, jobs: [CopyJob])] = usable.map { ($0, Self.jobs(in: plan.jobs, roots: [$0], of: myRoots)) }
+        let freeSpaceOf = freeSpaceProvider()
 
         let engine = CopyEngine()
         card.engine = engine
@@ -763,9 +750,18 @@ final class AppModel {
             // Off main: every copy folder must still exist, and carry the shoot's id for an add-footage plan,
             // before a single byte is written. A copy that fails is left out while another passes.
             let checks: [(root: URL, error: String?)] = await Task.detached {
-                usable.map { root in
-                    do { try Self.preflight(workRoot: root, shootID: preflightShootID); return (root, nil) }
-                    catch { return (root, error.localizedDescription) }
+                rootChecks.map { entry in
+                    do {
+                        for dir in ShootPlanner.directories(for: entry.jobs) {
+                            try ShootPlanner.checkDestination(dir, root: entry.root, cardVolumes: volumes)
+                        }
+                        let needed = entry.jobs.reduce(Int64(0)) { $0 + $1.file.size }
+                        if let free = freeSpaceOf(entry.root), free < needed {
+                            throw NotEnoughSpaceError(needed: needed, free: free)
+                        }
+                        try Self.preflight(workRoot: entry.root, shootID: preflightShootID)
+                        return (entry.root, nil)
+                    } catch { return (entry.root, error.localizedDescription) }
                 }
             }.value
             guard card.engine === engine else { return }
@@ -919,7 +915,7 @@ final class AppModel {
         }
     }
 
-    private struct NotEnoughSpaceError: LocalizedError {
+    nonisolated private struct NotEnoughSpaceError: LocalizedError {
         let needed: Int64
         let free: Int64
         var errorDescription: String? { "Not enough space: needs \(Format.bytes(needed)), \(Format.bytes(free)) free." }
@@ -993,11 +989,19 @@ final class AppModel {
     }
 
     /// Free bytes on the volume holding `url` (nil: unknown). Injectable for tests.
-    private func freeSpace(_ url: URL) -> Int64? {
+    /// The free-space lookup to use off main (the test fake in DEBUG builds).
+    private func freeSpaceProvider() -> @Sendable (URL) -> Int64? {
         #if DEBUG
-        if let fake = _testFreeSpace { return fake(url) }
+        if let fake = _testFreeSpace {
+            nonisolated(unsafe) let hook = fake // test-only closure; tests pass pure functions
+            return { hook($0) }
+        }
         #endif
-        return (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
+        return { Self.diskFreeSpace($0) }
+    }
+
+    nonisolated private static func diskFreeSpace(_ url: URL) -> Int64? {
+        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
     }
 
     /// Copy-time pruning dropped files already verified inside a copy of the target shoot: every other copy of
@@ -1999,16 +2003,29 @@ extension AppModel {
             throw ShootPlanner.PathError.outsideWorkFolder
         }
         let cardVolumes = volumes(including: card)
-        func jobsFor(_ root: URL) -> [CopyJob] { jobs.filter { $0.root == root } }
         // The primary must be usable. A mirror that can't take its folders is left out; it is marked for sync after the copy.
-        try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobsFor(folder)), root: folder, cardVolumes: cardVolumes)
+        // Directories are created off main; state is re-checked after the await.
+        let perRoot: [(root: URL, dirs: [URL])] = ([folder] + live.mirrors).map { root in
+            (root, ShootPlanner.directories(for: jobs.filter { $0.root == root }))
+        }
+        let created: [(root: URL, error: Error?)] = await Task.detached {
+            perRoot.map { entry in
+                do { try ShootPlanner.createDirectories(entry.dirs, root: entry.root, cardVolumes: cardVolumes); return (entry.root, nil) }
+                catch { return (entry.root, error) }
+            }
+        }.value
+        if let primaryError = created.first?.error { throw primaryError }
+        guard cards.contains(where: { $0 === card }), canAddFootage(card),
+              case .online(let after)? = shoots.first(where: { $0.id == shootID })?.availability, after.folder == folder else {
+            throw CoverageUnavailableError()
+        }
+        if planWasNil, card.plan != nil { throw PendingPlanError() }
         var roots = [folder]
-        for mirror in live.mirrors {
-            do {
-                try ShootPlanner.createDirectories(ShootPlanner.directories(for: jobsFor(mirror)), root: mirror, cardVolumes: cardVolumes)
-                roots.append(mirror)
-            } catch {
-                NSLog("Auto: skipping copy \(mirror.path) for this ingest: \(error.localizedDescription)")
+        for entry in created.dropFirst() {
+            if let error = entry.error {
+                NSLog("Auto: skipping copy \(entry.root.path) for this ingest: \(error.localizedDescription)")
+            } else if after.mirrors.contains(entry.root) {
+                roots.append(entry.root)
             }
         }
         stopVerifier(card)
