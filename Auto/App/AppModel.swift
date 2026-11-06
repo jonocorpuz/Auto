@@ -207,6 +207,9 @@ final class AppModel {
     #if DEBUG
     @ObservationIgnored var _testEngineHook: ((CopyEngine) -> Void)?
     @ObservationIgnored var _testFreeSpace: ((URL) -> Int64?)?
+    /// Sync Now: awaited after the plan is prepared and before the engine is created.
+    @ObservationIgnored var _testAfterSyncPrepare: (@MainActor (UUID) async -> Void)?
+    @ObservationIgnored var _testSyncEngineHook: ((CopyEngine) -> Void)?
     @ObservationIgnored fileprivate var _testMembershipRunner: MembershipRunner?
     #endif
     @ObservationIgnored private var recomputePending: Set<Card.ID> = []
@@ -241,7 +244,7 @@ final class AppModel {
     /// Quiet period before a scheduled check starts; requests inside it coalesce.
     @ObservationIgnored var syncDebounce: Duration = .seconds(2)
     /// A non-forced check is skipped when the last complete one is younger than this and the copies are unchanged.
-    @ObservationIgnored var syncThrottle: TimeInterval = 600
+    @ObservationIgnored var syncThrottle: Duration = .seconds(600)
     /// Runs one check. Injectable so tests can hold or fake it; the default is `ShootSyncChecker.run`.
     @ObservationIgnored var syncChecker: SyncCheckRunner = AppModel.realSyncChecker
     /// Checks actually started (a throttled, deferred or offline request doesn't count). For tests.
@@ -255,6 +258,14 @@ final class AppModel {
     @ObservationIgnored fileprivate var syncStopped: Set<UUID> = []
     @ObservationIgnored fileprivate var syncSignatures: [UUID: [String]] = [:]
     @ObservationIgnored fileprivate var startupLoad: Task<Void, Never>?
+    /// Shoots whose check was held back (or invalidated) by an ingest copy: re-checked once an engine ends.
+    @ObservationIgnored fileprivate var syncDeferred: Set<UUID> = []
+    /// Shoots with a Sync Now job in flight (its first check through its re-check).
+    @ObservationIgnored fileprivate var syncActive: Set<UUID> = []
+    /// Mount identity of each copy and the time of the last complete check, for the throttle.
+    @ObservationIgnored fileprivate var syncMounts: [UUID: [String]] = [:]
+    @ObservationIgnored fileprivate var syncDoneAt: [UUID: ContinuousClock.Instant] = [:]
+    @ObservationIgnored fileprivate var metaSave: Task<Void, Never>?
 
     init(registryURL: URL = ShootStore.defaultURL(),
          thumbnails: any ThumbnailProvider = QLThumbnailProvider(),
@@ -696,6 +707,7 @@ final class AppModel {
             enqueue(card, behind: blocker)
             return
         }
+        if syncBusyOverlapping(myRoots) { enqueueBehindSync(card); return }
         dequeue(card)
         card.mirrorNote = nil
         stopVerifier(card)
@@ -732,6 +744,7 @@ final class AppModel {
 
         let engine = CopyEngine()
         card.engine = engine
+        noteIngestStarting(roots: myRoots)
         #if DEBUG
         _testEngineHook?(engine)
         #endif
@@ -896,6 +909,7 @@ final class AppModel {
     /// An engine just ended. Re-verify each waiting card, since the copy that finished may have made its files
     /// duplicates; `finishRecompute` then starts it (and `copy` prunes the twins from its plan).
     private func releaseQueuedCopies() {
+        flushDeferredSyncChecks()
         for id in copyQueue {
             guard let queued = cards.first(where: { $0.id == id }) else { copyQueue.removeAll { $0 == id }; continue }
             guard queued.engine == nil else { continue }
@@ -1031,7 +1045,8 @@ final class AppModel {
 
     /// A card is copying into, or queued to copy into, `shootID`: its copies can't be removed or moved.
     private func hasActiveCopy(into shootID: UUID) -> Bool {
-        cards.contains { ($0.engine != nil || $0.queuedBehind != nil) && ($0.plan?.shootID == shootID || addTargets[$0.id] == shootID) }
+        syncActive.contains(shootID)
+            || cards.contains { ($0.engine != nil || $0.queuedBehind != nil) && ($0.plan?.shootID == shootID || addTargets[$0.id] == shootID) }
     }
 
     /// Whether another card's verdict can change because files with `copiedKeys` (name+size) just landed:
@@ -1309,7 +1324,15 @@ extension AppModel {
         }
         // A copy came, went or changed: check (or re-evaluate) the shoots whose copies changed. Covers launch.
         syncSignatures = syncSignatures.filter { key, _ in shoots.contains { $0.id == key } }
-        if !syncChanged.isEmpty { scheduleSyncCheck(syncChanged, force: false) }
+        var syncForced = Set<UUID>()
+        for id in syncChanged {
+            guard let item = shoots.first(where: { $0.id == id }), item.record.copyPaths.count >= 2,
+                  item.copies.contains(where: { $0.availability != .online }) else { continue }
+            syncForced.insert(id)
+            if !syncActive.contains(id) { syncStates[id] = .unknown(unknownReason(item)) }
+        }
+        if !syncForced.isEmpty { scheduleSyncCheck(syncForced, force: true) }
+        if !syncChanged.subtracting(syncForced).isEmpty { scheduleSyncCheck(syncChanged.subtracting(syncForced), force: false) }
         // The set of shoots that count as backup locations changed: re-verify the cards.
         for item in shoots {
             if case .online? = item.availability { continue }
@@ -2101,14 +2124,65 @@ extension AppModel {
             if let partial, partial.isOutOfSync { return counts(partial) }
             return .checking(progress)
         case .done(let report, let at)?:
+            if let stale = staleReason(shootID, report) { return .unknown(reason: stale) }
             if report.isOutOfSync { return counts(report) }
             if report.isInSync {
+                if registry.records.first(where: { $0.id == shootID })?.pendingSync.isEmpty == false {
+                    return .unknown(reason: "Updating sync status…")
+                }
                 return .inSync(copies: report.copies.count, checkedAt: at, deepVerifiedAt: lastDeepVerify[shootID])
             }
             return .unknown(reason: "Not fully checked yet")
         case .syncing(let progress)?:
             return .syncing(progress)
         }
+    }
+
+    /// Why a finished report no longer describes the shoot (a copy went away or was added, an ingest is writing), or nil.
+    private func staleReason(_ id: UUID, _ report: ShootSyncReport) -> String? {
+        guard let item = shoots.first(where: { $0.id == id }) else { return "Shoot not found" }
+        if item.copies.contains(where: { $0.availability != .online }) { return unknownReason(item) }
+        guard case .online(let shoot)? = item.availability,
+              shoot.copies.map({ Self.copyKey($0.path) }) == report.copies.map({ Self.copyKey($0.path) }) else {
+            return "The copies changed · checking again"
+        }
+        if isIngesting(into: shoot.copies, shootID: id) { return "Copying footage…" }
+        return nil
+    }
+
+    /// A card is about to write into these roots: checks of the overlapping shoots are stale, so cancel them.
+    fileprivate func noteIngestStarting(roots: [URL]) {
+        for item in shoots {
+            guard item.record.copyPaths.contains(where: { path in roots.contains { Self.overlap($0, URL(fileURLWithPath: path)) } }) else { continue }
+            let id = item.id
+            guard item.record.copyPaths.count >= 2 else { continue }
+            syncGenerations[id, default: 0] += 1
+            if let running = syncRunning, running.id == id { running.task.cancel() }
+            syncWork.removeAll { $0.id == id && $0.kind == .check }
+            syncStates[id] = .unknown("Copying footage…")
+            syncDeferred.insert(id)
+        }
+    }
+
+    fileprivate func flushDeferredSyncChecks() {
+        guard !syncDeferred.isEmpty else { return }
+        let ids = syncDeferred
+        syncDeferred = []
+        scheduleSyncCheck(ids, force: true)
+    }
+
+    fileprivate func syncBusyOverlapping(_ roots: [URL]) -> Bool {
+        syncActive.contains { id in
+            guard let item = shoots.first(where: { $0.id == id }) else { return false }
+            return item.record.copyPaths.contains { path in roots.contains { Self.overlap($0, URL(fileURLWithPath: path)) } }
+        }
+    }
+
+    /// Queued behind a Sync Now rather than another card (`queuedBehind` points at the card itself).
+    fileprivate func enqueueBehindSync(_ card: Card) {
+        if !copyQueue.contains(card.id) { copyQueue.append(card.id) }
+        card.queuedBehind = card.id
+        card.queueNote = "Waiting for Sync Now to finish"
     }
 
     /// Queues a check for each shoot (debounced; coalesced per shoot). `force` skips the throttle; `deep`
@@ -2153,12 +2227,20 @@ extension AppModel {
         syncStates[id] = nil
         syncNotes[id] = nil
         syncSignatures[id] = nil
+        syncMounts[id] = nil
+        syncDoneAt[id] = nil
+        syncDeferred.remove(id)
         if lastDeepVerify.removeValue(forKey: id) != nil { persistDeepVerify() }
     }
 
     private func persistDeepVerify() {
         let dates = lastDeepVerify, url = syncMetaURL
-        Task.detached { SyncMetaStore.save(dates, to: url) }
+        let previous = metaSave
+        // Chained so an older snapshot can never be written after a newer one.
+        metaSave = Task.detached {
+            await previous?.value
+            SyncMetaStore.save(dates, to: url)
+        }
     }
 
     private func enqueueSync(_ ids: Set<UUID>, kind: SyncWork.Kind, force: Bool, deep: Bool, delay: Duration) {
@@ -2245,19 +2327,28 @@ extension AppModel {
               item.copies.allSatisfy({ $0.availability == .online }),
               shoot.copies.count == item.record.copyPaths.count else { return ([], .unknown(unknownReason(item))) }
         if isIngesting(into: shoot.copies, shootID: id) {
+            syncDeferred.insert(id)
             return ([], .unknown("Waiting for a copy into this shoot to finish"))
         }
         return (shoot.copies, nil)
     }
 
     private func performCheck(_ id: UUID, force: Bool, deep: Bool) async {
-        guard shoots.contains(where: { $0.id == id }) else { syncStates[id] = nil; return }
+        guard let item = shoots.first(where: { $0.id == id }) else { syncStates[id] = nil; return }
+        // Mount identity of every copy (a remounted or swapped drive is a new volume): read off main, before
+        // the synchronous part below, so the generation captured there cannot miss a bump.
+        let provider = volumeIDProvider
+        let paths = item.record.copyPaths
+        let mounts = await Task.detached { paths.map { provider(URL(fileURLWithPath: $0, isDirectory: true)) ?? "?" } }.value
         let (urls, blocked) = checkableCopies(id)
         if let blocked { syncStates[id] = blocked; return }
-        if !force, case .done(let last, let at)? = syncStates[id], last.notChecked == nil, last.depth == .checksums,
-           Date().timeIntervalSince(at) < syncThrottle, last.copies.map({ Self.copyKey($0.path) }) == urls.map({ Self.copyKey($0.path) }) {
+        if !force, case .done(let last, _)? = syncStates[id], last.notChecked == nil, last.depth == .checksums,
+           let doneAt = syncDoneAt[id], ContinuousClock.now - doneAt < syncThrottle, syncMounts[id] == mounts,
+           last.copies.map({ Self.copyKey($0.path) }) == urls.map({ Self.copyKey($0.path) }) {
             return
         }
+        // Only copies that were pending when this check began may be cleared by it.
+        let pendingAtStart = registry.records.first(where: { $0.id == id })?.pendingSync ?? []
         let gen = syncGenerations[id, default: 0]
         syncChecksStarted += 1
         syncStates[id] = .checking(SyncProgress(phase: .listing), partial: nil)
@@ -2283,20 +2374,23 @@ extension AppModel {
             syncStates[id] = .unknown("The copy on \(Self.driveLabel(url)) couldn't be read: \(message)")
         case nil:
             syncStates[id] = .done(report, at: Date())
+            syncDoneAt[id] = .now
+            syncMounts[id] = mounts
             if deep && report.isInSync {
                 lastDeepVerify[id] = Date()
                 persistDeepVerify()
             }
-            await clearPendingSync(id, after: report)
+            await clearPendingSync(id, after: report, only: pendingAtStart)
         }
     }
 
     /// After a complete check: a copy that is missing nothing and takes part in no conflict is no longer pending.
-    private func clearPendingSync(_ id: UUID, after report: ShootSyncReport) async {
+    private func clearPendingSync(_ id: UUID, after report: ShootSyncReport, only snapshot: [String]) async {
         guard report.notChecked == nil, report.depth == .checksums,
               let record = registry.records.first(where: { $0.id == id }), !record.pendingSync.isEmpty else { return }
         var changed = false
-        for path in record.pendingSync {
+        let allowed = Set(snapshot.map(Self.copyKey))
+        for path in record.pendingSync where allowed.contains(Self.copyKey(path)) {
             guard let root = report.copies.first(where: { Self.copyKey($0.path) == Self.copyKey(path) }) else { continue }
             let incomplete = !(report.missing[root] ?? []).isEmpty
                 || report.conflicts.contains { $0.copies.contains { Self.copyKey($0.path) == Self.copyKey(path) } }
@@ -2313,15 +2407,23 @@ extension AppModel {
 
     private func performSyncNow(_ id: UUID) async {
         syncStopped.remove(id)
+        syncActive.insert(id)
+        defer {
+            syncActive.remove(id)
+            releaseQueuedCopies()
+        }
         let (_, blocked) = checkableCopies(id)
         if let blocked { syncStates[id] = blocked; return }
         // Never plan from a stale report: look again first (cache hits make this cheap).
         await performCheck(id, force: true, deep: false)
         guard case .done(let report, _)? = syncStates[id], report.notChecked == nil, report.depth == .checksums,
-              report.missing.values.contains(where: { !$0.isEmpty }) else { return }
+              report.missing.values.contains(where: { !$0.isEmpty }) else {
+            // Still "checking" means a newer request superseded our check: say so rather than dropping the click silently.
+            if case .checking? = syncStates[id] { syncNotes[id] = "Sync stopped: the copies changed. Press Sync Now again." }
+            return
+        }
         if syncStopped.remove(id) != nil { return }
 
-        let gen = syncGenerations[id, default: 0]
         syncStates[id] = .syncing(CopyProgress())
         let volumes = cardVolumes(), provider = volumeIDProvider, store = checksums
         let plan: SyncPlan
@@ -2331,12 +2433,23 @@ extension AppModel {
             syncStates[id] = .failed(error.localizedDescription)
             return
         }
+        #if DEBUG
+        await _testAfterSyncPrepare?(id)
+        #endif
         // Stopped or forgotten while preparing: nothing was written yet.
-        if syncStopped.remove(id) != nil || gen != syncGenerations[id, default: 0] || !shoots.contains(where: { $0.id == id }) {
+        if syncStopped.remove(id) != nil || !shoots.contains(where: { $0.id == id }) {
             if shoots.contains(where: { $0.id == id }) { syncStates[id] = .unknown("Sync stopped") }
             return
         }
+        // An ingest copy may have started while this was preparing: it and Sync Now never write at once.
+        if let blocked = checkableCopies(id).blocked {
+            syncStates[id] = blocked
+            return
+        }
         let engine = CopyEngine()
+        #if DEBUG
+        _testSyncEngineHook?(engine)
+        #endif
         syncEngines[id] = engine
         syncStates[id] = .syncing(CopyProgress(filesTotal: plan.jobs.count, bytesTotal: plan.jobs.reduce(0) { $0 + $1.file.size }))
         let outcome = await engine.run(plan.jobs) { [weak self] progress in
@@ -2352,6 +2465,13 @@ extension AppModel {
             await store.saveIfDirty()
         }.value
 
+        // Forgotten while copying: nothing more to record or show.
+        guard shoots.contains(where: { $0.id == id }) else { return }
+        // Stopped by the user: leave the state as it is, with no re-check or refresh.
+        if outcome.cancelled {
+            syncStates[id] = .unknown("Sync stopped")
+            return
+        }
         if outcome.failures.isEmpty {
             syncNotes[id] = nil
         } else {
