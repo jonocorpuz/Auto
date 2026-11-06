@@ -529,6 +529,10 @@ extension MirrorShootsTests {
     private func plan(_ env: Env, _ card: Card, into shoot: Shoot) async throws {
         let selection = env.model.shootSheetDefaults(shootID: shoot.id, cardID: card.id)
         try await env.model.addFootage(shootID: shoot.id, cardID: card.id, cameras: [], selection: selection)
+        // Let the card's verdict see the shoot now, so a later shoot refresh doesn't re-verify it mid-test
+        // (that flips a failed card back to ready at a random moment).
+        env.model.rebuildIndex()
+        try await Task.sleep(for: .milliseconds(150))
     }
 
     private func settled(_ card: Card) -> Bool { card.engine == nil && card.phase != .copying }
