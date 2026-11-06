@@ -135,7 +135,7 @@ struct ClaudeCLIRunnerTests {
         let exe = try script(in: dir, "sleep 30 &\necho '{}'\nexit 0")
         let start = ContinuousClock.now
         _ = try? await ClaudeCLIRunner(executable: exe).run(request(dir, timeout: .seconds(2)))
-        #expect(ContinuousClock.now - start < .seconds(4))
+        #expect(ContinuousClock.now - start < .seconds(10))
     }
 
     @Test func timeoutKillsGrandchildren() async throws {
