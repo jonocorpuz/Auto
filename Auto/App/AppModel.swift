@@ -269,10 +269,45 @@ final class AppModel {
     @ObservationIgnored fileprivate var syncDoneAt: [UUID: ContinuousClock.Instant] = [:]
     @ObservationIgnored fileprivate var metaSave: Task<Void, Never>?
 
+    // MARK: Photo cull state (see the "Photo cull" extension)
+    /// Per-shoot cull state, keyed by shoot id. Absent = idle.
+    private(set) var cullStates: [UUID: CullState] = [:]
+    /// Settings for the next cull; clamped and saved to defaults on every set.
+    var cullSettings: CullSettings {
+        didSet {
+            let clamped = cullSettings.clamped()
+            if clamped != cullSettings { cullSettings = clamped; return }
+            CullSettingsStore.save(cullSettings, to: defaults)
+        }
+    }
+    /// Notes from the last cull action per shoot (e.g. why an undo failed).
+    private(set) var cullNotes: [UUID: String] = [:]
+    @ObservationIgnored let claude: any ClaudeRunner
+    @ObservationIgnored let photoAnalyzer: any PhotoAnalyzer
+    @ObservationIgnored let cullApplier: any CullApplying
+    @ObservationIgnored let cullWorkspaceRoot: URL
+    @ObservationIgnored fileprivate var cullTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored fileprivate let cullWaiters = CullWaiters()
+    /// The app-wide mutex for anything that moves or reads files being moved: cull apply/undo, and each sync-loop job.
+    @ObservationIgnored fileprivate var applyLockHeld = false
+    /// True while a cull apply/undo holds the mutex: ingest queues behind it.
+    @ObservationIgnored fileprivate var cullApplying = false
+    /// Most relevant run per shoot, read from the primary's journal by `loadLastCullRun`.
+    private(set) var cullLastRuns: [UUID: CullRunSummary] = [:]
+
     init(registryURL: URL = ShootStore.defaultURL(),
          thumbnails: any ThumbnailProvider = QLThumbnailProvider(),
-         defaults: UserDefaults = .standard) {
+         defaults: UserDefaults = .standard,
+         claude: any ClaudeRunner = ClaudeCLIRunner(),
+         photoAnalyzer: any PhotoAnalyzer = ImageIOPhotoAnalyzer(),
+         cullApplier: any CullApplying = LiveCullApplier(),
+         cullWorkspaceRoot: URL = CullWorkspace.defaultRoot) {
         self.defaults = defaults
+        self.claude = claude
+        self.photoAnalyzer = photoAnalyzer
+        self.cullApplier = cullApplier
+        self.cullWorkspaceRoot = cullWorkspaceRoot
+        self.cullSettings = CullSettingsStore.load(from: defaults)
         self.registryURL = registryURL
         self.checksums = ChecksumStore(url: registryURL.deletingLastPathComponent().appendingPathComponent("checksums.json"))
         self.thumbnails = thumbnails
@@ -714,6 +749,7 @@ final class AppModel {
             return
         }
         if syncBusyOverlapping(myRoots) { enqueueBehindSync(card); return }
+        if cullApplying { enqueueBehindCull(card); return }
         dequeue(card)
         card.mirrorNote = nil
         stopVerifier(card)
@@ -911,6 +947,7 @@ final class AppModel {
     /// An engine just ended. Re-verify each waiting card, since the copy that finished may have made its files
     /// duplicates; `finishRecompute` then starts it (and `copy` prunes the twins from its plan).
     private func releaseQueuedCopies() {
+        cullWaiters.wake()
         flushDeferredSyncChecks()
         for id in copyQueue {
             guard let queued = cards.first(where: { $0.id == id }) else { copyQueue.removeAll { $0 == id }; continue }
@@ -2274,6 +2311,7 @@ extension AppModel {
 
     @discardableResult
     func syncNow(shootID: UUID) -> Bool {
+        guard !cullApplying else { return false }   // a cull is moving files: try again when it finishes
         guard case .done(let report, _)? = syncStates[shootID], report.notChecked == nil, report.depth == .checksums,
               report.missing.values.contains(where: { !$0.isEmpty }) else { return false }
         enqueueSync([shootID], kind: .sync, force: true, deep: false, delay: .zero)
@@ -2355,10 +2393,13 @@ extension AppModel {
                 continue
             }
             let work = syncWork.remove(at: index)
+            // Checks and syncs read or write the shoot's files: never alongside a cull apply or undo.
+            let locked = await acquireApplyLock(excludingIngest: false)
             switch work.kind {
             case .check: await performCheck(work.id, force: work.force, deep: work.deep)
             case .sync: await performSyncNow(work.id)
             }
+            if locked { releaseApplyLock() }
         }
         syncRunner = nil
         syncSleeper = nil
@@ -2489,12 +2530,14 @@ extension AppModel {
             syncActive.remove(id)
             releaseQueuedCopies()
         }
-        let (_, blocked) = checkableCopies(id)
+        let (syncCopies, blocked) = checkableCopies(id)
         if let blocked {
             syncStates[id] = blocked
             if hasActiveIngest(into: id) { syncNotes[id] = Self.syncWaitedNote }
             return
         }
+        // Bring every copy up to date with the cull journals first, so rejects are never copied back.
+        let replayNote = await Self.replayCullJournals(copies: syncCopies, cardVolumes: cardVolumes())
         // Never plan from a stale report: look again first (cache hits make this cheap).
         await performCheck(id, force: true, deep: false)
         guard case .done(let report, _)? = syncStates[id], report.notChecked == nil, report.depth == .checksums,
@@ -2555,7 +2598,7 @@ extension AppModel {
             return
         }
         if outcome.failures.isEmpty {
-            syncNotes[id] = nil
+            syncNotes[id] = replayNote
         } else {
             let first = outcome.failures[0]
             let more = outcome.failures.count > 1 ? " (+\(outcome.failures.count - 1) more)" : ""
@@ -2612,6 +2655,243 @@ extension AppModel {
         while let runner = syncRunner { await runner.value }
     }
     #endif
+}
+
+// MARK: - Photo cull
+
+extension AppModel {
+    // MARK: Locking
+
+    private var ingestRunning: Bool { cards.contains { $0.engine != nil } }
+
+    /// Takes the app-wide mutex. With `excludingIngest` (a cull apply/undo) it also waits for every running ingest
+    /// and makes new ingests queue until `releaseApplyLock`. Returns false if the task was cancelled while waiting.
+    fileprivate func acquireApplyLock(excludingIngest: Bool) async -> Bool {
+        do {
+            while applyLockHeld || (excludingIngest && ingestRunning) { try await cullWaiters.wait() }
+        } catch { return false }
+        applyLockHeld = true
+        cullApplying = excludingIngest
+        return true
+    }
+
+    fileprivate func releaseApplyLock() {
+        let wasCull = cullApplying
+        applyLockHeld = false
+        cullApplying = false
+        cullWaiters.wake()
+        if wasCull { releaseQueuedCopies() }   // ingests that queued behind the apply
+    }
+
+    /// Cards that asked to copy while a cull was applying wait here.
+    fileprivate func enqueueBehindCull(_ card: Card) {
+        if !copyQueue.contains(card.id) { copyQueue.append(card.id) }
+        card.queuedBehind = card.id
+        card.queueNote = "Waiting for a photo cull to finish"
+    }
+
+    /// Pauses a cull between groups while any ingest or sync runs.
+    fileprivate func cullGate() async {
+        while ingestRunning || !syncActive.isEmpty {
+            if Task.isCancelled { return }
+            do { try await cullWaiters.wait() } catch { return }
+        }
+    }
+
+    fileprivate func cullWithApplyLock(_ body: @Sendable () async throws -> Void) async throws {
+        guard await acquireApplyLock(excludingIngest: true) else { throw CancellationError() }
+        defer { releaseApplyLock() }
+        try await body()
+    }
+
+    // MARK: Queries
+
+    /// Why a cull can't start for `shootID` (nil: it can). Ingest and sync don't block: the cull waits for them.
+    func cullBlockReason(shootID: UUID) -> String? {
+        guard let item = shoots.first(where: { $0.id == shootID }) else { return "Shoot not found" }
+        switch cullStates[shootID] {
+        case .waiting?, .running?: return "Already culling this shoot"
+        default: break
+        }
+        if cullTasks[shootID] != nil { return "Already culling this shoot" }
+        guard item.copies.contains(where: { $0.availability == .online }) else { return "Shoot is offline" }
+        return nil
+    }
+
+    /// Shown before starting: a cull started now waits for the running ingest or sync.
+    func cullBusyNotice() -> String? {
+        if ingestRunning { return "Ingest in progress. The cull will start when it finishes." }
+        if !syncActive.isEmpty { return "Sync in progress. The cull will start when it finishes." }
+        return nil
+    }
+
+    var cullRunPromptPreview: String { CullPromptBuilder.runSection(settings: cullSettings) }
+
+    func lastCullRun(shootID: UUID) -> CullRunSummary? { cullLastRuns[shootID] }
+
+    /// Reads the primary's journal (off main) and caches the run the UI should offer to undo, else the newest.
+    func loadLastCullRun(shootID: UUID) async {
+        guard let primary = onlineCullCopies(shootID).first else { cullLastRuns[shootID] = nil; return }
+        let runs = await Self.readCullRuns(primary)
+        cullLastRuns[shootID] = runs.first(where: { !$0.undone }) ?? runs.first
+    }
+
+    /// Photo count and cost estimate for the sheet, catalogued off main. Nil when the shoot is offline or unreadable.
+    func cullPreflight(shootID: UUID) async -> (photos: Int, estimate: (low: Double, high: Double, calls: Int))? {
+        guard let primary = onlineCullCopies(shootID).first else { return nil }
+        let volumes = cardVolumes()
+        guard let count = await Self.countPhotos(primary, cardVolumes: volumes) else { return nil }
+        return (count, CullEstimator.estimate(photoCount: count, model: cullSettings.model, settings: cullSettings.clamped()))
+    }
+
+    /// Online copies of the shoot, primary first.
+    private func onlineCullCopies(_ shootID: UUID) -> [URL] {
+        guard let item = shoots.first(where: { $0.id == shootID }) else { return [] }
+        let online = item.copies.filter { $0.availability == .online }
+        let ordered = online.filter(\.isPrimary) + online.filter { !$0.isPrimary }
+        return ordered.map { URL(fileURLWithPath: $0.path, isDirectory: true) }
+    }
+
+    // MARK: Run
+
+    /// Starts a cull of the whole shoot on every online copy. False when refused (see `cullBlockReason`).
+    @discardableResult
+    func startCull(shootID: UUID) -> Bool {
+        guard cullBlockReason(shootID: shootID) == nil, let item = shoots.first(where: { $0.id == shootID }) else { return false }
+        let copies = onlineCullCopies(shootID)
+        guard let primary = copies.first else { return false }
+        let shoot = Shoot(id: shootID, name: item.record.name, date: item.date, folder: primary, mirrors: Array(copies.dropFirst()))
+        let runner = CullRunner(analyzer: photoAnalyzer, claude: claude, applier: cullApplier, workspaceRoot: cullWorkspaceRoot)
+        let settings = cullSettings.clamped()
+        let volumes = cardVolumes()
+        cullNotes[shootID] = nil
+        if let notice = cullBusyNotice() {
+            cullStates[shootID] = .waiting(notice)
+        } else {
+            cullStates[shootID] = .running(CullProgress(phase: .cataloging, fraction: 0, spentUSD: 0))
+        }
+        cullTasks[shootID] = Task { [weak self] in
+            // Starts when the running ingest or sync finishes (state stays `.waiting` until then).
+            await self?.cullGate()
+            if Task.isCancelled { await self?.finishCull(shootID, .stopped(nil)); return }
+            self?.cullStates[shootID] = .running(CullProgress(phase: .cataloging, fraction: 0, spentUSD: 0))
+            let outcome = await runner.run(
+                shoot: shoot, copies: copies, cardVolumes: volumes, settings: settings,
+                gate: { [weak self] in await self?.cullGate() },
+                withApplyLock: { [weak self] body in
+                    guard let self else { throw CancellationError() }
+                    try await self.cullWithApplyLock(body)
+                },
+                onProgress: { [weak self] progress in
+                    guard let self, self.cullTasks[shootID] != nil else { return }
+                    if case .waiting(let note) = progress.phase { self.cullStates[shootID] = .waiting(note) } else { self.cullStates[shootID] = .running(progress) }
+                })
+            await self?.finishCull(shootID, outcome)
+        }
+        return true
+    }
+
+    /// Cancels the run. During apply the runner rolls this run's moves back (outcome `.stopped`).
+    func stopCull(shootID: UUID) {
+        cullTasks[shootID]?.cancel()
+    }
+
+    private func finishCull(_ shootID: UUID, _ outcome: CullOutcome) async {
+        cullTasks[shootID] = nil
+        cullStates[shootID] = .finished(outcome)
+        guard case .completed(let summary) = outcome else { return }
+        await afterCullChangedFiles(shootID, moved: summary.rejected > 0)
+    }
+
+    /// Offline copies missed the moves (sync replays the journal later), the summaries/thumbnails change,
+    /// and the copies get re-checked.
+    private func afterCullChangedFiles(_ shootID: UUID, moved: Bool) async {
+        if moved { await markOfflineCopiesPending(shootID) }
+        await refreshShoots()
+        await loadLastCullRun(shootID: shootID)
+        scheduleSyncCheck([shootID], force: true)
+    }
+
+    private func markOfflineCopiesPending(_ shootID: UUID) async {
+        guard let item = shoots.first(where: { $0.id == shootID }) else { return }
+        let offline = item.copies.filter { $0.availability != .online }
+        guard !offline.isEmpty else { return }
+        for copy in offline { registry.setPendingSync(id: shootID, path: copy.path, true) }
+        if let i = shoots.firstIndex(where: { $0.id == shootID }), let updated = registry.records.first(where: { $0.id == shootID }) {
+            shoots[i].record = updated
+        }
+        do { try await ShootStore.save(registry, to: registryURL) } catch { NSLog("Auto: couldn't save shoots.json: \(error)") }
+    }
+
+    /// Undoes the latest cull that isn't undone, on every online copy, under the apply lock.
+    func undoLastCull(shootID: UUID) async -> Bool {
+        guard cullBlockReason(shootID: shootID) == nil else { return false }
+        let copies = onlineCullCopies(shootID)
+        guard !copies.isEmpty else { return false }
+        cullNotes[shootID] = nil
+        cullStates[shootID] = .waiting(cullBusyNotice() ?? "Waiting to undo…")
+        guard await acquireApplyLock(excludingIngest: true) else { cullStates[shootID] = nil; return false }
+        cullStates[shootID] = .running(CullProgress(phase: .undoing(done: 0, total: 0), fraction: 0, spentUSD: 0))
+        let volumes = cardVolumes()
+        let result = await Self.performUndo(copies: copies, cardVolumes: volumes) { [weak self] done, total in
+            Task { @MainActor [weak self] in
+                guard let self, case .running? = self.cullStates[shootID] else { return }
+                self.cullStates[shootID] = .running(CullProgress(
+                    phase: .undoing(done: done, total: total), fraction: total > 0 ? Double(done) / Double(total) : 1, spentUSD: 0))
+            }
+        }
+        releaseApplyLock()
+        cullStates[shootID] = nil
+        switch result {
+        case .success(let summary):
+            await afterCullChangedFiles(shootID, moved: summary.rejected > 0)
+            return true
+        case .failure(let error):
+            cullNotes[shootID] = error.localizedDescription
+            return false
+        }
+    }
+
+    // MARK: Off-main work
+
+    @concurrent
+    nonisolated private static func performUndo(copies: [URL], cardVolumes: [URL],
+                                                onProgress: @escaping @Sendable (Int, Int) -> Void) async -> Result<CullRunSummary, Error> {
+        do { return .success(try CullApplier.undo(runID: nil, copies: copies, cardVolumes: cardVolumes, onProgress: onProgress)) }
+        catch { return .failure(error) }
+    }
+
+    @concurrent
+    nonisolated private static func readCullRuns(_ copy: URL) async -> [CullRunSummary] {
+        (try? CullJournal.runs(in: copy)) ?? []
+    }
+
+    @concurrent
+    nonisolated private static func countPhotos(_ copy: URL, cardVolumes: [URL]) async -> Int? {
+        (try? PhotoCatalog.scan(shoot: copy, cardVolumes: cardVolumes))?.count
+    }
+
+    /// Sync Now step: copies the most advanced cull journal onto the other copies (moves only; nothing is
+    /// copied or deleted), so the sync planner sees matching paths. Returns a note when pairs couldn't be replayed.
+    @concurrent
+    nonisolated fileprivate static func replayCullJournals(copies: [URL], cardVolumes: [URL]) async -> String? {
+        guard copies.count >= 2 else { return nil }
+        var best = copies[0]
+        var bestCount = -1
+        for copy in copies {
+            let n = (try? CullJournal.runs(in: copy).count) ?? 0
+            if n > bestCount { best = copy; bestCount = n }
+        }
+        guard bestCount > 0 else { return nil }
+        var skipped = 0
+        var failed: String?
+        for copy in copies where copy.standardizedFileURL != best.standardizedFileURL {
+            do { skipped += try CullReplay.replay(from: best, to: copy, cardVolumes: cardVolumes).skipped.count }
+            catch { failed = error.localizedDescription }
+        }
+        if let failed { return "Cull replay: \(failed)" }
+        return skipped > 0 ? "\(Format.count(skipped, "culled photo", "culled photos")) couldn't be matched on every copy." : nil
+    }
 }
 
 enum Format {
