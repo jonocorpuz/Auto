@@ -29,6 +29,8 @@ final class ImportJob: Identifiable {
     var phase: ImportPhase
     var progress = CopyProgress()
     let skippedDuplicates: Int
+    /// Duplicates the user chose to copy anyway; the pre-copy re-check leaves these alone.
+    var keptDuplicates: Set<URL> = []
     @ObservationIgnored var engine: CopyEngine?
     /// The run's task (tests await it).
     @ObservationIgnored var task: Task<Void, Never>?

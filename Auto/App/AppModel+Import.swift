@@ -52,11 +52,14 @@ extension AppModel {
             return
         }
         let primary = shoot.folder
-        let scan = await ImportScanner.scan(staging.sources, shootRoots: shoot.copies) { count in
-            Task { @MainActor in
-                if staging.generation == generation, case .scanning = staging.phase { staging.phase = .scanning(count) }
+        let scan: ImportScan
+        do {
+            scan = try await ImportScanner.scan(staging.sources, shootRoots: shoot.copies) { count in
+                Task { @MainActor in
+                    if staging.generation == generation, case .scanning = staging.phase { staging.phase = .scanning(count) }
+                }
             }
-        }
+        } catch { return }
         guard current() else { return }
         let existing = await Task.detached { ImportPlanner.existingFolders(in: primary) }.value
         guard current() else { return }
@@ -119,6 +122,7 @@ extension AppModel {
         let plan = ShootPlanner.plan(jobs: jobs, shoot: shoot.folder, workRoot: shoot.folder, roots: shoot.copies, shootID: shoot.id)
         let job = ImportJob(shootID: shoot.id, shootName: item.record.name, files: files, plan: plan,
                             skippedDuplicates: staging.skippedDuplicateCount)
+        job.keptDuplicates = staging.includeDuplicates.intersection(staging.duplicates)
         staging.cancel()
         imports.append(job)
         startImportIfPossible(job)
@@ -204,7 +208,10 @@ extension AppModel {
         }
         let freeSpaceOf = freeSpaceProvider()
         let shootID = job.shootID
-        let sizes = job.files.map { ($0.url, $0.size) }
+        let staged = job.files
+        let kept = job.keptDuplicates
+        let cache = verifications
+        let primaryFolder = plan.copyRoots[0]
         let engine = CopyEngine()
         job.engine = engine
         job.phase = .preparing
@@ -218,11 +225,19 @@ extension AppModel {
         job.task = Task {
             // Off main, before a byte is written: every copy folder exists and carries this shoot's id, has room,
             // and its directories are safe; sources that changed size since staging are dropped.
-            let (checks, changed): ([(root: URL, error: String?)], Set<URL>) = await Task.detached {
+            let (checks, changed, duplicates): ([(root: URL, error: String?)], Set<URL>, Set<URL>) = await Task.detached {
                 let checks = rootChecks.map { entry -> (root: URL, error: String?) in
                     do {
                         let dirs = ShootPlanner.directories(for: entry.jobs)
-                        for dir in dirs { try ShootPlanner.checkDestination(dir, root: entry.root, cardVolumes: cardVolumes) }
+                        let resolvedRoot = ShootPlanner.resolvedPath(entry.root)
+                        for dir in dirs {
+                            // A directory that resolves into _Rejects or .auto-cull (e.g. through a symlink) is off limits.
+                            let rel = ShootPlanner.relativeComponents(ShootPlanner.resolvedPath(dir), to: resolvedRoot) ?? []
+                            if rel.contains(where: { ImportPlanner.reserved.contains($0.lowercased()) }) {
+                                throw ImportRefusal.destinationNotInShoot
+                            }
+                            try ShootPlanner.checkDestination(dir, root: entry.root, cardVolumes: cardVolumes)
+                        }
                         let needed = entry.jobs.reduce(Int64(0)) { $0 + $1.file.size }
                         if let free = freeSpaceOf(entry.root), free < needed {
                             throw NotEnoughSpaceError(needed: needed, free: free)
@@ -233,20 +248,34 @@ extension AppModel {
                     } catch { return (entry.root, error.localizedDescription) }
                 }
                 var changed = Set<URL>()
-                for (url, size) in sizes {
-                    let now = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
-                    if now.map(Int64.init) != size { changed.insert(url) }
+                for file in staged {
+                    let attributes = try? FileManager.default.attributesOfItem(atPath: file.url.resolvingSymlinksInPath().path)
+                    let size = (attributes?[.size] as? NSNumber)?.int64Value
+                    let modified = attributes?[.modificationDate] as? Date
+                    if size != file.size || modified.map({ abs($0.timeIntervalSince(file.date)) > 1 }) == true { changed.insert(file.url) }
                 }
-                return (checks, changed)
+                // Another copy (a card ingest that ran first) may have landed the same bytes since staging.
+                var duplicates = Set<URL>()
+                let toCheck = staged.filter { !kept.contains($0.url) && !changed.contains($0.url) }
+                if !toCheck.isEmpty,
+                   let found = try? await ImportDuplicateFinder.find(toCheck, shootFolder: primaryFolder, cache: cache,
+                                                                     cardVolumes: cardVolumes, progress: { _ in }) {
+                    duplicates = found
+                }
+                return (checks, changed, duplicates)
             }.value
-            guard job.engine === engine else { return }
+            guard job.engine === engine else {
+                job.phase = .failed("This import was interrupted. Add the files again.")
+                releaseQueuedCopies()
+                return
+            }
 
             let stillCopies = Set(currentRoots(of: plan).map(VolumeClassifier.normalizedPath))
             let primaryKey = VolumeClassifier.normalizedPath(plan.copyRoots[0])
             let primaryOK = checks.first { VolumeClassifier.normalizedPath($0.root) == primaryKey }.map { $0.error == nil } ?? false
             let runRoots = checks.filter { $0.error == nil && stillCopies.contains(VolumeClassifier.normalizedPath($0.root)) }.map(\.root)
             let runJobs = plan.jobs.filter { copyJob in
-                !changed.contains(copyJob.file.url) && (copyJob.root.map { root in runRoots.contains { VolumeClassifier.normalizedPath($0) == VolumeClassifier.normalizedPath(root) } } ?? false)
+                !changed.contains(copyJob.file.url) && !duplicates.contains(copyJob.file.url) && (copyJob.root.map { root in runRoots.contains { VolumeClassifier.normalizedPath($0) == VolumeClassifier.normalizedPath(root) } } ?? false)
             }
             @MainActor func fail(_ reason: String) {
                 job.engine = nil
@@ -258,7 +287,17 @@ extension AppModel {
                 fail(checks.first(where: { $0.error != nil })?.error ?? "No copy folder is available.")
                 return
             }
-            guard !runJobs.isEmpty else { fail("The files changed since they were added; add them again."); return }
+            guard !runJobs.isEmpty else {
+                if changed.isEmpty && !duplicates.isEmpty {
+                    // Everything turned out to be in the shoot already.
+                    job.engine = nil
+                    job.phase = .done(ImportSummary(copied: 0, bytes: 0, skippedDuplicates: job.skippedDuplicates + duplicates.count, note: nil))
+                    releaseQueuedCopies()
+                    return
+                }
+                fail("The files changed since they were added; add them again.")
+                return
+            }
             // A cull may have taken the lock while the preflight ran: wait for it like a card does.
             if cullApplying {
                 job.engine = nil
@@ -271,11 +310,11 @@ extension AppModel {
             let outcome = await engine.run(runJobs) { progress in job.progress = progress }
             job.engine = nil
             ingestRunCount -= 1
-            await finishImport(job, plan: plan, runRoots: runRoots, outcome: outcome, dropped: changed.count)
+            await finishImport(job, plan: plan, runRoots: runRoots, outcome: outcome, dropped: changed.count, duplicates: duplicates.count)
         }
     }
 
-    private func finishImport(_ job: ImportJob, plan: CopyPlan, runRoots: [URL], outcome: CopyOutcome, dropped: Int) async {
+    private func finishImport(_ job: ImportJob, plan: CopyPlan, runRoots: [URL], outcome: CopyOutcome, dropped: Int, duplicates: Int) async {
         let blocked = Self.integrityBlocked(outcome)
         let landedFiles = outcome.copied.filter { !blocked.contains($0.file.url) }
         let store = checksums
@@ -303,7 +342,7 @@ extension AppModel {
             job.phase = .stopped
         } else {
             job.phase = .done(ImportSummary(copied: doneFiles.count, bytes: doneFiles.reduce(0) { $0 + $1.size },
-                                            skippedDuplicates: job.skippedDuplicates,
+                                            skippedDuplicates: job.skippedDuplicates + duplicates,
                                             note: notes.isEmpty ? nil : notes.joined(separator: " ")))
         }
 
