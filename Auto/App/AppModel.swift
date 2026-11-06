@@ -2727,6 +2727,8 @@ extension AppModel {
 
     var cullRunPromptPreview: String { CullPromptBuilder.runSection(settings: cullSettings) }
 
+    func revealCullWorkspace() { NSWorkspace.shared.activateFileViewerSelecting([cullWorkspaceRoot]) }
+
     func lastCullRun(shootID: UUID) -> CullRunSummary? { cullLastRuns[shootID] }
 
     /// Reads the primary's journal (off main) and caches the run the UI should offer to undo, else the newest.
