@@ -2564,6 +2564,17 @@ extension AppModel {
         // Forced re-check: clears pendingSync for copies that are now complete, and shows what is left.
         await performCheck(id, force: true, deep: false)
         await refreshShoots()
+        // New files in the shoot's copies change which card files count as backed up and what the browser shows.
+        if !outcome.copied.isEmpty {
+            refreshBrowserMembership(force: true)
+            for card in cards where card.engine == nil && !copyQueue.contains(card.id) {
+                switch card.phase {
+                case .copying, .backed: continue
+                default: break
+                }
+                if addInFlight.contains(card.id) { recomputeAfterAdd.insert(card.id) } else { recompute(card) }
+            }
+        }
     }
 
     /// Off main. Every copy must still be off a card, resolve to a drive of its own, and carry this shoot's
