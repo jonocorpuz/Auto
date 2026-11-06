@@ -784,17 +784,26 @@ extension MirrorShootsTests {
         let (shoot, mirror) = try await twoCopyShoot(env)
         let card = try ingestCard(env, "CARD", [("A.MP4", 1), ("B.MP4", 2)])
         try await plan(env, card, into: shoot)
-        let primary = shoot.folder
+        // Corrupt every partial on both copies. The shoot stays online, so nothing discards the plan behind the
+        // test's back (removing the roots let refreshShoots drop the plan, racing the assertion below).
+        let dirs = [shoot.folder, mirror].map { $0.appendingPathComponent("Video/CARD", isDirectory: true) }
         env.model._testEngineHook = { engine in
             engine.onChunkWritten = { _ in
-                try? FileManager.default.removeItem(at: mirror)
-                try? FileManager.default.removeItem(at: primary)
+                for dir in dirs {
+                    for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".auto-partial") {
+                        if let handle = try? FileHandle(forWritingTo: dir.appendingPathComponent(name)) {
+                            try? handle.write(contentsOf: Data([0xFF]))
+                            try? handle.close()
+                        }
+                    }
+                }
             }
         }
         env.model.copy(card)
         try await waitUntil { settled(card) }
         if case .failed = card.phase {} else { Issue.record("expected failed, got \(card.phase)") }
-        #expect(card.plan?.jobs.count == 4)
+        let names = card.plan?.jobs.map { $0.file.url.lastPathComponent + "@" + ($0.root?.lastPathComponent ?? "") }
+        #expect(card.plan?.jobs.count == 4, "phase \(card.phase) jobs \(String(describing: names)) note \(String(describing: card.mirrorNote))")
         #expect(card.missing.count == 2)
     }
 
