@@ -23,6 +23,8 @@ struct ImportSummary: Equatable {
 final class ImportJob: Identifiable {
     let id = UUID()
     let shootID: UUID
+    /// When the import was committed; the progress bar's minimum-duration clock starts here.
+    let createdAt = Date()
     let shootName: String
     var files: [MediaFile]
     var plan: CopyPlan
