@@ -181,6 +181,8 @@ private nonisolated final class Job: @unchecked Sendable {
             return
         }
         _ = fcntl(inW, F_SETNOSIGPIPE, 1)  // a child that exits early must not SIGPIPE us
+        // Non-blocking so a grandchild that holds the read end without reading can't wedge the writer.
+        _ = fcntl(inW, F_SETFL, fcntl(inW, F_GETFL) | O_NONBLOCK)
 
         lock.lock()
         if let why = _reason {
@@ -214,8 +216,8 @@ private nonisolated final class Job: @unchecked Sendable {
                 group.leave()
             }
         }
-        Thread.detachNewThread {
-            Self.writeAll(inW, stdin)
+        Thread.detachNewThread { [self] in
+            writeAll(inW, stdin)
         }
         Thread.detachNewThread { [self] in
             var raw: Int32 = 0
@@ -255,19 +257,34 @@ private nonisolated final class Job: @unchecked Sendable {
         return out
     }
 
-    private static func writeAll(_ fd: Int32, _ data: Data) {
+    /// True once nobody can use more stdin: killed, abandoned, the child was reaped, or the call finished.
+    private var inputClosed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return abandoned || reaped || finished
+    }
+
+    /// Writes on a non-blocking fd, polling so it gives up once `inputClosed` (the fd is closed on exit,
+    /// within ~100 ms of the kill/finish path flipping the state).
+    private func writeAll(_ fd: Int32, _ data: Data) {
         data.withUnsafeBytes { raw in
             var off = 0
-            while off < raw.count {
+            while off < raw.count, !inputClosed {
                 let n = write(fd, raw.baseAddress! + off, raw.count - off)
                 if n > 0 { off += n; continue }
                 if n < 0 && errno == EINTR { continue }
+                if n < 0 && errno == EAGAIN {
+                    var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    _ = poll(&pfd, 1, 100)
+                    continue
+                }
                 break  // EPIPE (child gone) or other error: benign
             }
         }
         close(fd)
     }
 
+    /// macOS has no pipe2(O_CLOEXEC), so there is a brief window before the fcntl where another thread's
+    /// fork/exec could inherit these fds. Our own spawn is immune (POSIX_SPAWN_CLOEXEC_DEFAULT).
     private static func makePipe() throws -> (Int32, Int32) {
         var fds: [Int32] = [0, 0]
         guard pipe(&fds) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
@@ -296,7 +313,7 @@ private nonisolated final class Job: @unchecked Sendable {
         posix_spawnattr_setsigdefault(&attr, &defaults)
         posix_spawnattr_setsigmask(&attr, &mask)
         posix_spawnattr_setpgroup(&attr, 0)
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT))
 
         let argv: [UnsafeMutablePointer<CChar>?] = ([exe.path] + arguments).map { strdup($0) } + [nil]
         let envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]

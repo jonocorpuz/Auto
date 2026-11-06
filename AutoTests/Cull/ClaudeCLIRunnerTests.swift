@@ -166,4 +166,26 @@ struct ClaudeCLIRunnerTests {
         await #expect(throws: CancellationError.self) { try await task.value }
         #expect(!FileManager.default.fileExists(atPath: marker.path))
     }
+
+    @Test func inheritedFileDescriptorsDoNotLeakIntoChild() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let leaked = open("/dev/null", O_RDONLY)   // deliberately without O_CLOEXEC
+        try #require(leaked >= 0)
+        defer { close(leaked) }
+        let out = dir.appendingPathComponent("leak.txt")
+        let exe = try script(in: dir, "cat >/dev/null\nif [ -e /dev/fd/\(leaked) ]; then echo leak > '\(out.path)'; else echo clean > '\(out.path)'; fi\necho '\(success)'")
+        _ = try await ClaudeCLIRunner(executable: exe).run(request(dir))
+        #expect(try String(contentsOf: out, encoding: .utf8) == "clean\n")
+    }
+
+    @Test func grandchildHoldingStdinDoesNotHangWriter() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let exe = try script(in: dir, "sleep 30 <&0 &\nexit 0")
+        let req = ClaudeRequest(model: "haiku", systemPrompt: "s", appendSystemPrompt: "a",
+                                userPrompt: String(repeating: "x", count: 1_000_000),
+                                jsonSchema: "{}", workspace: dir, maxBudgetUSD: 1, timeout: .seconds(20))
+        let start = ContinuousClock.now
+        _ = try? await ClaudeCLIRunner(executable: exe).run(req)
+        #expect(ContinuousClock.now - start < .seconds(10))
+    }
 }
