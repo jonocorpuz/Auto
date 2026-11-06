@@ -59,7 +59,7 @@ struct ShootTile: View {
             Button("Check Sync") { model.checkSync(shootID: item.id) }
                 .disabled(item.copies.count < 2)
             Button("Sync Now") { model.syncNow(shootID: item.id) }
-                .disabled(item.copies.count < 2)
+                .disabled(!model.canSyncNow(shootID: item.id))
             if !item.copies.isEmpty {
                 Menu("Copies") {
                     ForEach(item.copies) { copy in

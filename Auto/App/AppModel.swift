@@ -2480,6 +2480,8 @@ extension AppModel {
 
     // MARK: Sync Now
 
+    private static let syncWaitedNote = "Sync Now waited for a copy into this shoot; press Sync Now again when it finishes."
+
     private func performSyncNow(_ id: UUID) async {
         syncStopped.remove(id)
         syncActive.insert(id)
@@ -2488,7 +2490,11 @@ extension AppModel {
             releaseQueuedCopies()
         }
         let (_, blocked) = checkableCopies(id)
-        if let blocked { syncStates[id] = blocked; return }
+        if let blocked {
+            syncStates[id] = blocked
+            if hasActiveIngest(into: id) { syncNotes[id] = Self.syncWaitedNote }
+            return
+        }
         // Never plan from a stale report: look again first (cache hits make this cheap).
         await performCheck(id, force: true, deep: false)
         guard case .done(let report, _)? = syncStates[id], report.notChecked == nil, report.depth == .checksums,
@@ -2519,6 +2525,7 @@ extension AppModel {
         // An ingest copy may have started while this was preparing: it and Sync Now never write at once.
         if let blocked = checkableCopies(id).blocked {
             syncStates[id] = blocked
+            if hasActiveIngest(into: id) { syncNotes[id] = Self.syncWaitedNote }
             return
         }
         let engine = CopyEngine()

@@ -28,11 +28,7 @@ struct ShootSyncPopover: View {
         !item.copies.isEmpty && item.copies.allSatisfy { $0.availability == .online }
     }
 
-    private var canSync: Bool {
-        guard case .outOfSync(let missing, _) = badge, missing > 0, allOnline, !isBusy else { return false }
-        if case .done(let r, _)? = model.syncStates[item.id] { return r.depth == .checksums && r.notChecked == nil }
-        return false
-    }
+    private var canSync: Bool { model.canSyncNow(shootID: item.id) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
