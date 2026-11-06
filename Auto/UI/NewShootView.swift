@@ -11,6 +11,9 @@ struct NewShootView: View {
         case .add(let shootID, let cardID):
             AddFootageSheet(shootID: shootID, initialCardID: cardID)
                 .id(shootID)
+        case .addFiles(let staging):
+            AddFilesSheet(staging: staging)
+                .id(staging.id)
         case nil:
             EmptyView()
         }

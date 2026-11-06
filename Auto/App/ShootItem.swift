@@ -20,11 +20,15 @@ struct ShootItem: Identifiable {
 enum ShootSheetRequest: Identifiable, Equatable {
     case create
     case add(shootID: UUID, cardID: Card.ID?)
+    case addFiles(ImportStaging)
+
+    static func == (lhs: ShootSheetRequest, rhs: ShootSheetRequest) -> Bool { lhs.id == rhs.id }
 
     var id: String {
         switch self {
         case .create: "create"
         case .add(let shootID, _): "add-\(shootID.uuidString)"
+        case .addFiles(let staging): "files-\(staging.id.uuidString)"
         }
     }
 }
