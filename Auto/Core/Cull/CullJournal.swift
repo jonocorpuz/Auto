@@ -45,7 +45,7 @@ nonisolated enum CullJournal {
         let path = url(runID: runID, in: copy).path
         var existing = stat()
         let isNew = lstat(path, &existing) != 0
-        let fd = open(path, O_RDWR | O_APPEND | O_CREAT, 0o644)
+        let fd = open(path, O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
         guard fd >= 0 else { throw posixError(path) }
         defer { close(fd) }
         // A crash can leave a torn last line; start a fresh line so the new event stays decodable.
@@ -67,7 +67,7 @@ nonisolated enum CullJournal {
         }
         guard fullSync(fd) else { throw posixError(path) }
         if isNew {
-            let dfd = open(dir.path, O_RDONLY)
+            let dfd = open(dir.path, O_RDONLY | O_CLOEXEC)
             if dfd >= 0 { _ = fullSync(dfd); close(dfd) }
         }
     }
@@ -147,6 +147,8 @@ nonisolated enum CullJournal {
         /// Only an `intent` was journaled: the rename may or may not have happened.
         let intentOnly: Bool
         let size: Int64?
+        /// The photo this member belongs to, so a pair is restored together.
+        var photoID: String? = nil
     }
 
     /// Moves of a run that haven't been restored, in the order they were made. Intents without a
@@ -155,15 +157,15 @@ nonisolated enum CullJournal {
         var out: [MoveEntry] = []
         for e in try events(in: copy) {
             switch e {
-            case .moved(let id, let from, let to, _, _, _, _) where id == runID:
-                out.append(MoveEntry(from: from, to: to, intentOnly: false, size: nil))
-            case .intent(let id, let from, let to, _, let size) where id == runID:
+            case .moved(let id, let from, let to, _, _, _, let photoID) where id == runID:
+                out.append(MoveEntry(from: from, to: to, intentOnly: false, size: nil, photoID: photoID))
+            case .intent(let id, let from, let to, let photoID, let size) where id == runID:
                 out.removeAll { $0.from == from }
-                out.append(MoveEntry(from: from, to: to, intentOnly: true, size: size))
-            case .movedPair(let id, let members, _, _, _, _) where id == runID:
+                out.append(MoveEntry(from: from, to: to, intentOnly: true, size: size, photoID: photoID))
+            case .movedPair(let id, let members, _, _, _, let photoID) where id == runID:
                 for m in members {
                     out.removeAll { $0.from == m.from }
-                    out.append(MoveEntry(from: m.from, to: m.to, intentOnly: false, size: nil))
+                    out.append(MoveEntry(from: m.from, to: m.to, intentOnly: false, size: nil, photoID: photoID))
                 }
             case .restored(let id, let from, _) where id == runID:
                 out.removeAll { $0.from == from }

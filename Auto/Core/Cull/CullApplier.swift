@@ -48,7 +48,7 @@ nonisolated enum CullApplier {
 
     static func isRegular(_ i: Info) -> Bool { (i.mode & S_IFMT) == S_IFREG }
 
-    static let dirFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+    static let dirFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
 
     /// Walks `parts` from `parent` through real directories only. With `create`, missing folders
     /// are made with mkdirat (EEXIST just re-opens). Returns an owned fd, or nil on any symlink,
@@ -82,7 +82,7 @@ nonisolated enum CullApplier {
     }
 
     static func openCopy(_ copy: URL) -> Int32? {
-        let fd = open(copy.path, O_RDONLY | O_DIRECTORY)
+        let fd = open(copy.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         return fd >= 0 ? fd : nil
     }
 
@@ -388,6 +388,7 @@ nonisolated enum CullApplier {
         var done = 0
         onProgress(0, total)
 
+        var sharedN: [String: Int] = [:]
         for (copy, entries) in work {
             guard let copyFD = openCopy(copy) else { continue }
             defer { close(copyFD) }
@@ -397,14 +398,26 @@ nonisolated enum CullApplier {
                 do { try CullJournal.append($0, runID: target.runID, in: copy) }
                 catch { throw CullError.journalWriteFailed(error.localizedDescription) }
             }
-            var restoredTo: [String] = []
+            // Entries of one photo are restored together (newest group first), under one shared suffix.
+            var groups: [[CullJournal.MoveEntry]] = []
+            var groupIndex: [String: Int] = [:]
             for e in entries {
-                if photoFD >= 0 {
-                    if let r = try restore(e, photoFD: photoFD, runID: target.runID, io: io, journal: journal) { restoredTo.append(r) }
-                } else {
-                    try journal(.restoreSkipped(runID: target.runID, path: e.to, why: "Photo folder missing"))
+                if let pid = e.photoID, let gi = groupIndex[pid] { groups[gi].append(e) }
+                else {
+                    if let pid = e.photoID { groupIndex[pid] = groups.count }
+                    groups.append([e])
                 }
-                done += 1
+            }
+            for group in groups {
+                if photoFD >= 0 {
+                    let key = group[0].photoID
+                    let start = key.flatMap { sharedN[$0] } ?? 1
+                    let n = try restoreGroup(group, startN: start, photoFD: photoFD, runID: target.runID, io: io, journal: journal)
+                    if let key, let n { sharedN[key] = n }
+                } else {
+                    for e in group { try journal(.restoreSkipped(runID: target.runID, path: e.to, why: "Photo folder missing")) }
+                }
+                done += group.count
                 onProgress(done, total)
             }
             // rmdir only removes empty folders; stop at the first one that isn't.
@@ -416,14 +429,71 @@ nonisolated enum CullApplier {
         return result
     }
 
-    /// Returns the shoot-relative path the file was restored to, or nil if nothing was moved.
-    private static func restore(
+    private struct Prepared {
+        let entry: CullJournal.MoveEntry
+        let toDir: Int32
+        let toName: String
+        let fromDir: Int32
+        let fromName: String
+    }
+
+    /// Restores every member of one photo under the smallest suffix n free for all of them (starting
+    /// at `startN`). Returns the n used, or nil if nothing was restored. Members that fail a check are
+    /// journaled as skipped and left out; a rename that fails rolls the whole group back.
+    private static func restoreGroup(
+        _ group: [CullJournal.MoveEntry],
+        startN: Int,
+        photoFD: Int32,
+        runID: UUID,
+        io: CullIO,
+        journal: (CullJournalEvent) throws -> Void
+    ) throws -> Int? {
+        var fds: [Int32] = []
+        defer { fds.forEach { close($0) } }
+        var items: [Prepared] = []
+        for e in group {
+            if let p = try prepareRestore(e, photoFD: photoFD, runID: runID, io: io, journal: journal) {
+                fds += [p.toDir, p.fromDir]
+                items.append(p)
+            }
+        }
+        guard !items.isEmpty else { return nil }
+
+        var n = max(startN, 1)
+        attempts: while n < max(startN, 1) + 1000 {
+            var done: [(Prepared, String)] = []
+            for it in items {
+                let rel = suffixed(it.entry.from, n: n)
+                let name = rel.split(separator: "/").last.map(String.init) ?? it.fromName
+                let r = renameExclusive(io, it.toDir, it.toName, it.fromDir, name)
+                if r == .success { done.append((it, name)); continue }
+                var stuck: [String] = []
+                for (d, dn) in done.reversed() where renameExclusive(io, d.fromDir, dn, d.toDir, d.toName) != .success {
+                    stuck.append(d.entry.to)
+                }
+                if !stuck.isEmpty { throw CullError.rollbackFailed(stuck.joined(separator: ", ")) }
+                if r == .exists { n += 1; continue attempts }
+                for i in items { try journal(.restoreSkipped(runID: runID, path: i.entry.to, why: "rename failed")) }
+                return nil
+            }
+            for (it, _) in done {
+                try journal(.restored(runID: runID, from: it.entry.from, to: suffixed(it.entry.from, n: n)))
+            }
+            return n
+        }
+        for i in items { try journal(.restoreSkipped(runID: runID, path: i.entry.to, why: "no free name")) }
+        return nil
+    }
+
+    /// Checks one member and opens its folders (caller closes them). Nil means it was handled
+    /// (journaled as skipped or as never moved) and there is nothing to rename.
+    private static func prepareRestore(
         _ e: CullJournal.MoveEntry,
         photoFD: Int32,
         runID: UUID,
         io: CullIO,
         journal: (CullJournalEvent) throws -> Void
-    ) throws -> String? {
+    ) throws -> Prepared? {
         guard let fromParts = safeParts(e.from, allowRejects: false),
               let toParts = safeParts(e.to, allowRejects: true), toParts.contains("_Rejects") else {
             try journal(.restoreSkipped(runID: runID, path: e.to, why: "unsafe path"))
@@ -437,7 +507,8 @@ nonisolated enum CullApplier {
             toDir = d
             toInfo = statAt(d, toName)
         }
-        defer { if toDir >= 0 { close(toDir) } }
+        var handedOver = false
+        defer { if toDir >= 0, !handedOver { close(toDir) } }
 
         guard let info = toInfo, isRegular(info) else {
             if e.intentOnly, let fd = openDir(photoFD, fromParts[1..<(fromParts.count - 1)], create: false) {
@@ -459,29 +530,13 @@ nonisolated enum CullApplier {
             try journal(.restoreSkipped(runID: runID, path: e.from, why: "unsafe folder"))
             return nil
         }
-        defer { close(fromDir) }
         if let a = io.deviceID(toDir), let b = io.deviceID(fromDir), a != b {
+            close(fromDir)
             try journal(.restoreSkipped(runID: runID, path: e.to, why: "different volume"))
             return nil
         }
-
-        var n = 1
-        while n < 1000 {
-            let rel = suffixed(e.from, n: n)
-            let name = rel.split(separator: "/").last.map(String.init) ?? fromName
-            switch renameExclusive(io, toDir, toName, fromDir, name) {
-            case .success:
-                try journal(.restored(runID: runID, from: e.from, to: rel))
-                return rel
-            case .exists:
-                n += 1
-            case .failed:
-                try journal(.restoreSkipped(runID: runID, path: e.to, why: "rename failed"))
-                return nil
-            }
-        }
-        try journal(.restoreSkipped(runID: runID, path: e.to, why: "no free name"))
-        return nil
+        handedOver = true
+        return Prepared(entry: e, toDir: toDir, toName: toName, fromDir: fromDir, fromName: fromName)
     }
 
     /// Removes now-empty folders from the file's `_Rejects` location up through `_Rejects` itself.

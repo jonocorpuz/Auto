@@ -89,6 +89,20 @@ import Testing
         #expect(restored == ["Photo/CamA/1 2.JPG"])
     }
 
+    @Test func reoccupiedPairIsRestoredUnderSharedSuffixOnBothCopies() throws {
+        let a = try temp(), b = try temp(); defer { try? fm.removeItem(at: a); try? fm.removeItem(at: b) }
+        for c in [a, b] { try write(c, "Photo/CamA/IMG.JPG", "j"); try write(c, "Photo/CamA/IMG.CR3", "r") }
+        let id = try cull([a, b], [["Photo/CamA/IMG.JPG", "Photo/CamA/IMG.CR3"]])
+        try write(a, "Photo/CamA/IMG.JPG", "new")   // only the JPG's name is taken again
+        _ = try undo(id, [a, b])
+        #expect(read(a, "Photo/CamA/IMG.JPG") == "new")
+        #expect(read(a, "Photo/CamA/IMG 2.JPG") == "j" && read(a, "Photo/CamA/IMG 2.CR3") == "r")
+        #expect(!exists(a, "Photo/CamA/IMG.CR3"))
+        // Shared across copies when possible: the mirror follows the primary's suffix.
+        #expect(read(b, "Photo/CamA/IMG 2.JPG") == "j" && read(b, "Photo/CamA/IMG 2.CR3") == "r")
+        #expect(!exists(b, "Photo/CamA/IMG.JPG") && !exists(b, "Photo/CamA/IMG.CR3"))
+    }
+
     @Test func missingFileIsRestoreSkipped() throws {
         let a = try temp(); defer { try? fm.removeItem(at: a) }
         try write(a, "Photo/CamA/1.JPG", "x"); try write(a, "Photo/CamA/2.JPG", "y")
