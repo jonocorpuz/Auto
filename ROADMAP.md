@@ -66,12 +66,22 @@ Launch the app and tick each item. These are the UI checks still open.
 - [ ] Step: Resolve project (create project from template, import media, bins per camera, timeline at clip resolution/fps)
 - [ ] Per-shoot pipeline settings (which steps run)
 
+## Phase 3b: Photo cull
+
+- [ ] Verify on screen: Cull settings sheet, bottom progress bar during a real cull, Undo Last Cull, result banners
+- [ ] First real cull on a small shoot (Haiku) and tune LocalTriage blur/clip thresholds and the eyes-closed ratio (0.18) against real photos
+- [ ] Face-detection test fixture for ImageIOPhotoAnalyzer (eyes closed, edge cut, face strip)
+- [ ] "Review before applying" (toggle exists, does nothing)
+- [ ] Close the window where a cull apply can start during an ingest's preflight, before `engine.run`
+- [ ] Tests for replay-before-cull and primary-offline block (needs a mirrored-shoot fixture in AppCullTests)
+- [ ] Silence actor-isolation warnings in CullRunnerTests helpers
+
 ## Phase 4: Polish & release
 
 - [x] Main window redesign: sidebar tabs (Media, Video Edit, Photo Edit, Settings), Ingest button, account row, floating content panel
 - [x] Light/dark/system appearance (Settings tab + account menu)
 - [x] Media tab: "Shoots" grid from the shoot registry (thumbnails, counts, availability); placeholder tiles gone
-- [ ] Video Edit / Photo Edit tabs (empty placeholders now)
+- [ ] Video Edit tab (empty placeholder now)
 - [ ] Wire up "Soon" settings: eject after backup, sound, proxy codec/resolution, Resolve project + frame rate, RAW+JPEG grouping, DNG
 - [ ] User accounts (sidebar shows the local macOS user for now)
 
@@ -131,3 +141,9 @@ Launch the app and tick each item. These are the UI checks still open.
 | 2026-11-05 | A green badge from a cached check means "unchanged since last read". It is not proof against bit rot; Verify Contents does a full re-read | Cached checks trust size, mtime, inode and ctime, so silent corruption can pass them; the popover shows the last full verify date separately |
 | 2026-11-05 | Overlapping copies queue rather than fail; ingest and Sync Now exclude each other | Two writers to one shoot would race on the same folders and copy state |
 | 2026-11-05 | Sync Now never deletes or overwrites. Conflicts are left for the user to resolve | Only the user decides which of two differing files is right; Auto must never destroy either |
+| 2026-11-05 | Photo cull via `claude -p` in an isolated workspace (`~/Library/Application Support/Auto/CullWorkspace`, own CLAUDE.md, `--setting-sources project`, Read only, subscription auth; no API key, no `--bare`) | Developer wants no API key and a cull-specific CLAUDE.md |
+| 2026-11-05 | Rejects are moved to `Photo/<cam>/_Rejects/`, never deleted; journaled in `<shoot>/.auto-cull/` (write-ahead) for undo | Reversible, travels with the shoot |
+| 2026-11-05 | Culls require the main copy online; moves apply to all online copies and Sync Now replays completed runs from the main copy onto mirrors | Mirrors follow the main workspace; prevents rejects being copied back |
+| 2026-11-05 | Stop reverts: nothing moves until analysis finishes; stop during apply reverts the run | Developer preference |
+| 2026-11-05 | Ingest has priority: culls wait for ingest/sync before analyzing each group and before applying; cull apply, undo, replay and sync share one app-wide lock | Developer preference |
+| 2026-11-05 | Token efficiency: local pre-pass (ImageIO/Vision metrics, burst grouping by time + dHash, local triage) so Claude sees only ~1024px previews + face strips per group, with a cached system prompt and JSON schema output | Cost |

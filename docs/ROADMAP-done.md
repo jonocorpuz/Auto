@@ -72,3 +72,19 @@ Archive of shipped ROADMAP.md items, by phase. Not needed for day-to-day work; g
 - [x] Card browser asks before copying duplicates ("Copy Anyway")
 
 ### Verify on screen (developer, remote; nothing here has been seen in a running app yet)
+
+## Phase 3b: Photo cull
+- [x] Cull models/settings
+- [x] PhotoCatalog
+- [x] ImageIOPhotoAnalyzer
+- [x] PhotoGrouper/PhotoRank/LocalTriage
+- [x] CullPromptBuilder/CullEstimator
+- [x] CullDecisionValidator
+- [x] CullJournal + CullApplier (dir-fd renames, RENAME_EXCL, rollback, undo)
+- [x] CullReplay
+- [x] ClaudeRunner + ClaudeCLIRunner (posix_spawn process group, cancel/timeout)
+- [x] CullWorkspace
+- [x] CullRunner
+- [x] AppModel glue (CullCoordinator, shared lock)
+- [x] CullSettingsSheet
+- [x] PhotoEditView with bottom progress bar
