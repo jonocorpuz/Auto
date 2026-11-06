@@ -109,6 +109,37 @@ import Testing
         #expect(try replay(a, b) == CullReplayResult())
     }
 
+    private func rewriteFinished(_ a: URL, id: UUID, status: String?) throws {
+        let events = try CullJournal.events(in: a)
+        let dir = CullJournal.directory(in: a)
+        for n in try fm.contentsOfDirectory(atPath: dir.path) { try fm.removeItem(at: dir.appendingPathComponent(n)) }
+        for e in events {
+            if case .finished(let rid, let s) = e {
+                guard let status else { continue }
+                var s2 = s; s2.status = status
+                try CullJournal.append(.finished(runID: rid, summary: s2), runID: id, in: a)
+            } else {
+                try CullJournal.append(e, runID: id, in: a)
+            }
+        }
+    }
+
+    @Test func failedRunIsNotReplayed() throws {
+        let (a, b, id) = try fixture(); defer { try? fm.removeItem(at: a); try? fm.removeItem(at: b) }
+        try rewriteFinished(a, id: id, status: "failed")
+        let r = try replay(a, b)
+        #expect(r.moved == 0 && r.runsReplayed == 0 && r.ignoredRuns == [id])
+        #expect(exists(b, "Photo/CamA/d/1.JPG") && !exists(b, "Photo/CamA/_Rejects"))
+    }
+
+    @Test func crashWithoutFinishedIsNotReplayed() throws {
+        let (a, b, id) = try fixture(); defer { try? fm.removeItem(at: a); try? fm.removeItem(at: b) }
+        try rewriteFinished(a, id: id, status: nil)
+        let r = try replay(a, b)
+        #expect(r.moved == 0 && r.runsReplayed == 0 && r.ignoredRuns == [id])
+        #expect(exists(b, "Photo/CamA/d/1.CR3"))
+    }
+
     @Test func missingFileIsSkipped() throws {
         let (a, b, _) = try fixture(); defer { try? fm.removeItem(at: a); try? fm.removeItem(at: b) }
         try fm.removeItem(at: b.appendingPathComponent("Photo/CamA/d/1.CR3"))

@@ -8,6 +8,8 @@ nonisolated struct CullReplayResult: Equatable, Sendable {
     /// Shoot-relative `from` paths of pairs that couldn't be replayed.
     var skipped: [String] = []
     var runsReplayed = 0
+    /// Source runs that were not replayed because they never completed (failed, cancelled, or no `finished`).
+    var ignoredRuns: [UUID] = []
 }
 
 /// Replays cull runs journaled on one copy (`source`) onto a copy that missed them (`target`), so
@@ -89,6 +91,10 @@ nonisolated enum CullReplay {
             let t = targetState[id] ?? (false, false, false)
             let needed = !t.run || (sr.finished != nil && !t.finished) || (sr.undone != nil && !t.undone)
             guard needed, !t.undone else { continue }
+            guard sr.finished?.status == "completed" else {
+                result.ignoredRuns.append(id)
+                continue
+            }
             result.runsReplayed += 1
             try replayRun(id, sr, source: source, targetHasRun: t.run, targetFinished: t.finished, target: target, io: io, result: &result)
         }
