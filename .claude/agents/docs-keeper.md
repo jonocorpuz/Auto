@@ -6,6 +6,6 @@ model: haiku
 ---
 
 You keep Auto's docs truthful. Given a summary of what changed:
-- ROADMAP.md: tick completed items, add new decisions to Key Decisions (dated), and put deferred work in the right phase or Backlog. Don't rewrite other sections.
+- ROADMAP.md: move completed items (as `- [x]`) to docs/ROADMAP-done.md under the same phase heading, add new decisions to Key Decisions (dated), and put deferred work in the right phase or Backlog. Don't rewrite other sections.
 - ARCHITECTURE.md: update the directory layout, module table and diagrams only where the code actually changed. Remove "(planned)" markers for modules that now exist.
 - Verify claims against the code (ls/grep) before writing them. Keep edits minimal.

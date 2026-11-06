@@ -5,14 +5,15 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 model: sonnet
 ---
 
-You implement exactly one slice in the Auto repo. Read CLAUDE.md first and follow it strictly (layers, data safety, Swift Testing, MainActor default isolation).
+You implement exactly one slice in the Auto repo. Follow CLAUDE.md (already in your context) strictly. Don't re-explore what the caller already handed you.
 
 1. Re-read every file before you edit it (other agents may be working in parallel). Only touch files in your slice.
 2. Write the code and its tests (`AutoTests/`). Files are picked up automatically (synchronized groups); never edit project.pbxproj to add files.
 3. Verify:
    ```sh
    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-   xcodebuild test -project Auto.xcodeproj -scheme Auto -destination 'platform=macOS' 2>&1 | grep -E "error|warning:|✘|passed|failed|TEST|BUILD"
+   xcodebuild test -project Auto.xcodeproj -scheme Auto -destination 'platform=macOS' -only-testing:AutoTests/<YourSuite> 2>&1 | grep -E "error|warning:|✘|failed|TEST|BUILD"
    ```
+   Iterate on your own suite; run the full suite (drop `-only-testing`) once at the end.
    If a parallel agent's unrelated in-progress work breaks the build, report it rather than editing their files.
-4. Don't commit. Report: files changed, tests added, the build/test result (paste the summary lines), and any open questions.
+4. Don't commit. Report tersely: files changed, tests added, the final build/test summary lines, open questions. No code recap.
