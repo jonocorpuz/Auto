@@ -86,8 +86,9 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
     ) -> (settled: [URL: VerifyResult], toVerify: [MediaFile]) {
         var settled: [URL: VerifyResult] = [:]
         var toVerify: [MediaFile] = []
+        let aliases = DriveIndex.renamedAliases(candidates)
         for file in files {
-            let list = candidates[file.key] ?? []
+            let list = candidateList(for: file, candidates: candidates, aliases: aliases)
             if let hit = cache?.verifiedCandidate(for: file, in: list) {
                 settled[file.url] = .verified(hit)
             } else if list.isEmpty {
@@ -97,6 +98,14 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
             }
         }
         return (settled, toVerify)
+    }
+
+    /// Same-name candidates first, then renamed copies of that name ("IMG_1 2.CR3"), without repeats.
+    static func candidateList(for file: MediaFile, candidates: [String: [URL]], aliases: [String: [URL]]) -> [URL] {
+        let direct = candidates[file.key] ?? []
+        guard let renamed = aliases[file.key], !renamed.isEmpty else { return direct }
+        var seen = Set(direct.map(\.standardizedFileURL.path))
+        return direct + renamed.filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
 
     /// `triage` without blocking the caller: the cache lookup stats every candidate on disk.
@@ -147,13 +156,15 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
             }
         }
 
+        let aliases = DriveIndex.renamedAliases(candidates)
         for file in files {
             if isCancelled { outcome.cancelled = true; break }
             progress.currentFile = file.name
             report(true)
             let startBytes = progress.bytesDone
             do {
-                let result = try verify(file, candidates: candidates[file.key] ?? [], cache: cache) { read in
+                let list = Self.candidateList(for: file, candidates: candidates, aliases: aliases)
+                let result = try verify(file, candidates: list, cache: cache) { read in
                     progress.bytesDone = startBytes + min(read, file.size)
                     report(false)
                 }
