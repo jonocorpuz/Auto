@@ -7,13 +7,16 @@ final class FakeClaudeRunner: ClaudeRunner, @unchecked Sendable {
     private let lock = NSLock()
     private let handler: Handler
     private let hang: Bool
+    private let hangIf: (@Sendable (ClaudeRequest) -> Bool)?
     private var _requests: [ClaudeRequest] = []
     private var _inFlight = 0
     private var _maxInFlight = 0
     private var _terminated = 0
 
-    init(hang: Bool = false, handler: @escaping Handler) {
+    /// `hangIf` hangs only the requests it matches (until cancelled).
+    init(hang: Bool = false, hangIf: (@Sendable (ClaudeRequest) -> Bool)? = nil, handler: @escaping Handler) {
         self.hang = hang
+        self.hangIf = hangIf
         self.handler = handler
     }
 
@@ -30,7 +33,7 @@ final class FakeClaudeRunner: ClaudeRunner, @unchecked Sendable {
         }
         defer { lock.withLock { _inFlight -= 1 } }
 
-        if hang {
+        if hang || hangIf?(r) == true {
             do {
                 try await withTaskCancellationHandler {
                     try await Task.sleep(for: .seconds(3600))

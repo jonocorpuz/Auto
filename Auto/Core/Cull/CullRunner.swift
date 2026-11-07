@@ -17,6 +17,7 @@ nonisolated struct CullRunner: Sendable {
     let claude: any ClaudeRunner
     let applier: any CullApplying
     let workspaceRoot: URL
+    var thumbnailer: any RejectThumbnailer = ImageIORejectThumbnailer()
 
     static let previewLongEdge = 1024
 
@@ -29,18 +30,29 @@ nonisolated struct CullRunner: Sendable {
         settings rawSettings: CullSettings,
         gate: @escaping @Sendable () async -> Void,
         withApplyLock: @escaping @Sendable (@concurrent @Sendable () async throws -> Void) async throws -> Void,
-        onProgress: @escaping @MainActor @Sendable (CullProgress) -> Void
+        onProgress: @escaping @MainActor @Sendable (CullProgress) -> Void,
+        onRejects: @escaping @MainActor @Sendable ([CullLiveReject]) -> Void = { _ in }
     ) async -> CullOutcome {
         // Progress flows through a stream consumed on the main actor and awaited before returning.
         let (stream, yield) = AsyncStream<CullProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let consumer = Task { @MainActor in
             for await p in stream { onProgress(p) }
         }
+        // Live rejects: every batch must arrive, so the stream is unbounded.
+        let (rejectStream, rejectYield) = AsyncStream<[CullLiveReject]>.makeStream(bufferingPolicy: .unbounded)
+        let rejectConsumer = Task { @MainActor in
+            for await batch in rejectStream { onRejects(batch) }
+        }
         let tracker = ProgressTracker { _ = yield.yield($0) }
+        let emitRejects: @Sendable ([CullLiveReject]) -> Void = { batch in
+            if !batch.isEmpty { _ = rejectYield.yield(batch) }
+        }
         let outcome = await execute(copies: copies, cardVolumes: cardVolumes, settings: rawSettings.clamped(),
-                                    gate: gate, withApplyLock: withApplyLock, tracker: tracker)
+                                    gate: gate, withApplyLock: withApplyLock, tracker: tracker, emitRejects: emitRejects)
         yield.finish()
+        rejectYield.finish()
         await consumer.value
+        await rejectConsumer.value
         return outcome
     }
 
@@ -52,7 +64,8 @@ nonisolated struct CullRunner: Sendable {
         settings: CullSettings,
         gate: @escaping @Sendable () async -> Void,
         withApplyLock: @escaping @Sendable (@concurrent @Sendable () async throws -> Void) async throws -> Void,
-        tracker: ProgressTracker
+        tracker: ProgressTracker,
+        emitRejects: @escaping @Sendable ([CullLiveReject]) -> Void
     ) async -> CullOutcome {
         guard let primary = copies.first else { return .failed(.noCopiesOnline, nil) }
         let runID = UUID()
@@ -105,8 +118,10 @@ nonisolated struct CullRunner: Sendable {
             let triaged = Set(triage.map(\.photoID))
             let remaining = group.photos.filter { !triaged.contains($0.id) }
             if remaining.isEmpty {
-                decisionsByGroup[position] = CullDecisionValidator.validate(
+                let decided = CullDecisionValidator.validate(
                     group: group, tokens: [:], modelOutput: nil, triage: triage, settings: settings)
+                decisionsByGroup[position] = decided
+                emitRejects(Self.liveRejects(decided, records: records, thumbnailer: thumbnailer))
             } else {
                 let call = PhotoGroup(id: group.id, kind: group.kind, camera: group.camera, photos: remaining)
                 work.append(Work(position: position, group: group, callGroup: call, triage: triage))
@@ -114,7 +129,8 @@ nonisolated struct CullRunner: Sendable {
         }
         let groupsTotal = groups.count
         var groupsDone = groups.count - work.count
-        tracker.set(.analyzing(done: groupsDone, total: groupsTotal), analyzingFraction(groupsDone, groupsTotal))
+        let passOneSpan = settings.mode.hasFinalRound ? 0.50 : 0.65
+        tracker.set(.analyzing(done: groupsDone, total: groupsTotal), analyzingFraction(groupsDone, groupsTotal, passOneSpan))
 
         // 5. Claude calls, sliding window.
         let runSection = CullPromptBuilder.runSection(settings: settings)
@@ -141,6 +157,7 @@ nonisolated struct CullRunner: Sendable {
                         let claude = self.claude
                         let req = request.request
                         let position = item.position
+                        let thumbnailer = self.thumbnailer
                         tg.addTask {
                             var output: ModelDecisions?
                             do {
@@ -159,6 +176,9 @@ nonisolated struct CullRunner: Sendable {
                             }
                             let decided = CullDecisionValidator.validate(
                                 group: group, tokens: tokens.reverse, modelOutput: output, triage: triage, settings: settings)
+                            var previews: [String: PhotoRecord] = [:]
+                            for p in group.photos { previews[p.id] = p }
+                            emitRejects(Self.liveRejects(decided, records: previews, thumbnailer: thumbnailer))
                             return (position, decided)
                         }
                     }
@@ -168,7 +188,7 @@ nonisolated struct CullRunner: Sendable {
                         decisionsByGroup[position] = decided
                         groupsDone += 1
                         tracker.set(.analyzing(done: groupsDone, total: groupsTotal),
-                                    analyzingFraction(groupsDone, groupsTotal))
+                                    analyzingFraction(groupsDone, groupsTotal, passOneSpan))
                     }
                 }
             }
@@ -185,8 +205,21 @@ nonisolated struct CullRunner: Sendable {
             return .failed(.budgetExceeded(tracker.spent), nil)
         }
 
+        var decisions = groups.indices.flatMap { decisionsByGroup[$0] ?? [] }
+
+        // 5b. Selects final round: only the best frames across the whole shoot stay.
+        if settings.mode.hasFinalRound {
+            switch await finalRound(decisions, records: records, photoCount: scanned.count, runID: runID,
+                                    settings: settings, gate: gate, tracker: tracker, emitRejects: emitRejects) {
+            case .decided(let d): decisions = d
+            case .stopped: return .stopped(nil)
+            case .budgetExceeded: return .failed(.budgetExceeded(tracker.spent), nil)
+            case .fatal(let error): return .failed(error == .notInstalled ? .claudeNotInstalled : .claudeNotLoggedIn, nil)
+            }
+            if Task.isCancelled { return .stopped(nil) }
+        }
+
         // 6. Plan.
-        let decisions = groups.indices.flatMap { decisionsByGroup[$0] ?? [] }
         let rejectCount = decisions.filter { $0.verdict == .reject }.count
         let plan = CullPlan(runID: runID, settings: settings, decisions: decisions, records: records, catalogCopy: primary)
         let groupsDoneFinal = groupsDone
@@ -252,6 +285,167 @@ nonisolated struct CullRunner: Sendable {
 
     private static func cullError(_ error: Error) -> CullError {
         (error as? CullError) ?? .journalWriteFailed(error.localizedDescription)
+    }
+
+    // MARK: - Selects final round
+
+    private enum FinalRoundOutcome {
+        case decided([CullDecision])
+        case stopped
+        case budgetExceeded
+        case fatal(ClaudeRunnerError)
+    }
+
+    private struct FinalPicks: Decodable {
+        struct Pick: Decodable { let id: String; let reason: String? }
+        let picks: [Pick]
+    }
+
+    /// Cuts the scored keeps down to `SelectsPlanner.targetCount`. Unscored keeps are outside the quota.
+    /// A failed batch falls back to its top scores; only a fatal Claude error, the budget or a stop ends the run.
+    private func finalRound(
+        _ decisions: [CullDecision],
+        records: [String: PhotoRecord],
+        photoCount: Int,
+        runID: UUID,
+        settings: CullSettings,
+        gate: @escaping @Sendable () async -> Void,
+        tracker: ProgressTracker,
+        emitRejects: @escaping @Sendable ([CullLiveReject]) -> Void
+    ) async -> FinalRoundOutcome {
+        typealias Candidate = SelectsPlanner.Candidate
+        let target = SelectsPlanner.targetCount(photoCount: photoCount)
+        let candidates = decisions.compactMap { d -> Candidate? in
+            guard d.verdict == .keep, let score = d.score else { return nil }
+            return Candidate(photoID: d.photoID, score: score, tiebreak: records[d.photoID].map(PhotoRank.score) ?? 0)
+        }
+        guard candidates.count > target else { return .decided(decisions) }
+
+        var decisions = decisions
+        let candidateIDs = Set(candidates.map(\.photoID))
+        func cut(keeping keep: Set<String>, among ids: Set<String>) -> [CullDecision] {
+            var cuts: [CullDecision] = []
+            for i in decisions.indices where ids.contains(decisions[i].photoID) && !keep.contains(decisions[i].photoID) {
+                decisions[i].verdict = .reject
+                decisions[i].criterion = "select"
+                decisions[i].reason = "not a select"
+                decisions[i].keeperID = nil
+                decisions[i].confidence = 1
+                decisions[i].source = .finalRound
+                cuts.append(decisions[i])
+            }
+            return cuts
+        }
+
+        let pool = SelectsPlanner.pool(from: candidates, target: target)
+        let poolIDs = Set(pool.map(\.photoID))
+        emitRejects(Self.liveRejects(cut(keeping: poolIDs, among: candidateIDs), records: records, thumbnailer: thumbnailer))
+
+        let size = SelectsPlanner.batchSize
+        let plan = SelectsPlanner.roundPlan(poolCount: pool.count, target: target, batchSize: size)
+        let befores = [pool.count] + plan.dropLast()
+        let totalCalls = befores.reduce(0) { $0 + ($1 + size - 1) / size }
+        var done = 0
+        tracker.set(.finalRound(done: 0, total: totalCalls), 0.80)
+
+        let prefix = "runs/\(runID.uuidString)/"
+        var survivors = pool
+        for (round, after) in plan.enumerated() {
+            let before = survivors.count
+            let batches = SelectsPlanner.batches(survivors, size: size)
+            var picked: [Candidate] = []
+            var budgetHit = false
+            do {
+                try await withThrowingTaskGroup(of: [Candidate].self) { tg in
+                    var next = 0
+                    var inFlight = 0
+                    while next < batches.count || inFlight > 0 {
+                        while inFlight < settings.maxConcurrentCalls, next < batches.count, !budgetHit {
+                            if Task.isCancelled { throw CancellationError() }
+                            await gate()
+                            if Task.isCancelled { throw CancellationError() }
+                            if tracker.spent >= settings.maxRunBudgetUSD { budgetHit = true; break }
+                            let batch = batches[next]
+                            next += 1
+                            inFlight += 1
+                            let quota = SelectsPlanner.quota(batch: batch.count, survivorsBefore: before, survivorsAfter: after)
+                            var tokenToID: [String: String] = [:]
+                            var frames: [(token: String, path: String, score: Int)] = []
+                            for (offset, c) in batch.enumerated() {
+                                let token = "p" + String(format: "%02d", offset + 1)
+                                tokenToID[token] = c.photoID
+                                guard let preview = records[c.photoID]?.preview else { continue }
+                                frames.append((token, prefix + preview.lastPathComponent, c.score))
+                            }
+                            let message = CullPromptBuilder.finalRoundUserMessage(
+                                round: round + 1, batch: next, batchCount: batches.count, pick: quota, frames: frames)
+                            let estimate = CullEstimator.estimate(photoCount: batch.count, model: settings.model, settings: settings)
+                            let request = ClaudeRequest(
+                                model: settings.model.rawValue,
+                                systemPrompt: CullPromptBuilder.finalRoundSystemPrompt,
+                                appendSystemPrompt: CullPromptBuilder.finalRoundRunSection(settings: settings),
+                                userPrompt: message,
+                                jsonSchema: CullPromptBuilder.finalRoundSchema,
+                                workspace: workspaceRoot,
+                                maxBudgetUSD: min(max(3 * estimate.high, 0.05), 1.00))
+                            let claude = self.claude
+                            let ids = tokenToID
+                            tg.addTask {
+                                var picks: [String] = []
+                                do {
+                                    let response = try await claude.run(request)
+                                    tracker.addSpend(response.costUSD ?? 0)
+                                    if let out = try? JSONDecoder().decode(FinalPicks.self, from: response.structured) {
+                                        picks = out.picks.compactMap { ids[$0.id] }
+                                    }
+                                } catch let error as ClaudeRunnerError {
+                                    switch error {
+                                    case .notInstalled, .notLoggedIn: throw error
+                                    default: break
+                                    }
+                                } catch is CancellationError {
+                                    throw CancellationError()
+                                } catch {
+                                    // Unknown failure: this batch falls back to its top scores.
+                                }
+                                return SelectsPlanner.merge(picks: picks, batch: batch, quota: quota)
+                            }
+                        }
+                        guard inFlight > 0 else { break }
+                        if let merged = try await tg.next() {
+                            inFlight -= 1
+                            picked += merged
+                            done += 1
+                            tracker.set(.finalRound(done: done, total: totalCalls),
+                                        0.80 + 0.15 * ratio(done, totalCalls))
+                        }
+                    }
+                }
+            } catch let error as ClaudeRunnerError {
+                return .fatal(error)
+            } catch {
+                return .stopped
+            }
+            if Task.isCancelled { return .stopped }
+            if budgetHit { return .budgetExceeded }
+            survivors = SelectsPlanner.trim(picked, to: after)
+        }
+
+        let finalIDs = Set(survivors.map(\.photoID))
+        emitRejects(Self.liveRejects(cut(keeping: finalIDs, among: poolIDs), records: records, thumbnailer: thumbnailer))
+        return .decided(decisions)
+    }
+
+    // MARK: - Live rejects
+
+    /// Rejects with a thumbnail of their run-dir preview; call before the run dir is removed.
+    private static func liveRejects(
+        _ decisions: [CullDecision], records: [String: PhotoRecord], thumbnailer: any RejectThumbnailer
+    ) -> [CullLiveReject] {
+        decisions.filter { $0.verdict == .reject }.map { d in
+            CullLiveReject(id: d.photoID, label: CullRejectLabel.label(for: d), reason: d.reason,
+                           thumbnailJPEG: records[d.photoID]?.preview.flatMap { thumbnailer.thumbnail(preview: $0) })
+        }
     }
 
     // MARK: - Local analysis
@@ -339,8 +533,9 @@ private nonisolated func ratio(_ done: Int, _ total: Int) -> Double {
     total > 0 ? min(1, Double(done) / Double(total)) : 1
 }
 
-private nonisolated func analyzingFraction(_ done: Int, _ total: Int) -> Double {
-    0.30 + 0.65 * ratio(done, total)
+/// Pass one spans 0.30 to 0.95, or to 0.80 when a final round follows.
+private nonisolated func analyzingFraction(_ done: Int, _ total: Int, _ span: Double) -> Double {
+    0.30 + span * ratio(done, total)
 }
 
 private nonisolated final class ApplyResult: @unchecked Sendable {
