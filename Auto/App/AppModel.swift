@@ -1469,7 +1469,7 @@ extension AppModel {
     private func record(for shoot: Shoot) -> ShootRecord {
         ShootRecord(id: shoot.id, name: shoot.name, day: ShootSidecar.dayString(shoot.date, calendar: calendar),
                     path: shoot.folder.standardizedFileURL.path,
-                    mirrors: shoot.mirrors.map { $0.standardizedFileURL.path }, lastSeen: Date())
+                    mirrors: shoot.mirrors.map { $0.standardizedFileURL.path }, lastSeen: Date(), layout: shoot.layout)
     }
 
     private func register(_ shoot: Shoot) async {
@@ -1480,15 +1480,15 @@ extension AppModel {
 
     /// Creates `<parent>/<name>` with its sidecar and registers it.
     @discardableResult
-    func createShoot(name: String, date: Date, parent: URL) async throws -> Shoot {
-        try await createShoot(name: name, date: date, parents: [parent])
+    func createShoot(name: String, date: Date, parent: URL, layout: ShootLayout = .cameraFolders) async throws -> Shoot {
+        try await createShoot(name: name, date: date, parents: [parent], layout: layout)
     }
 
     /// Creates the shoot in `parents[0]` and a mirror in each further parent (all must be on distinct
     /// drives). If a mirror can't be made nothing is rolled back: the shoot registers with the copies
     /// that exist and `ShootError.partialCreate` is thrown.
     @discardableResult
-    func createShoot(name: String, date: Date, parents: [URL]) async throws -> Shoot {
+    func createShoot(name: String, date: Date, parents: [URL], layout: ShootLayout = .cameraFolders) async throws -> Shoot {
         guard !parents.isEmpty else { throw ShootError.parentMissing }
         let volumes = cardVolumes()
         let calendar = calendar
@@ -1496,7 +1496,7 @@ extension AppModel {
         let registered = registry.records.flatMap(\.copyPaths)
         let outcome = try await Task.detached {
             try Self.createCopies(name: name, date: date, parents: parents, cardVolumes: volumes,
-                                  calendar: calendar, registered: registered, volumeID: provider)
+                                  calendar: calendar, registered: registered, layout: layout, volumeID: provider)
         }.value
         await register(outcome.shoot)
         if !outcome.failures.isEmpty {
@@ -1527,7 +1527,7 @@ extension AppModel {
     /// drives, name free); then the primary and each mirror are created.
     nonisolated private static func createCopies(name: String, date: Date, parents: [URL], cardVolumes: [URL],
                                                  calendar: Calendar, registered: [String],
-                                                 volumeID: @Sendable (URL) -> String?) throws -> CreateOutcome {
+                                                 layout: ShootLayout, volumeID: @Sendable (URL) -> String?) throws -> CreateOutcome {
         if parents.count > 1 {
             var seen = Set<String>()
             for parent in parents {
@@ -1548,7 +1548,7 @@ extension AppModel {
                 }
             }
         }
-        var shoot = try ShootFolders.create(name: name, date: date, parent: parents[0], cardVolumes: cardVolumes, calendar: calendar)
+        var shoot = try ShootFolders.create(name: name, date: date, parent: parents[0], cardVolumes: cardVolumes, calendar: calendar, layout: layout)
         var created = [driveLabel(parents[0])]
         var failures: [ShootError.CopyFailure] = []
         if parents.count > 1 {
@@ -2084,11 +2084,26 @@ extension AppModel {
                 if wanted.isEmpty { throw AllDuplicatesError() }
             }
         }
+        // Flat shoots: what is already on disk decides renames, listed off main before the state re-check below.
+        var flatExisting: [URL: [String: Int64]] = [:]
+        var flatRelated: [MediaFile] = []
+        if item.record.layout == .flat {
+            if case .online(let pre)? = shoots.first(where: { $0.id == shootID })?.availability {
+                flatExisting = await ShootPlanner.existingNamesOffMain(in: ShootPlanner.flatDirectories(copies: pre.copies))
+            }
+            guard cards.contains(where: { $0 === card }), card.files == snapshot, canAddFootage(card) else {
+                throw CoverageUnavailableError()
+            }
+            if planWasNil, card.plan != nil { throw PendingPlanError() }
+            let wantedURLs = Set(wanted.map(\.url))
+            flatRelated = selection.filter(snapshot).filter { !wantedURLs.contains($0.url) }
+        }
         // Every online copy gets the files. No await from here to the plan, so the copies can't change underneath.
         guard case .online(let live)? = shoots.first(where: { $0.id == shootID })?.availability, live.folder == folder else {
             throw ShootError.shootOffline
         }
-        let jobs = ShootPlanner.jobs(missing: wanted, copies: live.copies, cameras: cameras, fallback: card.name)
+        let jobs = ShootPlanner.jobs(missing: wanted, copies: live.copies, cameras: cameras, fallback: card.name,
+                                     layout: item.record.layout, existing: flatExisting, related: flatRelated)
         guard !jobs.isEmpty else { throw EmptySelectionError() }
         guard jobs.allSatisfy({ job in job.root.map { ShootPlanner.isInside(job.destDir, root: $0) } ?? false }) else {
             throw ShootPlanner.PathError.outsideWorkFolder

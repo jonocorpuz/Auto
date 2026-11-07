@@ -61,9 +61,12 @@ extension AppModel {
             }
         } catch { return }
         guard current() else { return }
-        let existing = await Task.detached { ImportPlanner.existingFolders(in: primary) }.value
+        let flat = shoot.layout == .flat
+        // Flat shoots have no camera folders to map onto; their file names are listed off main instead.
+        let existing: [String: [String]] = flat ? [:] : await Task.detached { ImportPlanner.existingFolders(in: primary) }.value
+        if flat { staging.flatExisting = await ShootPlanner.existingNamesOffMain(in: ShootPlanner.flatDirectories(copies: shoot.copies)) }
         guard current() else { return }
-        let cameras = ImportPlanner.mapCameras(detected: scan.cameras, existing: existing)
+        let cameras = flat ? scan.cameras : ImportPlanner.mapCameras(detected: scan.cameras, existing: existing)
         let folderByID = Dictionary(cameras.map { ($0.id, $0.folderName) }, uniquingKeysWith: { first, _ in first })
         staging.cameras = cameras
         staging.items = scan.files.map {
@@ -111,7 +114,8 @@ extension AppModel {
         let jobs: [CopyJob]
         switch staging.target {
         case .sorted:
-            jobs = ImportPlanner.sortedJobs(files: files, copies: shoot.copies, cameras: staging.cameras)
+            jobs = ImportPlanner.sortedJobs(files: files, copies: shoot.copies, cameras: staging.cameras,
+                                            layout: shoot.layout, existing: staging.flatExisting)
         case .exact(let folder):
             jobs = try ImportPlanner.exactJobs(files: files, copies: shoot.copies, primary: shoot.folder, folder: folder)
         }

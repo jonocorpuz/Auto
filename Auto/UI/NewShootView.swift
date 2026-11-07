@@ -40,6 +40,7 @@ private struct CreateShootSheet: View {
     @State private var error: String?
     @State private var finished = false
     @State private var working = false
+    @State private var separateCameras = true
     @FocusState private var nameFocused: Bool
 
     private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
@@ -131,6 +132,13 @@ private struct CreateShootSheet: View {
                         DatePicker("Date", selection: $date, displayedComponents: .date)
                             .labelsHidden()
                             .datePickerStyle(.field)
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle("Separate folders per camera", isOn: $separateCameras)
+                            .disabled(working || finished)
+                        Text("Off: files go straight into Video/ and Photo/.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
 
                     HStack {
@@ -272,7 +280,7 @@ private struct CreateShootSheet: View {
     private func create() {
         guard canCreate else { return }
         let parents = destinations.compactMap(\.url)
-        run { try await model.createShoot(name: trimmed, date: date, parents: parents) }
+        run { try await model.createShoot(name: trimmed, date: date, parents: parents, layout: separateCameras ? .cameraFolders : .flat) }
     }
 
     private func adopt(_ parent: URL) {

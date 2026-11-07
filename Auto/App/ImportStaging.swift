@@ -29,6 +29,8 @@ final class ImportStaging: Identifiable {
     /// Cameras after mapping onto the shoot's existing folders.
     var cameras: [Camera] = []
     var duplicates: Set<URL> = []
+    /// Flat shoots only: names already in each copy's Video/ and Photo/, listed off main after the scan.
+    var flatExisting: [URL: [String: Int64]] = [:]
     var removed: Set<URL> = []
     var includeDuplicates: Set<URL> = []
     var refused: [(URL, ImportRefusal)] = []
