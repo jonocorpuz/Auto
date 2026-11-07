@@ -10,6 +10,11 @@ nonisolated struct CopyJob: Sendable {
     var onCollision: CollisionPolicy = .renameUnique
     /// If set, the MD5 streamed from the source must equal this, else `.sourceChanged` and nothing is kept.
     var expectedChecksum: Data? = nil
+    /// Requested file name in `destDir` (nil = the source's name). Only the requested name: a taken
+    /// name still gets a unique sibling, never an overwrite. Must be one plain path component.
+    var destName: String? = nil
+
+    var requestedName: String { destName ?? file.name }
 }
 
 nonisolated enum CollisionPolicy: Sendable {
@@ -198,7 +203,12 @@ nonisolated final class CopyEngine: @unchecked Sendable {
     private func copyVerified(_ job: CopyJob, onBytes: (Int64) -> Void) throws -> CopiedFile {
         let fm = FileManager.default
         let source = job.file.url
-        var dest = job.destDir.appendingPathComponent(job.file.name)
+        let name = job.requestedName
+        // A destName is one plain component: never a path that could step out of destDir.
+        if let requested = job.destName {
+            guard !requested.isEmpty, !requested.hasPrefix("."), !requested.contains("/") else { throw CopyError.outsideRoot }
+        }
+        var dest = job.destDir.appendingPathComponent(name)
 
         // Already there from an earlier run? Keep it if it's byte-identical.
         if fm.fileExists(atPath: dest.path) {
