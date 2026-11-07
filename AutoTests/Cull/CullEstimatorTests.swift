@@ -67,4 +67,18 @@ struct CullEstimatorTests {
         let without = CullEstimator.estimate(photoCount: 100, model: .sonnet, settings: faceless)
         #expect(without.high < withStrips.high)
     }
+
+    private func cost(_ mode: CullMode) -> (low: Double, high: Double, calls: Int) {
+        var settings = CullSettings()
+        settings.mode = mode
+        return CullEstimator.estimate(photoCount: 400, model: .sonnet, settings: settings)
+    }
+
+    @Test func modesOrderByCost() {
+        #expect(cost(.selects).high > cost(.strict).high)
+        #expect(cost(.strict).high > cost(.balanced).high)
+        #expect(cost(.gentle).high <= cost(.balanced).high)
+        #expect(cost(.selects).calls > cost(.strict).calls)
+        #expect(cost(.strict).calls == cost(.balanced).calls)
+    }
 }

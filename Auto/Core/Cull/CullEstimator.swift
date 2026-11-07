@@ -12,7 +12,13 @@ import Foundation
 /// - System prompt and workspace CLAUDE.md: about 1500 tokens per call. About
 ///   90% of it is a prompt-cache read billed at 0.1x. The other 10% is billed at
 ///   full price to cover cache misses.
-/// - Output: about 40 tokens per photo.
+/// - Output: about 40 tokens per photo. Scoring modes (strict, selects) add
+///   about 10 more per photo for the score field.
+/// - Selects pass 2 (the elimination rounds over the top candidates): the pool
+///   is about 25% of the photos (`selectsPoolShare`), each pool image is seen
+///   about twice across rounds (`selectsRevisitFactor`), batches of 10 images
+///   per call with two calls per batch slot (`selectsBatchSize`, rounds factor
+///   2), and about 25 output tokens per pick (`selectsOutputTokensPerPick`).
 /// - Calls: ceil(photos / 8), matching the grouper's singles batch.
 /// - Prices in USD per million tokens (input / output): haiku 1 / 5,
 ///   sonnet 3 / 15, opus 5 / 25.
@@ -29,6 +35,12 @@ nonisolated enum CullEstimator {
     static let cachedShare = 0.9
     static let cacheReadMultiplier = 0.1
     static let outputTokensPerPhoto = 40.0
+    static let scoringOutputTokensPerPhoto = 10.0
+    static let selectsPoolShare = 0.25
+    static let selectsRevisitFactor = 2.0
+    static let selectsBatchSize = 10
+    static let selectsCallsFactor = 2
+    static let selectsOutputTokensPerPick = 25.0
     static let lowFactor = 0.7
     static let highFactor = 1.5
 
@@ -49,16 +61,25 @@ nonisolated enum CullEstimator {
         guard photoCount > 0 else { return (0, 0, 0) }
 
         let photos = Double(photoCount)
-        let calls = (photoCount + photosPerCall - 1) / photosPerCall
+        var calls = (photoCount + photosPerCall - 1) / photosPerCall
+        let mode = settings.mode
 
         let stripShare = (settings.criteria.contains("eyes") || settings.criteria.contains("cropped"))
             ? faceStripShare
             : 0
-        let photoInput = photos * (imageTokensPerPhoto + stripShare * faceStripTokens)
+        var photoInput = photos * (imageTokensPerPhoto + stripShare * faceStripTokens)
         let effectiveSystemTokens = systemTokensPerCall
             * (cachedShare * cacheReadMultiplier + (1 - cachedShare))
+        var outputTokens = photos * (outputTokensPerPhoto + (mode.scoresFrames ? scoringOutputTokensPerPhoto : 0))
+
+        if mode.hasFinalRound {
+            let pool = photos * selectsPoolShare
+            let extraCalls = Int((pool / Double(selectsBatchSize)).rounded(.up)) * selectsCallsFactor
+            photoInput += pool * selectsRevisitFactor * imageTokensPerPhoto
+            outputTokens += Double(SelectsPlanner.targetCount(photoCount: photoCount)) * selectsOutputTokensPerPick
+            calls += extraCalls
+        }
         let inputTokens = photoInput + Double(calls) * effectiveSystemTokens
-        let outputTokens = photos * outputTokensPerPhoto
 
         let rate = price(for: model)
         let point = (inputTokens * rate.input + outputTokens * rate.output) / 1_000_000
