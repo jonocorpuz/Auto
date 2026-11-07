@@ -289,6 +289,10 @@ final class AppModel {
     }
     /// Notes from the last cull action per shoot (e.g. why an undo failed).
     private(set) var cullNotes: [UUID: String] = [:]
+    /// Rejects streamed during a cull (newest last), kept after the run for review.
+    private(set) var cullLiveRejects: [UUID: [CullLiveReject]] = [:]
+    /// Whether the listed rejects were actually moved (true only after a completed run).
+    private(set) var cullLiveRejectsApplied: [UUID: Bool] = [:]
     @ObservationIgnored let claude: any ClaudeRunner
     @ObservationIgnored let photoAnalyzer: any PhotoAnalyzer
     @ObservationIgnored let cullApplier: any CullApplying
@@ -2816,6 +2820,8 @@ extension AppModel {
         let settings = cullSettings.clamped()
         let volumes = cardVolumes()
         cullNotes[shootID] = nil
+        cullLiveRejects[shootID] = []
+        cullLiveRejectsApplied[shootID] = false
         if let notice = cullBusyNotice() {
             cullStates[shootID] = .waiting(notice)
         } else {
@@ -2841,6 +2847,10 @@ extension AppModel {
                 onProgress: { [weak self] progress in
                     guard let self, self.cullTasks[shootID] != nil else { return }
                     if case .waiting(let note) = progress.phase { self.cullStates[shootID] = .waiting(note) } else { self.cullStates[shootID] = .running(progress) }
+                },
+                onRejects: { [weak self] batch in
+                    guard let self, self.cullTasks[shootID] != nil else { return }
+                    self.cullLiveRejects[shootID, default: []].append(contentsOf: batch)
                 })
             await self?.finishCull(shootID, outcome)
         }
@@ -2867,6 +2877,7 @@ extension AppModel {
         // Files may have moved on completion, on a failure after apply started, and on a stop (rollback may be partial).
         switch outcome {
         case .completed(let summary):
+            cullLiveRejectsApplied[shootID] = true
             cullApplyEntered.remove(shootID)
             await afterCullChangedFiles(shootID, moved: summary.rejected > 0)
         case .failed, .stopped:
@@ -2915,6 +2926,8 @@ extension AppModel {
         cullStates[shootID] = nil
         switch result {
         case .success(let summary):
+            cullLiveRejects[shootID] = nil
+            cullLiveRejectsApplied[shootID] = nil
             await afterCullChangedFiles(shootID, moved: summary.rejected > 0)
             return true
         case .failure(let error):

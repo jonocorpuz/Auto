@@ -13,7 +13,7 @@ struct AppCullTests {
         let applier: FakeCullApplier
     }
 
-    private func makeEnv(black: Bool = false, hang: Bool = false, photos: Int = 3) throws -> Env {
+    private func makeEnv(black: Bool = false, hang: Bool = false, photos: Int = 3, applier: FakeCullApplier = FakeCullApplier(), realApplier: Bool = false) throws -> Env {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("AppCull-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let suite = "AppCullTests-\(UUID().uuidString)"
@@ -30,10 +30,9 @@ struct AppCullTests {
             .success(ClaudeResponse(structured: try! JSONSerialization.data(withJSONObject: ["decisions": [[String: Any]]()]),
                                     costUSD: 0.01, inputTokens: nil, outputTokens: nil, cacheReadTokens: nil))
         }
-        let applier = FakeCullApplier()
         let model = AppModel(registryURL: dir.appendingPathComponent("shoots.json"), thumbnails: FakeThumbnailProvider(),
                              defaults: defaults, claude: claude, photoAnalyzer: FakePhotoAnalyzer(metrics: metrics),
-                             cullApplier: applier, cullWorkspaceRoot: dir.appendingPathComponent("ws"))
+                             cullApplier: realApplier ? LiveCullApplier() : applier, cullWorkspaceRoot: dir.appendingPathComponent("ws"))
         return Env(dir: dir, model: model, defaults: defaults, suite: suite, claude: claude, applier: applier)
     }
 
@@ -94,6 +93,52 @@ struct AppCullTests {
         #expect(env.applier.plans.count == 1)
         #expect(env.applier.applyOnMainThread == [false])
         #expect(env.model.cullBlockReason(shootID: shoot.id) == nil)
+    }
+
+    @Test func liveRejectsKeptAndAppliedAfterCompletion() async throws {
+        let env = try makeEnv(black: true)
+        defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await makeShoot(env, name: "Live")
+        #expect(env.model.startCull(shootID: shoot.id))
+        #expect(await waitUntil { if case .finished? = env.model.cullStates[shoot.id] { true } else { false } })
+        #expect(env.model.cullLiveRejects[shoot.id]?.count == 3)
+        #expect(env.model.cullLiveRejectsApplied[shoot.id] == true)
+    }
+
+    @Test func stoppedRunKeepsRejectsNotApplied() async throws {
+        let env = try makeEnv(black: true, applier: FakeCullApplier(waitForCancelInApply: true))
+        defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await makeShoot(env, name: "Stop")
+        #expect(env.model.startCull(shootID: shoot.id))
+        #expect(await waitUntil { env.applier.applyStarted && env.model.cullLiveRejects[shoot.id]?.count == 3 })
+        env.model.stopCull(shootID: shoot.id)
+        #expect(await waitUntil { if case .finished(.stopped)? = env.model.cullStates[shoot.id] { true } else { false } })
+        #expect(env.model.cullLiveRejects[shoot.id]?.count == 3)
+        #expect(env.model.cullLiveRejectsApplied[shoot.id] == false)
+    }
+
+    @Test func liveRejectsClearedOnNewRun() async throws {
+        let env = try makeEnv(black: true)
+        defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await makeShoot(env, name: "Clear")
+        #expect(env.model.startCull(shootID: shoot.id))
+        #expect(await waitUntil { if case .finished? = env.model.cullStates[shoot.id] { true } else { false } })
+        #expect(env.model.cullLiveRejects[shoot.id]?.isEmpty == false)
+        #expect(env.model.startCull(shootID: shoot.id))
+        #expect(env.model.cullLiveRejects[shoot.id]?.isEmpty == true)
+        #expect(env.model.cullLiveRejectsApplied[shoot.id] == false)
+    }
+
+    @Test func liveRejectsClearedOnUndo() async throws {
+        let env = try makeEnv(black: true, realApplier: true)
+        defer { try? FileManager.default.removeItem(at: env.dir) }
+        let shoot = try await makeShoot(env, name: "Undo")
+        #expect(env.model.startCull(shootID: shoot.id))
+        #expect(await waitUntil { if case .finished(.completed)? = env.model.cullStates[shoot.id] { true } else { false } })
+        #expect(env.model.cullLiveRejects[shoot.id]?.isEmpty == false)
+        #expect(await env.model.undoLastCull(shootID: shoot.id))
+        #expect(env.model.cullLiveRejects[shoot.id] == nil)
+        #expect(env.model.cullLiveRejectsApplied[shoot.id] == nil)
     }
 
     @Test func engineAssignmentAloneIsNotARunningIngest() throws {
