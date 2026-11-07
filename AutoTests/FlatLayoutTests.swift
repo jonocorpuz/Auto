@@ -101,6 +101,87 @@ struct FlatLayoutTests {
         #expect(sorted.map(\.destDir.path) == ["/p/s/Photo/R5", "/m/s/Photo/R5", "/p/s/Video/Other", "/m/s/Video/Other"])
     }
 
+    // MARK: Names already on disk, related files, dual-slot sets
+
+    private func photo(_ path: String, camera: String, card: String, size: Int64, at offset: TimeInterval = 0) -> MediaFile {
+        MediaFile(url: URL(fileURLWithPath: path), size: size, date: Date(timeIntervalSince1970: 1_600_000_000 + offset),
+                  kind: .photo, cameraID: camera, cardID: card)
+    }
+
+    private let aCR3 = MediaFile(url: URL(fileURLWithPath: "/cardA/DCIM/IMG_1.CR3"), size: 30, date: Date(timeIntervalSince1970: 1_600_000_000),
+                                 kind: .photo, cameraID: "a", cardID: "A")
+    private func resumeMissing() -> [MediaFile] {
+        [photo("/cardA/DCIM/IMG_1.JPG", camera: "a", card: "A", size: 3),
+         photo("/cardB/DCIM/IMG_1.CR3", camera: "b", card: "B", size: 40),
+         photo("/cardB/DCIM/IMG_1.JPG", camera: "b", card: "B", size: 4)]
+    }
+
+    @Test(arguments: [true, false])
+    func resumeAfterOnlyOneRawLandedKeepsPairsTogether(withRelated: Bool) {
+        // Run 1 was cancelled after camera A's CR3 landed; it is covered now, so not in `missing`.
+        let shoot = URL(fileURLWithPath: "/w/s")
+        let existing: [URL: [String: Int64]] = [shoot.appendingPathComponent("Photo"): ["img_1.cr3": 30]]
+        let jobs = ShootPlanner.jobs(missing: resumeMissing(), shoot: shoot, cameras: cams, fallback: "CARD", layout: .flat,
+                                     existing: existing, related: withRelated ? [aCR3] : [])
+        #expect(names(jobs) == ["IMG_1.JPG", "IMG_1 2.CR3", "IMG_1 2.JPG"])
+    }
+
+    @Test func resumeOfTheSameSetKeepsItsStem() {
+        let shoot = URL(fileURLWithPath: "/w/s")
+        let jobs = ShootPlanner.jobs(missing: [aCR3, photo("/cardA/DCIM/IMG_1.JPG", camera: "a", card: "A", size: 3)], shoot: shoot,
+                                     cameras: cams, fallback: "CARD", layout: .flat,
+                                     existing: [shoot.appendingPathComponent("Photo"): ["img_1.cr3": 30]])
+        #expect(jobs.allSatisfy { $0.destName == nil })
+    }
+
+    @Test func foreignFileWithTheStemRenamesTheWholeSet() {
+        let shoot = URL(fileURLWithPath: "/w/s")
+        let set = [photo("/x/IMG_5.CR3", camera: "a", card: "X", size: 30), photo("/x/IMG_5.JPG", camera: "a", card: "X", size: 3)]
+        // An earlier RAW-only IMG_5 from another shoot day, and a taken "IMG_5 2" too.
+        let existing: [URL: [String: Int64]] = [shoot.appendingPathComponent("Photo"): ["img_5.cr3": 99, "img_5 2.jpg": 7]]
+        let jobs = ShootPlanner.jobs(missing: set, shoot: shoot, cameras: cams, fallback: "CARD", layout: .flat, existing: existing)
+        #expect(names(jobs) == ["IMG_5 3.CR3", "IMG_5 3.JPG"])
+    }
+
+    @Test func aForeignNameOnAnyCopyRenamesOnEveryCopy() {
+        let copies = [URL(fileURLWithPath: "/a/s"), URL(fileURLWithPath: "/b/s")]
+        let set = [photo("/x/IMG_5.CR3", camera: "a", card: "X", size: 30), photo("/x/IMG_5.JPG", camera: "a", card: "X", size: 3)]
+        let existing: [URL: [String: Int64]] = [URL(fileURLWithPath: "/a/s/Photo"): [:], URL(fileURLWithPath: "/b/s/Photo"): ["img_5.jpg": 8]]
+        let jobs = ShootPlanner.jobs(missing: set, copies: copies, cameras: cams, fallback: "CARD", layout: .flat, existing: existing)
+        #expect(names(jobs) == ["IMG_5 2.CR3", "IMG_5 2.CR3", "IMG_5 2.JPG", "IMG_5 2.JPG"])
+    }
+
+    @Test func existingNamesListsVisibleEntries() throws {
+        let dir = try FixtureCard.makeTempDir("FlatExisting")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data(repeating: 1, count: 12).write(to: dir.appendingPathComponent("IMG_1.CR3"))
+        try Data().write(to: dir.appendingPathComponent(".IMG_1.CR3.x.auto-partial"))
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("Sub"), withIntermediateDirectories: false)
+        let missing = dir.appendingPathComponent("Nope")
+        let names = ShootPlanner.existingNames(in: [dir, missing])
+        #expect(names[dir] == ["img_1.cr3": 12, "sub": -1])
+        #expect(names[missing] == [:])
+        #expect(ShootPlanner.flatDirectories(copies: [URL(fileURLWithPath: "/a")]).map(\.path) == ["/a/Video", "/a/Photo"])
+    }
+
+    @Test func dualSlotRawAndJpegOnTwoCardsAreOneSet() {
+        let files = [photo("/card1/DCIM/IMG_1.CR3", camera: "a", card: "1", size: 30),
+                     photo("/card2/DCIM/IMG_1.JPG", camera: "a", card: "2", size: 3, at: 1),
+                     photo("/cardB/DCIM/IMG_1.CR3", camera: "b", card: "B", size: 40),
+                     photo("/cardB/DCIM/IMG_1.JPG", camera: "b", card: "B", size: 4)]
+        let jobs = ShootPlanner.jobs(missing: files, shoot: URL(fileURLWithPath: "/w/s"), cameras: cams, fallback: "CARD", layout: .flat)
+        #expect(names(jobs) == ["IMG_1.CR3", "IMG_1.JPG", "IMG_1 2.CR3", "IMG_1 2.JPG"])
+    }
+
+    @Test func sameCameraSameStemSplitsOnRepeatedExtensionOrTimeGap() {
+        // Two CR3s are two photos (counter wrapped); a JPEG an hour later is a third.
+        let files = [photo("/card1/IMG_1.CR3", camera: "a", card: "1", size: 30),
+                     photo("/card2/IMG_1.CR3", camera: "a", card: "2", size: 31, at: 2),
+                     photo("/card1/IMG_1.JPG", camera: "a", card: "1", size: 3, at: 3_600)]
+        let jobs = ShootPlanner.jobs(missing: files, shoot: URL(fileURLWithPath: "/w/s"), cameras: cams, fallback: "CARD", layout: .flat)
+        #expect(names(jobs) == ["IMG_1.CR3", "IMG_1 2.CR3", "IMG_1 3.JPG"])
+    }
+
     // MARK: CopyEngine
 
     private func md5(_ url: URL) throws -> Data { Data(Insecure.MD5.hash(data: try Data(contentsOf: url))) }
@@ -153,6 +234,22 @@ struct FlatLayoutTests {
         let outcome = await CopyEngine().run([job]) { _ in }
         #expect(outcome.copied.first?.preexisting == true)
         #expect(try FileManager.default.contentsOfDirectory(atPath: dst.path) == ["IMG_1 2.CR3"])
+    }
+
+    @Test func cancelMidCopyWithDestNameLeavesNoPartialOrFinal() async throws {
+        let src = try FixtureCard.makeTempDir("FlatSrc"), dst = try FixtureCard.makeTempDir("FlatDst")
+        defer { try? FileManager.default.removeItem(at: src); try? FileManager.default.removeItem(at: dst) }
+        let url = src.appendingPathComponent("IMG_1.CR3")
+        try Data(repeating: 0x5A, count: 24 << 20).write(to: url)
+        let f = MediaFile(url: url, size: 24 << 20, date: Date(), kind: .photo, cameraID: "b")
+        var job = CopyJob(file: f, destDir: dst)
+        job.destName = "IMG_1 2.CR3"
+        let engine = CopyEngine()
+        engine.onChunkWritten = { [unowned engine] _ in engine.cancel() }
+        let outcome = await engine.run([job]) { _ in }
+        #expect(outcome.cancelled)
+        #expect(outcome.copied.isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dst.path).isEmpty)
     }
 
     @Test(arguments: ["../IMG_1.CR3", "a/b.CR3", ".hidden.CR3", ""])
@@ -214,7 +311,63 @@ struct FlatLayoutTests {
         #expect(outcome.results[mine.url] == .mismatch)
     }
 
+    @Test func directMatchWinsOverAWrongAliasOfTheSameSize() async throws {
+        let card = try FixtureCard.makeTempDir("FlatCard"), drive = try FixtureCard.makeTempDir("FlatDrive")
+        defer { try? FileManager.default.removeItem(at: card); try? FileManager.default.removeItem(at: drive) }
+        let mine = try sourceFile(card, "IMG_1.CR3", fill: 0x22)
+        try Data(repeating: 0x22, count: 500).write(to: drive.appendingPathComponent("IMG_1.CR3"))
+        try Data(repeating: 0x55, count: 500).write(to: drive.appendingPathComponent("IMG_1 2.CR3"))
+        let index = await DriveIndex.build(drive)
+        let outcome = await BackupVerifier().run([mine], candidates: index) { _ in }
+        guard case .verified(let hit) = outcome.results[mine.url] else { Issue.record("not verified"); return }
+        #expect(hit.lastPathComponent == "IMG_1.CR3")
+    }
+
+    @Test func triageUsesTheCacheForAnAliasCandidate() async throws {
+        let card = try FixtureCard.makeTempDir("FlatCard"), drive = try FixtureCard.makeTempDir("FlatDrive")
+        defer { try? FileManager.default.removeItem(at: card); try? FileManager.default.removeItem(at: drive) }
+        let mine = try sourceFile(card, "IMG_1.CR3", fill: 0x22)
+        let renamed = drive.appendingPathComponent("IMG_1 2.CR3")
+        try Data(repeating: 0x22, count: 500).write(to: renamed)
+        let cache = VerificationCache()
+        cache.record(mine, candidate: renamed, mtime: try #require(VerificationCache.modificationDate(renamed)))
+        let index = await DriveIndex.build(drive)
+        let triage = BackupVerifier.triage(files: [mine], candidates: index, cache: cache)
+        guard case .verified(let hit) = triage.settled[mine.url] else { Issue.record("not settled"); return }
+        #expect(hit.standardizedFileURL.path == renamed.standardizedFileURL.path)
+        #expect(triage.toVerify.isEmpty)
+    }
+
+    @Test func numberedTitleNeverVerifiesADifferentFile() async throws {
+        let card = try FixtureCard.makeTempDir("FlatCard"), drive = try FixtureCard.makeTempDir("FlatDrive")
+        defer { try? FileManager.default.removeItem(at: card); try? FileManager.default.removeItem(at: drive) }
+        let url = card.appendingPathComponent("Trip.MP4")
+        try Data(repeating: 0x01, count: 500).write(to: url)
+        let trip = MediaFile(url: url, size: 500, date: Date(), kind: .video, cameraID: "")
+        try Data(repeating: 0x02, count: 500).write(to: drive.appendingPathComponent("Trip 2023.MP4"))
+        let index = await DriveIndex.build(drive)
+        let outcome = await BackupVerifier().run([trip], candidates: index) { _ in }
+        #expect(outcome.results[trip.url]?.isVerified == false)
+    }
+
     // MARK: PhotoCatalog
+
+    @Test func flatClustersAnchorOnTheFirstFileAndNeverPairUnknownDates() {
+        let t = Date(timeIntervalSince1970: 1_700_000_000)
+        let groups = PhotoCatalog.flatClusters([("a.CR3", t), ("a.JPG", t.addingTimeInterval(3)), ("a.HEIC", t.addingTimeInterval(7)),
+                                                ("a.DNG", t.addingTimeInterval(9)), ("a.TIF", .distantPast), ("a.PNG", .distantPast)])
+        #expect(groups == [["a.PNG"], ["a.TIF"], ["a.CR3", "a.JPG"], ["a.HEIC", "a.DNG"]])
+    }
+
+    @Test func flatThreeSameStemFilesAcrossTheWindowAreTwoPhotos() throws {
+        let f = FixtureShoot(); defer { f.cleanup() }
+        let t = Date(timeIntervalSince1970: 1_700_000_000)
+        try touch(f, "Photo/IMG_1.CR3", t)
+        try touch(f, "Photo/IMG_1.JPG", t.addingTimeInterval(3))
+        try touch(f, "Photo/IMG_1.HEIC", t.addingTimeInterval(8))
+        let r = try PhotoCatalog.scan(shoot: f.root, cardVolumes: [])
+        #expect(Set(r.map(\.members)) == [["Photo/IMG_1.CR3", "Photo/IMG_1.JPG"], ["Photo/IMG_1.HEIC"]])
+    }
 
     private func touch(_ f: FixtureShoot, _ rel: String, _ date: Date) throws {
         let url = f.add(rel)
