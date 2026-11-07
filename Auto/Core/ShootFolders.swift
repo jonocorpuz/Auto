@@ -122,13 +122,14 @@ nonisolated enum ShootFolders {
         if fcntl(dfd, F_FULLFSYNC) != 0 { _ = fsync(dfd) }
     }
 
-    private static func makeSidecar(name: String, date: Date, calendar: Calendar, now: Date) -> ShootSidecar {
+    private static func makeSidecar(name: String, date: Date, calendar: Calendar, now: Date, layout: ShootLayout) -> ShootSidecar {
         ShootSidecar(version: ShootSidecar.currentVersion, id: UUID(), name: name,
-                     day: ShootSidecar.dayString(date, calendar: calendar), createdAt: now)
+                     day: ShootSidecar.dayString(date, calendar: calendar), createdAt: now, layout: layout)
     }
 
     private static func shoot(_ sidecar: ShootSidecar, folder: URL, date: Date, calendar: Calendar) -> Shoot {
-        Shoot(id: sidecar.id, name: sidecar.name, date: calendar.startOfDay(for: date), folder: folder)
+        Shoot(id: sidecar.id, name: sidecar.name, date: calendar.startOfDay(for: date), folder: folder,
+              layout: sidecar.layout)
     }
 
     private static func checkSafe(_ dir: URL, root: URL, cardVolumes: [URL], name: String) throws {
@@ -154,11 +155,12 @@ nonisolated enum ShootFolders {
     // MARK: Create / adopt
 
     /// Makes `parent/<name>` (parent must already exist and is never created) and writes its sidecar.
-    static func create(name: String, date: Date, parent: URL, cardVolumes: [URL], calendar: Calendar, now: Date = Date()) throws -> Shoot {
+    static func create(name: String, date: Date, parent: URL, cardVolumes: [URL], calendar: Calendar, now: Date = Date(),
+                       layout: ShootLayout = .cameraFolders) throws -> Shoot {
         guard isExistingDirectory(parent) else { throw ShootError.parentMissing }
         try checkSafe(parent, root: parent, cardVolumes: cardVolumes, name: parent.lastPathComponent)
         guard let component = ShootPlanner.safeComponent(name) else { throw ShootError.invalidName }
-        let sidecar = makeSidecar(name: component, date: date, calendar: calendar, now: now)
+        let sidecar = makeSidecar(name: component, date: date, calendar: calendar, now: now, layout: layout)
         let folder = try makeFolder(sidecar: sidecar, parent: parent, cardVolumes: cardVolumes)
         return shoot(sidecar, folder: folder, date: date, calendar: calendar)
     }
@@ -239,8 +241,9 @@ nonisolated enum ShootFolders {
     }
 
     /// Turns an existing plain folder into a shoot by adding the sidecar. Nothing else is touched.
-    static func adopt(folder: URL, name: String, date: Date, cardVolumes: [URL], calendar: Calendar, now: Date = Date()) throws -> Shoot {
-        guard isExistingDirectory(folder) else { throw ShootError.notAFolder(folder.lastPathComponent) }
+    static func adopt(folder: URL, name: String, date: Date, cardVolumes: [URL], calendar: Calendar, now: Date = Date(),
+                       layout: ShootLayout = .cameraFolders) throws -> Shoot {
+        guard isExistingDirectory(folder)else { throw ShootError.notAFolder(folder.lastPathComponent) }
         try checkSafe(folder, root: folder, cardVolumes: cardVolumes, name: folder.lastPathComponent)
         guard let clean = ShootPlanner.safeComponent(name) else { throw ShootError.invalidName }
         switch classify(folder: folder) {
@@ -250,7 +253,7 @@ nonisolated enum ShootFolders {
         case .invalidName: throw ShootError.invalidName
         case .plainFolder: break
         }
-        let sidecar = makeSidecar(name: clean, date: date, calendar: calendar, now: now)
+        let sidecar = makeSidecar(name: clean, date: date, calendar: calendar, now: now, layout: layout)
         try writeSidecar(sidecar, in: folder, cardVolumes: cardVolumes)
         return shoot(sidecar, folder: folder, date: date, calendar: calendar)
     }

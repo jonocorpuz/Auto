@@ -13,11 +13,14 @@ nonisolated struct ShootRecord: Codable, Sendable, Hashable {
     /// Copies known to be missing footage from an ingest that couldn't reach them. A hint only.
     var pendingSync: [String] = []
     var lastSeen: Date
+    var layout: ShootLayout = .cameraFolders
 
     var copyPaths: [String] { [path] + mirrors }
 
     init(id: UUID, name: String, day: String, path: String,
-         mirrors: [String] = [], pendingSync: [String] = [], lastSeen: Date) {
+         mirrors: [String] = [], pendingSync: [String] = [], lastSeen: Date,
+         layout: ShootLayout = .cameraFolders) {
+        self.layout = layout
         self.id = id
         self.name = name
         self.day = day
@@ -38,6 +41,7 @@ nonisolated struct ShootRecord: Codable, Sendable, Hashable {
         mirrors = try c.decodeIfPresent([String].self, forKey: .mirrors) ?? []
         pendingSync = try c.decodeIfPresent([String].self, forKey: .pendingSync) ?? []
         lastSeen = try c.decode(Date.self, forKey: .lastSeen)
+        layout = try c.decodeIfPresent(ShootLayout.self, forKey: .layout) ?? .cameraFolders
     }
 }
 
@@ -191,6 +195,7 @@ nonisolated struct ShootRegistry: Codable, Sendable, Equatable {
         for d in discovered {
             if let i = records.firstIndex(where: { $0.id == d.id }) {
                 records[i].lastSeen = max(records[i].lastSeen, d.lastSeen)
+                records[i].layout = d.layout
             } else {
                 records.append(d)
             }
@@ -381,7 +386,8 @@ nonisolated enum ShootStore {
                   let data = try? Data(contentsOf: child.appendingPathComponent(ShootSidecar.fileName)),
                   let sidecar = try? ShootSidecar.decode(data) else { continue }
             found.append(ShootRecord(id: sidecar.id, name: sidecar.name, day: sidecar.day,
-                                     path: child.standardizedFileURL.path, lastSeen: Date()))
+                                     path: child.standardizedFileURL.path, lastSeen: Date(),
+                                     layout: sidecar.layout))
         }
         return found
     }

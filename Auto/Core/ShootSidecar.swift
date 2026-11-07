@@ -70,6 +70,27 @@ nonisolated struct ShootSidecar: Sendable, Equatable, Codable {
     /// "yyyy-MM-dd", calendar-local.
     var day: String
     var createdAt: Date
+    var layout: ShootLayout = .cameraFolders
+
+    init(version: Int, id: UUID, name: String, day: String, createdAt: Date, layout: ShootLayout = .cameraFolders) {
+        self.version = version
+        self.id = id
+        self.name = name
+        self.day = day
+        self.createdAt = createdAt
+        self.layout = layout
+    }
+
+    // Hand-written: sidecars written before layout existed lack the key.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(Int.self, forKey: .version)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        day = try c.decode(String.self, forKey: .day)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        layout = try c.decodeIfPresent(ShootLayout.self, forKey: .layout) ?? .cameraFolders
+    }
 
     static func encode(_ s: ShootSidecar) throws -> Data {
         let encoder = JSONEncoder()
@@ -113,6 +134,6 @@ nonisolated struct ShootSidecar: Sendable, Equatable, Codable {
 
     func shoot(folder: URL, calendar: Calendar) -> Shoot? {
         guard let date = date(in: calendar) else { return nil }
-        return Shoot(id: id, name: name, date: date, folder: folder)
+        return Shoot(id: id, name: name, date: date, folder: folder, layout: layout)
     }
 }

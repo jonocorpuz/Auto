@@ -10,5 +10,6 @@ nonisolated struct Shoot: Sendable, Identifiable, Hashable {
     var folder: URL
     /// The other online copies, each on a distinct volume.
     var mirrors: [URL] = []
+    var layout: ShootLayout = .cameraFolders
     var copies: [URL] { [folder] + mirrors }
 }
