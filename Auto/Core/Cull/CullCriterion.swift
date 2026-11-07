@@ -16,7 +16,7 @@ nonisolated struct CullCriterion: Sendable, Hashable, Identifiable {
     static let duplicates = CullCriterion(
         id: "duplicates",
         title: "Duplicates",
-        definition: "Near-identical frames of the same pose; keep the best per the strictness level."
+        definition: "Near-identical frames of the same pose; keep the best per the cull mode."
     )
 
     static let unusable = CullCriterion(
