@@ -105,8 +105,10 @@ nonisolated enum ImportPlanner {
     }
 
     /// Video/Photo/<camera> jobs on every copy; unknown cameras go to `Other`, audio to Video.
-    static func sortedJobs(files: [MediaFile], copies: [URL], cameras: [Camera]) -> [CopyJob] {
-        ShootPlanner.jobs(missing: files, copies: copies, cameras: cameras, fallback: fallbackFolder)
+    /// `.flat` drops the camera level (Video/ or Photo/ directly), renaming cross-camera stem collisions.
+    static func sortedJobs(files: [MediaFile], copies: [URL], cameras: [Camera],
+                           layout: ShootLayout = .cameraFolders) -> [CopyJob] {
+        ShootPlanner.jobs(missing: files, copies: copies, cameras: cameras, fallback: fallbackFolder, layout: layout)
     }
 
     /// Everything flat into `folder` (inside `primary`), mirrored at the same relative path on each copy.
