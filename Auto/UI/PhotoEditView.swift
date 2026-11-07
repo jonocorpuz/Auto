@@ -184,7 +184,8 @@ private struct CullDetail: View {
             if let note = model.cullNotes[item.id] {
                 Text(note).font(.caption).foregroundStyle(.secondary)
             }
-            Spacer()
+            rejectsSection
+            Spacer(minLength: 0)
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -194,6 +195,20 @@ private struct CullDetail: View {
                 _ = model.startCull(shootID: item.id)
                 showSettings = false
             }, onCancel: { showSettings = false })
+        }
+    }
+
+    @ViewBuilder private var rejectsSection: some View {
+        let rejects = model.cullLiveRejects[item.id] ?? []
+        if !rejects.isEmpty {
+            CullLiveRejectsGrid(rejects: rejects, running: !isIdle, applied: model.cullLiveRejectsApplied[item.id] ?? false)
+        } else if !isIdle {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Looking at photos…").font(.callout).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 8)
         }
     }
 
