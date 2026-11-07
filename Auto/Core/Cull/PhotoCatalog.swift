@@ -49,15 +49,10 @@ nonisolated enum PhotoCatalog {
             // Directly in Photo/ (flat layout) different cameras can share a stem, so only files written
             // within `pairWindow` of each other pair up; camera folders keep pairing on stem alone.
             guard bucket.camera.isEmpty, bucket.entries.count > 1 else { groups.append(bucket); continue }
-            var cluster: [Entry] = []
-            for e in bucket.entries.sorted(by: { ($0.stamp.mtime, $0.rel) < ($1.stamp.mtime, $1.rel) }) {
-                if let start = cluster.first, e.stamp.mtime.timeIntervalSince(start.stamp.mtime) > pairWindow {
-                    groups.append((bucket.camera, cluster))
-                    cluster = []
-                }
-                cluster.append(e)
+            let byRel = Dictionary(uniqueKeysWithValues: bucket.entries.map { ($0.rel, $0) })
+            for cluster in flatClusters(bucket.entries.map { ($0.rel, $0.stamp.mtime) }) {
+                groups.append((bucket.camera, cluster.compactMap { byRel[$0] }))
             }
-            groups.append((bucket.camera, cluster))
         }
 
         var records: [PhotoRecord] = []
@@ -70,5 +65,23 @@ nonisolated enum PhotoCatalog {
                                        representative: rep.rel, stamps: stamps, metrics: nil, preview: nil, faceStrip: nil))
         }
         return records.sorted { ($0.camera, $0.id) < ($1.camera, $1.id) }
+    }
+
+    /// Same-stem files directly in Photo/, split into photos: sorted by mtime, a file joins the current
+    /// group only within `pairWindow` of the group's first file. An unknown mtime (`.distantPast`)
+    /// never pairs: such a file is a photo of its own.
+    static func flatClusters(_ entries: [(rel: String, mtime: Date)]) -> [[String]] {
+        var out: [[String]] = []
+        var cluster: [(rel: String, mtime: Date)] = []
+        for e in entries.sorted(by: { ($0.mtime, $0.rel) < ($1.mtime, $1.rel) }) {
+            if e.mtime == .distantPast { out.append([e.rel]); continue }
+            if let start = cluster.first, e.mtime.timeIntervalSince(start.mtime) > pairWindow {
+                out.append(cluster.map(\.rel))
+                cluster = []
+            }
+            cluster.append(e)
+        }
+        if !cluster.isEmpty { out.append(cluster.map(\.rel)) }
+        return out
     }
 }
