@@ -326,7 +326,7 @@ nonisolated struct CullRunner: Sendable {
             systemPrompt: CullPromptBuilder.roleSystemPrompt,
             appendSystemPrompt: runSection,
             userPrompt: message,
-            jsonSchema: CullPromptBuilder.jsonSchema,
+            jsonSchema: CullPromptBuilder.jsonSchema(for: settings.mode),
             workspace: workspaceRoot,
             maxBudgetUSD: budget)
         return (request, TokenMap(forward: tokens))

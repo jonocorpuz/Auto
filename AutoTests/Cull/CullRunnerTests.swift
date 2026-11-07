@@ -301,7 +301,7 @@ import Testing
             #expect(r.model == "sonnet")
             #expect(r.appendSystemPrompt == CullPromptBuilder.runSection(settings: s))
             #expect(r.systemPrompt == CullPromptBuilder.roleSystemPrompt)
-            #expect(r.jsonSchema == CullPromptBuilder.jsonSchema)
+            #expect(r.jsonSchema == CullPromptBuilder.jsonSchema(for: s.mode))
             #expect(r.maxBudgetUSD >= 0.05 && r.maxBudgetUSD <= 1.0)
             #expect(!r.userPrompt.contains(env.shoot.root.path))
             #expect(!r.userPrompt.contains(env.workspace.path))
