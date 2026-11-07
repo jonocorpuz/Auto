@@ -178,13 +178,14 @@ nonisolated enum ShootPlanner {
 
     /// Video/Photo/<camera folder> per missing file. Cameras with an empty folder name use their model;
     /// files from unknown cameras go to `fallback`. `.flat` puts every file straight into Video/ or Photo/
-    /// (cameras and fallback ignored) and renames cross-set stem collisions (see `uniquifyFlatStems`).
+    /// (cameras and fallback ignored) and renames stem collisions (see `uniquifyFlatStems`); `existing`
+    /// and `related` only matter for `.flat`.
     static func jobs(missing: [MediaFile], shoot: URL, cameras: [Camera], fallback: String,
-                     layout: ShootLayout = .cameraFolders) -> [CopyJob] {
+                     layout: ShootLayout = .cameraFolders, existing: [URL: [String: Int64]] = [:],
+                     related: [MediaFile] = []) -> [CopyJob] {
         if layout == .flat {
-            return uniquifyFlatStems(missing.map { file in
-                CopyJob(file: file, destDir: shoot.appendingPathComponent(file.kind == .photo ? photoFolder : videoFolder))
-            })
+            return uniquifyFlatStems(missing.map { CopyJob(file: $0, destDir: flatDirectory($0, shoot: shoot)) },
+                                     existing: existing, related: related)
         }
         var folderFor: [String: String] = [:]
         for camera in cameras {
@@ -208,11 +209,19 @@ nonisolated enum ShootPlanner {
 
     /// One job per file per copy, file-major (f1 to every copy, then f2, ...). Every job carries its copy
     /// `root`, so a copy that disappears fails with `.rootMissing` instead of being recreated.
-    /// Every copy is planned from the same `missing` list, so a flat rename is identical on every copy.
+    /// `.flat` names are planned once across all copies (what is on disk in any copy counts), so every
+    /// copy gets the same name.
     static func jobs(missing: [MediaFile], copies: [URL], cameras: [Camera], fallback: String,
-                     layout: ShootLayout = .cameraFolders) -> [CopyJob] {
+                     layout: ShootLayout = .cameraFolders, existing: [URL: [String: Int64]] = [:],
+                     related: [MediaFile] = []) -> [CopyJob] {
+        if layout == .flat {
+            let rooted = missing.flatMap { file in
+                copies.map { CopyJob(file: file, destDir: flatDirectory(file, shoot: $0), root: $0) }
+            }
+            return uniquifyFlatStems(rooted, existing: existing, related: related)
+        }
         let perCopy = copies.map { copy in
-            jobs(missing: missing, shoot: copy, cameras: cameras, fallback: fallback, layout: layout).map { job -> CopyJob in
+            jobs(missing: missing, shoot: copy, cameras: cameras, fallback: fallback).map { job -> CopyJob in
                 var rooted = job
                 rooted.root = copy
                 return rooted
@@ -221,6 +230,40 @@ nonisolated enum ShootPlanner {
         return missing.indices.flatMap { i in perCopy.map { $0[i] } }
     }
 
+    private static func flatDirectory(_ file: MediaFile, shoot: URL) -> URL {
+        shoot.appendingPathComponent(file.kind == .photo ? photoFolder : videoFolder)
+    }
+
+    /// The folders a flat plan writes to on each copy (Video/ and Photo/), for `existingNames`.
+    static func flatDirectories(copies: [URL]) -> [URL] {
+        copies.flatMap { [$0.appendingPathComponent(videoFolder), $0.appendingPathComponent(photoFolder)] }
+    }
+
+    /// Lowercased name -> size (-1 when not a regular file) of every visible entry in each folder; a
+    /// missing folder maps to [:]. Reads the disk: call `existingNamesOffMain` from the main actor.
+    static func existingNames(in dirs: [URL]) -> [URL: [String: Int64]] {
+        var out: [URL: [String: Int64]] = [:]
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+        for dir in dirs {
+            let urls = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys,
+                                                                       options: [.skipsHiddenFiles])) ?? []
+            var names: [String: Int64] = [:]
+            for url in urls {
+                let v = try? url.resourceValues(forKeys: Set(keys))
+                names[url.lastPathComponent.lowercased()] = v?.isRegularFile == true ? Int64(v?.fileSize ?? 0) : -1
+            }
+            out[dir] = names
+        }
+        return out
+    }
+
+    @concurrent static func existingNamesOffMain(in dirs: [URL]) async -> [URL: [String: Int64]] {
+        existingNames(in: dirs)
+    }
+
+    /// Max capture-time spread for same-stem files of one camera to be one RAW+JPEG(+...) set.
+    static let flatPairWindow: TimeInterval = 5
+
     /// Stem and extension as spelled ("" when there is no extension).
     private static func splitName(_ name: String) -> (stem: String, ext: String) {
         let ns = name as NSString
@@ -228,45 +271,120 @@ nonisolated enum ShootPlanner {
     }
 
     /// A flat layout merges every camera into one folder, so two cameras' IMG_0001 would collide (and a RAW
-    /// from one would pair with the other's JPEG). Within each destination folder, files sharing a stem
-    /// (case-insensitive) are grouped into sets by (card, source folder, camera, stem), so a RAW+JPEG pair
-    /// stays one set. The first set (by camera, then source path) keeps its stem; each later set gets
-    /// "<stem> 2", "<stem> 3", ... on every member, extension kept, never reusing a stem planned for that
-    /// folder. Pure and deterministic, so the same input names every copy alike. Only the requested name
-    /// changes: CopyEngine still never overwrites a file already on disk.
-    static func uniquifyFlatStems(_ jobs: [CopyJob]) -> [CopyJob] {
-        struct SetKey: Hashable { let card: String; let parent: String; let camera: String }
+    /// from one would pair with the other's JPEG). This picks a requested name (`destName`) per file:
+    ///
+    /// - Sets: files sharing a stem (case-insensitive) are grouped per camera (or, for an unknown camera,
+    ///   per card + source folder), so a dual-slot RAW-on-card-1 / JPEG-on-card-2 pair is one set. A file
+    ///   starts a new set when its extension is already in the set (two CR3s are two photos) or its date is
+    ///   more than `flatPairWindow` from the set's first file.
+    /// - `related`: card files not being copied (already covered), so a resumed set is known in full.
+    /// - `existing` (per destination folder, from `existingNames`): a set may keep its stem only if, for
+    ///   every file already on disk with that stem, the set either has a member with the same name AND
+    ///   size (its own earlier copy: a resume) or has no member with that extension. Otherwise that name
+    ///   belongs to someone else and the whole set is renamed. Ownership is decided by name + size, never
+    ///   by hashing; a wrong guess only affects naming, since CopyEngine still never overwrites.
+    /// - Order: sets owning a disk file first, then by camera, date and source path. The first set that may
+    ///   keep its stem does; every other set gets "<stem> N" on every member, extension kept, with N the
+    ///   lowest whose stem is used by no planned file and no file on disk.
+    ///
+    /// Jobs with a `root` are grouped by folder relative to it, so all copies share one decision (disk
+    /// names from any copy count). Pure and deterministic.
+    static func uniquifyFlatStems(_ jobs: [CopyJob], existing: [URL: [String: Int64]] = [:],
+                                  related: [MediaFile] = []) -> [CopyJob] {
+        var onDisk: [String: [String: Int64]] = [:]
+        for (dir, names) in existing {
+            for (name, size) in names { onDisk[dir.standardizedFileURL.path, default: [:]][name.lowercased()] = size }
+        }
+        var groups: [String: [Int]] = [:]
+        for (i, job) in jobs.enumerated() {
+            let rel = job.root.flatMap { relativeComponents(job.destDir, to: $0) }.map { "rel:" + $0.joined(separator: "/") }
+            groups[rel ?? job.destDir.standardizedFileURL.path, default: []].append(i)
+        }
         var out = jobs
-        var byFolder: [String: [Int]] = [:]
-        for (i, job) in jobs.enumerated() { byFolder[job.destDir.standardizedFileURL.path, default: []].append(i) }
-        let stemOf = { (i: Int) in splitName(jobs[i].destName ?? jobs[i].file.name).stem }
-        for indices in byFolder.values {
-            // Every stem planned in this folder is taken, so a rename never lands on another set's name.
-            var used = Set(indices.map { stemOf($0).lowercased() })
-            var byStem: [String: [SetKey: [Int]]] = [:]
-            for i in indices {
-                let file = jobs[i].file
-                let key = SetKey(card: file.cardID, parent: file.url.deletingLastPathComponent().standardizedFileURL.path,
-                                 camera: file.cameraID)
-                byStem[stemOf(i).lowercased(), default: [:]][key, default: []].append(i)
+        for indices in groups.values {
+            let section = jobs[indices[0]].destDir.lastPathComponent
+            var taken: [String: Set<Int64>] = [:]
+            for dir in Set(indices.map { jobs[$0].destDir.standardizedFileURL.path }) {
+                for (name, size) in onDisk[dir] ?? [:] { taken[name, default: []].insert(size) }
             }
-            for stem in byStem.keys.sorted() {
-                guard let sets = byStem[stem], sets.count > 1 else { continue }
-                let ordered = sets.map { key, members in
-                    (key: key, members: members, first: members.map { jobs[$0].file.url.standardizedFileURL.path }.min() ?? "")
-                }.sorted { ($0.key.camera, $0.first, $0.key.card) < ($1.key.camera, $1.first, $1.key.card) }
-                for set in ordered.dropFirst() {
-                    var n = 2
-                    while used.contains("\(stem) \(n)") { n += 1 }
-                    used.insert("\(stem) \(n)")
-                    for i in set.members {
-                        let (original, ext) = splitName(jobs[i].destName ?? jobs[i].file.name)
-                        out[i].destName = ext.isEmpty ? "\(original) \(n)" : "\(original) \(n).\(ext)"
-                    }
+            var files: [MediaFile] = []
+            var seen = Set<URL>()
+            for i in indices where seen.insert(jobs[i].file.url).inserted { files.append(jobs[i].file) }
+            for f in related where (f.kind == .photo ? photoFolder : videoFolder) == section && seen.insert(f.url).inserted {
+                files.append(f)
+            }
+            let names = flatNames(files, taken: taken)
+            for i in indices { if let name = names[jobs[i].file.url] { out[i].destName = name } }
+        }
+        return out
+    }
+
+    private struct FlatSet {
+        var members: [MediaFile]
+        var exts: Set<String>
+        let anchor: Date
+        let owner: String
+        var first: String
+    }
+
+    /// Renamed files only (url -> requested name). See `uniquifyFlatStems`.
+    private static func flatNames(_ files: [MediaFile], taken: [String: Set<Int64>]) -> [URL: String] {
+        struct Bucket: Hashable { let owner: String; let stem: String }
+        var buckets: [Bucket: [MediaFile]] = [:]
+        for f in files {
+            let owner = f.cameraID.isEmpty
+                ? "card:\(f.cardID)|\(f.url.deletingLastPathComponent().standardizedFileURL.path)" : "cam:\(f.cameraID)"
+            buckets[Bucket(owner: owner, stem: splitName(f.name).stem.lowercased()), default: []].append(f)
+        }
+        var setsByStem: [String: [FlatSet]] = [:]
+        for (bucket, members) in buckets {
+            var sets: [FlatSet] = []
+            for f in members.sorted(by: { ($0.date, $0.url.path) < ($1.date, $1.url.path) }) {
+                let ext = splitName(f.name).ext.lowercased()
+                let path = f.url.standardizedFileURL.path
+                if let k = sets.firstIndex(where: { !$0.exts.contains(ext) && abs(f.date.timeIntervalSince($0.anchor)) <= flatPairWindow }) {
+                    sets[k].members.append(f)
+                    sets[k].exts.insert(ext)
+                    sets[k].first = min(sets[k].first, path)
+                } else {
+                    sets.append(FlatSet(members: [f], exts: [ext], anchor: f.date, owner: bucket.owner, first: path))
+                }
+            }
+            setsByStem[bucket.stem, default: []] += sets
+        }
+        var diskByStem: [String: [String]] = [:]
+        for name in taken.keys { diskByStem[splitName(name).stem, default: []].append(name) }
+        var used = Set(files.map { splitName($0.name).stem.lowercased() }).union(diskByStem.keys)
+
+        var result: [URL: String] = [:]
+        for stem in setsByStem.keys.sorted() {
+            guard let sets = setsByStem[stem] else { continue }
+            let disk = diskByStem[stem] ?? []
+            if sets.count == 1 && disk.isEmpty { continue }
+            func member(_ s: FlatSet, named name: String) -> MediaFile? { s.members.first { $0.name.lowercased() == name } }
+            func owns(_ s: FlatSet) -> Bool { disk.contains { name in member(s, named: name).map { taken[name] == [$0.size] } ?? false } }
+            func mayKeep(_ s: FlatSet) -> Bool {
+                disk.allSatisfy { name in
+                    if let m = member(s, named: name) { return taken[name] == [m.size] }
+                    return !s.exts.contains(splitName(name).ext)
+                }
+            }
+            let ordered = sets.sorted { a, b in
+                (owns(a) ? 0 : 1, a.owner, a.anchor, a.first) < (owns(b) ? 0 : 1, b.owner, b.anchor, b.first)
+            }
+            var claimed = false
+            for s in ordered {
+                if !claimed && mayKeep(s) { claimed = true; continue }
+                var n = 2
+                while used.contains("\(stem) \(n)") { n += 1 }
+                used.insert("\(stem) \(n)")
+                for f in s.members {
+                    let (original, ext) = splitName(f.name)
+                    result[f.url] = ext.isEmpty ? "\(original) \(n)" : "\(original) \(n).\(ext)"
                 }
             }
         }
-        return out
+        return result
     }
 
     static func plan(jobs: [CopyJob], shoot: URL, workRoot: URL? = nil, roots: [URL] = [], shootID: UUID? = nil) -> CopyPlan {

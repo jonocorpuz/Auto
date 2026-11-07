@@ -106,9 +106,11 @@ nonisolated enum ImportPlanner {
 
     /// Video/Photo/<camera> jobs on every copy; unknown cameras go to `Other`, audio to Video.
     /// `.flat` drops the camera level (Video/ or Photo/ directly), renaming cross-camera stem collisions.
+    /// `existing`: `ShootPlanner.existingNamesOffMain(in: ShootPlanner.flatDirectories(copies:))` for `.flat`.
     static func sortedJobs(files: [MediaFile], copies: [URL], cameras: [Camera],
-                           layout: ShootLayout = .cameraFolders) -> [CopyJob] {
-        ShootPlanner.jobs(missing: files, copies: copies, cameras: cameras, fallback: fallbackFolder, layout: layout)
+                           layout: ShootLayout = .cameraFolders, existing: [URL: [String: Int64]] = [:]) -> [CopyJob] {
+        ShootPlanner.jobs(missing: files, copies: copies, cameras: cameras, fallback: fallbackFolder, layout: layout,
+                          existing: existing)
     }
 
     /// Everything flat into `folder` (inside `primary`), mirrored at the same relative path on each copy.
