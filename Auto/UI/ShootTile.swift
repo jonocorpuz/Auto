@@ -30,6 +30,29 @@ struct ShootTile: View {
     }
 
     var body: some View {
+        // A plain Button, not onTapGesture: the window is movable by its background, which can swallow taps.
+        Button { model.browsingShootID = item.id } label: { tile }
+            .buttonStyle(.plain)
+            .contextMenu { menu }
+            .alert("Remove this copy from Auto?", isPresented: removeAlertShown, presenting: copyToRemove) { copy in
+                Button("Remove Copy", role: .destructive) {
+                    Task {
+                        do { try await model.removeCopy(shootID: item.id, path: copy.path) }
+                        catch { removeError = error.localizedDescription }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { copy in
+                Text("\(copy.path) will no longer be tracked as a copy of this shoot. Files on disk are not deleted.")
+            }
+            .alert("Couldn't remove copy", isPresented: removeErrorShown) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(removeError ?? "")
+            }
+    }
+
+    private var tile: some View {
         VStack(alignment: .leading, spacing: 8) {
             preview
             VStack(alignment: .leading, spacing: 3) {
@@ -51,8 +74,9 @@ struct ShootTile: View {
         .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.border))
         .opacity(isOnline ? 1 : 0.55)
         .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
-        .onTapGesture { model.browsingShootID = item.id }
-        .contextMenu {
+    }
+
+    @ViewBuilder private var menu: some View {
             Button("Add footage") { model.addFootage(to: item.id) }
                 .disabled(!canAdd)
             Button("Add Files…") { model.addFiles(to: item.id) }
@@ -83,23 +107,6 @@ struct ShootTile: View {
             Divider()
             Button("Remove from Auto") { Task { await model.forgetShoot(id: item.id) } }
                 .help("Removes the shoot from Auto's list. Files on disk are not deleted.")
-        }
-        .alert("Remove this copy from Auto?", isPresented: removeAlertShown, presenting: copyToRemove) { copy in
-            Button("Remove Copy", role: .destructive) {
-                Task {
-                    do { try await model.removeCopy(shootID: item.id, path: copy.path) }
-                    catch { removeError = error.localizedDescription }
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { copy in
-            Text("\(copy.path) will no longer be tracked as a copy of this shoot. Files on disk are not deleted.")
-        }
-        .alert("Couldn't remove copy", isPresented: removeErrorShown) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(removeError ?? "")
-        }
     }
 
     private var removeErrorShown: Binding<Bool> {
