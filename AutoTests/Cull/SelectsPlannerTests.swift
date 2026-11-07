@@ -47,6 +47,15 @@ struct SelectsPlannerTests {
         #expect(SelectsPlanner.roundPlan(poolCount: 4, target: 5, batchSize: 10).isEmpty)
     }
 
+    @Test func quotasSumExactlyToSurvivors() {
+        #expect(SelectsPlanner.quotas(batchSizes: [10, 10, 5], survivorsAfter: 10) == [4, 4, 2])
+        #expect(SelectsPlanner.quotas(batchSizes: [3, 3, 3], survivorsAfter: 4) == [2, 1, 1])
+        #expect(SelectsPlanner.quotas(batchSizes: [2, 2], survivorsAfter: 99) == [2, 2])
+        for after in 1...24 {
+            #expect(SelectsPlanner.quotas(batchSizes: [10, 9, 5], survivorsAfter: after).reduce(0, +) == after)
+        }
+    }
+
     @Test func quotaIsProportionalCeilAtLeastOne() {
         #expect(SelectsPlanner.quota(batch: 10, survivorsBefore: 25, survivorsAfter: 10) == 4)
         #expect(SelectsPlanner.quota(batch: 1, survivorsBefore: 100, survivorsAfter: 1) == 1)

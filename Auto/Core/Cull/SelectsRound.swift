@@ -82,6 +82,26 @@ nonisolated enum SelectsPlanner {
         return max(1, Int(share.rounded(.up)))
     }
 
+    /// Per-batch quotas that sum exactly to `after` (when it fits): floor of the proportional share,
+    /// then the remainder one each in batch order (batches arrive best-first), capped at batch size.
+    static func quotas(batchSizes: [Int], survivorsAfter after: Int) -> [Int] {
+        let total = batchSizes.reduce(0, +)
+        guard total > 0 else { return batchSizes.map { _ in 0 } }
+        let target = min(max(0, after), total)
+        var out = batchSizes.map { $0 * target / total }
+        var left = target - out.reduce(0, +)
+        while left > 0 {
+            var progressed = false
+            for i in out.indices where left > 0 && out[i] < batchSizes[i] {
+                out[i] += 1
+                left -= 1
+                progressed = true
+            }
+            if !progressed { break }
+        }
+        return out
+    }
+
     static func merge(picks: [String], batch: [Candidate], quota: Int) -> [Candidate] {
         let byID = Dictionary(batch.map { ($0.photoID, $0) }, uniquingKeysWith: { a, _ in a })
         var seen = Set<String>()

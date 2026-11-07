@@ -216,11 +216,13 @@ nonisolated struct CullRunSummary: Sendable, Codable, Equatable {
     var status: String = "completed"
     /// Pairs left alone because the destination was on another volume.
     var skippedCrossVolume: Int = 0
+    /// Extra detail for the run, e.g. that the final round finished by score.
+    var note: String?
 }
 
 extension CullRunSummary {
     enum CodingKeys: String, CodingKey {
-        case runID, date, model, photos, rejected, groupsDone, groupsTotal, spentUSD, undone, status, skippedCrossVolume
+        case runID, date, model, photos, rejected, groupsDone, groupsTotal, spentUSD, undone, status, skippedCrossVolume, note
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -236,6 +238,7 @@ extension CullRunSummary {
         undone = try c.decode(Bool.self, forKey: .undone)
         status = try c.decodeIfPresent(String.self, forKey: .status) ?? "completed"
         skippedCrossVolume = try c.decodeIfPresent(Int.self, forKey: .skippedCrossVolume) ?? 0
+        note = try c.decodeIfPresent(String.self, forKey: .note)
     }
 }
 

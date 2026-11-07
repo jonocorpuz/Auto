@@ -33,8 +33,8 @@ nonisolated struct CullRunner: Sendable {
         onProgress: @escaping @MainActor @Sendable (CullProgress) -> Void,
         onRejects: @escaping @MainActor @Sendable ([CullLiveReject]) -> Void = { _ in }
     ) async -> CullOutcome {
-        // Progress flows through a stream consumed on the main actor and awaited before returning.
-        let (stream, yield) = AsyncStream<CullProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        // Progress flows through an unbounded stream (tiny values, so no phase is ever dropped) consumed on the main actor and awaited before returning.
+        let (stream, yield) = AsyncStream<CullProgress>.makeStream(bufferingPolicy: .unbounded)
         let consumer = Task { @MainActor in
             for await p in stream { onProgress(p) }
         }
@@ -206,14 +206,16 @@ nonisolated struct CullRunner: Sendable {
         }
 
         var decisions = groups.indices.flatMap { decisionsByGroup[$0] ?? [] }
+        var runNote: String?
 
         // 5b. Selects final round: only the best frames across the whole shoot stay.
         if settings.mode.hasFinalRound {
             switch await finalRound(decisions, records: records, photoCount: scanned.count, runID: runID,
                                     settings: settings, gate: gate, tracker: tracker, emitRejects: emitRejects) {
-            case .decided(let d): decisions = d
+            case .decided(let d, let byScore):
+                decisions = d
+                if byScore { runNote = "Final round finished by score (budget reached)" }
             case .stopped: return .stopped(nil)
-            case .budgetExceeded: return .failed(.budgetExceeded(tracker.spent), nil)
             case .fatal(let error): return .failed(error == .notInstalled ? .claudeNotInstalled : .claudeNotLoggedIn, nil)
             }
             if Task.isCancelled { return .stopped(nil) }
@@ -223,9 +225,10 @@ nonisolated struct CullRunner: Sendable {
         let rejectCount = decisions.filter { $0.verdict == .reject }.count
         let plan = CullPlan(runID: runID, settings: settings, decisions: decisions, records: records, catalogCopy: primary)
         let groupsDoneFinal = groupsDone
+        let finalNote = runNote
         let summary: @Sendable (Int, Bool) -> CullRunSummary = { rejected, undone in
             CullRunSummary(runID: runID, date: Date(), model: settings.model, photos: scanned.count, rejected: rejected,
-                           groupsDone: groupsDoneFinal, groupsTotal: groupsTotal, spentUSD: tracker.spent, undone: undone)
+                           groupsDone: groupsDoneFinal, groupsTotal: groupsTotal, spentUSD: tracker.spent, undone: undone, note: finalNote)
         }
         if rejectCount == 0 {
             tracker.set(.applying(done: 0, total: 0), 1)
@@ -290,9 +293,9 @@ nonisolated struct CullRunner: Sendable {
     // MARK: - Selects final round
 
     private enum FinalRoundOutcome {
-        case decided([CullDecision])
+        /// `byScore`: the budget ran out and the remaining rounds finished with the score fallback.
+        case decided([CullDecision], byScore: Bool)
         case stopped
-        case budgetExceeded
         case fatal(ClaudeRunnerError)
     }
 
@@ -319,7 +322,7 @@ nonisolated struct CullRunner: Sendable {
             guard d.verdict == .keep, let score = d.score else { return nil }
             return Candidate(photoID: d.photoID, score: score, tiebreak: records[d.photoID].map(PhotoRank.score) ?? 0)
         }
-        guard candidates.count > target else { return .decided(decisions) }
+        guard candidates.count > target else { return .decided(decisions, byScore: false) }
 
         var decisions = decisions
         let candidateIDs = Set(candidates.map(\.photoID))
@@ -350,25 +353,36 @@ nonisolated struct CullRunner: Sendable {
 
         let prefix = "runs/\(runID.uuidString)/"
         var survivors = pool
+        var budgetHit = false
         for (round, after) in plan.enumerated() {
-            let before = survivors.count
             let batches = SelectsPlanner.batches(survivors, size: size)
             var picked: [Candidate] = []
-            var budgetHit = false
+            let quotas = SelectsPlanner.quotas(batchSizes: batches.map(\.count), survivorsAfter: after)
             do {
                 try await withThrowingTaskGroup(of: [Candidate].self) { tg in
                     var next = 0
                     var inFlight = 0
                     while next < batches.count || inFlight > 0 {
-                        while inFlight < settings.maxConcurrentCalls, next < batches.count, !budgetHit {
+                        while inFlight < settings.maxConcurrentCalls, next < batches.count {
                             if Task.isCancelled { throw CancellationError() }
-                            await gate()
-                            if Task.isCancelled { throw CancellationError() }
-                            if tracker.spent >= settings.maxRunBudgetUSD { budgetHit = true; break }
+                            if !budgetHit {
+                                await gate()
+                                if Task.isCancelled { throw CancellationError() }
+                                if tracker.spent >= settings.maxRunBudgetUSD { budgetHit = true }
+                            }
                             let batch = batches[next]
+                            let quota = quotas[next]
                             next += 1
+                            let hasPreview = batch.contains { records[$0.photoID]?.preview != nil }
+                            if budgetHit || quota == 0 || !hasPreview {
+                                // No call: the batch keeps its top scores.
+                                picked += SelectsPlanner.merge(picks: [], batch: batch, quota: quota)
+                                done += 1
+                                tracker.set(.finalRound(done: done, total: totalCalls),
+                                            0.80 + 0.15 * ratio(done, totalCalls))
+                                continue
+                            }
                             inFlight += 1
-                            let quota = SelectsPlanner.quota(batch: batch.count, survivorsBefore: before, survivorsAfter: after)
                             var tokenToID: [String: String] = [:]
                             var frames: [(token: String, path: String, score: Int)] = []
                             for (offset, c) in batch.enumerated() {
@@ -427,13 +441,12 @@ nonisolated struct CullRunner: Sendable {
                 return .stopped
             }
             if Task.isCancelled { return .stopped }
-            if budgetHit { return .budgetExceeded }
             survivors = SelectsPlanner.trim(picked, to: after)
         }
 
         let finalIDs = Set(survivors.map(\.photoID))
         emitRejects(Self.liveRejects(cut(keeping: finalIDs, among: poolIDs), records: records, thumbnailer: thumbnailer))
-        return .decided(decisions)
+        return .decided(decisions, byScore: budgetHit)
     }
 
     // MARK: - Live rejects

@@ -476,14 +476,50 @@ import Testing
         #expect(env.applier.reverts.isEmpty)
     }
 
-    @Test func budgetHitInFinalRoundAppliesNothing() async {
+    @Test func budgetHitInFinalRoundFinishesByScoreAndApplies() async {
         let env = Self.makeEnv(photos: 80) { req, _ in Self.isFinal(req) ? Self.pickLast(req, cost: 10) : Self.scoredKeeps(req) }
         defer { cleanup(env) }
         var s = Self.selects; s.maxConcurrentCalls = 1; s.maxRunBudgetUSD = 5
         let outcome = await go(env, settings: s)
-        guard case .failed(.budgetExceeded(let spent), _) = outcome else { Issue.record("got \(outcome)"); return }
-        #expect(spent >= 5)
+        guard case .completed(let summary) = outcome, let plan = env.applier.plans.first else { Issue.record("got \(outcome)"); return }
         #expect(env.claude.requests.filter(Self.isFinal).count == 1)
+        #expect(Self.kept(plan).count == SelectsPlanner.targetCount(photoCount: 80))
+        #expect(summary.note?.contains("by score") == true)
+    }
+
+    @Test func malformedOrUnknownFinalRoundResponseKeepsTopScores() async {
+        let unknown = Result<ClaudeResponse, Error>.success(ClaudeResponse(
+            structured: try! JSONSerialization.data(withJSONObject: ["picks": [["id": "zz1"], ["id": "zz2"]]]),
+            costUSD: 0, inputTokens: nil, outputTokens: nil, cacheReadTokens: nil))
+        let env = Self.makeEnv(photos: 40) { req, _ in Self.isFinal(req) ? unknown : Self.scoredKeeps(req) }
+        defer { cleanup(env) }
+        let outcome = await go(env, settings: Self.selects)
+        guard case .completed = outcome, let plan = env.applier.plans.first else { Issue.record("got \(outcome)"); return }
+        #expect(Self.kept(plan) == Set([9, 19, 29, 39].map(Self.photoName)))
+    }
+
+    @Test func overQuotaPicksKeepClaudesOrder() async {
+        // Claude returns every frame, worst-ranked first; its first four (not the top scores) must survive.
+        let env = Self.makeEnv(photos: 40) { req, _ in
+            guard Self.isFinal(req) else { return Self.scoredKeeps(req) }
+            let picks = Self.tokens(in: req.userPrompt).reversed().map { ["id": $0.token] }
+            let data = try! JSONSerialization.data(withJSONObject: ["picks": picks])
+            return .success(ClaudeResponse(structured: data, costUSD: 0, inputTokens: nil, outputTokens: nil, cacheReadTokens: nil))
+        }
+        defer { cleanup(env) }
+        let outcome = await go(env, settings: Self.selects)
+        guard case .completed = outcome, let plan = env.applier.plans.first else { Issue.record("got \(outcome)"); return }
+        #expect(Self.kept(plan).count == 4)
+        #expect(Self.kept(plan) == Set([28, 38, 7, 17].map(Self.photoName)))
+    }
+
+    @Test func notLoggedInInFinalRoundFailsAndFinishesRejectStream() async {
+        let env = Self.makeEnv(photos: 40) { req, _ in
+            Self.isFinal(req) ? .failure(ClaudeRunnerError.notLoggedIn) : Self.scoredKeeps(req)
+        }
+        defer { cleanup(env) }
+        let outcome = await go(env, settings: Self.selects, rejects: RejectCollector())
+        guard case .failed(.claudeNotLoggedIn, _) = outcome else { Issue.record("got \(outcome)"); return }
         #expect(env.applier.plans.isEmpty)
     }
 
