@@ -3,6 +3,8 @@ import Foundation
 /// Walks a shoot's `Photo/` folder and groups files into photo records (RAW+JPEG pairs share one).
 nonisolated enum PhotoCatalog {
     private static let previewable: Set<String> = ["jpg", "jpeg", "heic"]
+    /// Max mtime spread for same-stem files directly in Photo/ to count as one RAW+JPEG photo.
+    static let pairWindow: TimeInterval = 5
 
     static func scan(shoot: URL, cardVolumes: [URL]) throws -> [PhotoRecord] {
         let resolved = ShootPlanner.resolvedPath(shoot)
@@ -42,8 +44,24 @@ nonisolated enum PhotoCatalog {
             buckets[key, default: (camera, [])].entries.append(Entry(rel: "Photo/" + inner, stamp: stamp))
         }
 
-        var records: [PhotoRecord] = []
+        var groups: [(camera: String, entries: [Entry])] = []
         for (_, bucket) in buckets {
+            // Directly in Photo/ (flat layout) different cameras can share a stem, so only files written
+            // within `pairWindow` of each other pair up; camera folders keep pairing on stem alone.
+            guard bucket.camera.isEmpty, bucket.entries.count > 1 else { groups.append(bucket); continue }
+            var cluster: [Entry] = []
+            for e in bucket.entries.sorted(by: { ($0.stamp.mtime, $0.rel) < ($1.stamp.mtime, $1.rel) }) {
+                if let start = cluster.first, e.stamp.mtime.timeIntervalSince(start.stamp.mtime) > pairWindow {
+                    groups.append((bucket.camera, cluster))
+                    cluster = []
+                }
+                cluster.append(e)
+            }
+            groups.append((bucket.camera, cluster))
+        }
+
+        var records: [PhotoRecord] = []
+        for bucket in groups {
             let sorted = bucket.entries.sorted { $0.rel < $1.rel }
             let rep = sorted.first { previewable.contains(($0.rel as NSString).pathExtension.lowercased()) } ?? sorted[0]
             var stamps: [String: FileStamp] = [:]
