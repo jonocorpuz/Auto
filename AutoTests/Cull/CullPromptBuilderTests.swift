@@ -87,22 +87,30 @@ struct CullPromptBuilderTests {
         }
     }
 
-    @Test func eachStrictnessLevelHasItsOwnRule() {
-        let rules: [(level: Int, mode: CullMode, snippet: String)] = [
-            (2, .gentle, "Reject clear technical failures"),
-            (3, .balanced, "Reject frames that clearly fail an enabled criterion"),
-            (4, .selective, "Be selective."),
-            (5, .strict, "Keep only the single best frame per pose"),
-        ]
-        for (level, mode, snippet) in rules {
+    @Test func eachModeGetsItsOwnStance() {
+        for mode in CullMode.allCases {
             var settings = CullSettings()
             settings.mode = mode
             let section = CullPromptBuilder.runSection(settings: settings)
 
-            #expect(section.contains("Strictness: level \(level) of 5"))
-            #expect(section.contains(snippet))
-            for other in rules where other.level != level {
-                #expect(!section.contains(other.snippet))
+            #expect(section.contains("Mode: \(mode.title)\n"))
+            #expect(section.contains(CullModePrompts.stance(mode)))
+            for other in CullMode.allCases where other != mode {
+                #expect(!section.contains(CullModePrompts.stance(other)))
+            }
+        }
+    }
+
+    @Test func scoringModesCarryTheGreatPhotoGuide() {
+        for mode in CullMode.allCases {
+            var settings = CullSettings()
+            settings.mode = mode
+            let section = CullPromptBuilder.runSection(settings: settings)
+            #expect(section.contains(CullModePrompts.greatPhotoGuide) == mode.scoresFrames)
+            if mode.scoresFrames {
+                for term in ["decisive instant", "Score rubric", "score inflation", "median frame is about 5"] {
+                    #expect(section.contains(term))
+                }
             }
         }
     }
@@ -112,6 +120,24 @@ struct CullPromptBuilderTests {
         let custom = "Keep only sharp frames.\n  Be strict about \"eyes\"."
         settings.setCustomPrompt(custom, for: settings.mode)
         #expect(CullPromptBuilder.runSection(settings: settings) == custom)
+    }
+
+    @Test func customPromptAppliesOnlyToItsMode() {
+        for owner in CullMode.allCases {
+            var settings = CullSettings()
+            let custom = "Custom for \(owner.rawValue)."
+            settings.setCustomPrompt(custom, for: owner)
+            for mode in CullMode.allCases {
+                settings.mode = mode
+                let section = CullPromptBuilder.runSection(settings: settings)
+                if mode == owner {
+                    #expect(section == custom)
+                } else {
+                    #expect(!section.contains(custom))
+                    #expect(section.hasPrefix("Criteria in use"))
+                }
+            }
+        }
     }
 
     @Test func emptyCustomRunPromptFallsBackToGenerated() {
@@ -145,17 +171,91 @@ struct CullPromptBuilderTests {
     @Test func workspaceRulesAreTheVerbatimText() {
         let md = CullPromptBuilder.workspaceClaudeMD
         #expect(md.hasPrefix("# Photo cull workspace\n"))
-        #expect(md.hasSuffix("confidence: 0 to 1, how sure you are the verdict is right."))
         #expect(md.contains("## How to work\n1. Read every image listed under FRAMES"))
-        #expect(md.contains("- Judge only the criteria listed in the system prompt; ignore any other flaw."))
+        #expect(md.contains("_faces.jpg"))
+        #expect(md.contains("the image is ground truth"))
+        #expect(md.contains("Each run states the stance and task for this cull; follow it."))
+        #expect(md.contains("- reason: 12 words or fewer"))
+        #expect(md.contains("- score: only when the schema asks for it"))
+    }
+
+    @Test func workspaceIsModeNeutral() {
+        let md = CullPromptBuilder.workspaceClaudeMD
+        #expect(!md.contains("conservative"))
+        #expect(!md.contains("When uncertain"))
+        #expect(!md.contains("Hard rules"))
+        #expect(!md.contains("keep at least one per pose"))
     }
 
     @Test func roleSystemPromptIsVerbatim() {
         #expect(CullPromptBuilder.roleSystemPrompt == "You cull photos for a professional photographer. Follow CLAUDE.md in this folder exactly. Output only JSON matching the schema.")
     }
 
-    @Test func promptVersionIsOne() {
-        #expect(CullPromptBuilder.promptVersion == 1)
+    @Test func promptVersionIsTwo() {
+        #expect(CullPromptBuilder.promptVersion == 2)
+    }
+
+    private static func decisionItem(_ schema: String) throws -> [String: Any] {
+        let object = try JSONSerialization.jsonObject(with: Data(schema.utf8)) as? [String: Any]
+        let root = try #require(object)
+        let properties = try #require(root["properties"] as? [String: Any])
+        let decisions = try #require(properties["decisions"] as? [String: Any])
+        return try #require(decisions["items"] as? [String: Any])
+    }
+
+    @Test func scoreIsInTheSchemaOnlyForScoringModes() throws {
+        for mode in CullMode.allCases {
+            let item = try Self.decisionItem(CullPromptBuilder.jsonSchema(for: mode))
+            let props = try #require(item["properties"] as? [String: Any])
+            let required = try #require(item["required"] as? [String])
+            #expect((props["score"] != nil) == mode.scoresFrames)
+            #expect(required.contains("score") == mode.scoresFrames)
+            if mode.scoresFrames {
+                let score = try #require(props["score"] as? [String: Any])
+                #expect(score["type"] as? String == "integer")
+                #expect(score["minimum"] as? Int == 1)
+                #expect(score["maximum"] as? Int == 10)
+            }
+        }
+        #expect(CullPromptBuilder.jsonSchema == CullPromptBuilder.jsonSchema(for: .balanced))
+    }
+
+    @Test func finalRoundSchemaParses() throws {
+        let object = try JSONSerialization.jsonObject(with: Data(CullPromptBuilder.finalRoundSchema.utf8)) as? [String: Any]
+        let root = try #require(object)
+        #expect(root["required"] as? [String] == ["picks"])
+        let properties = try #require(root["properties"] as? [String: Any])
+        let picks = try #require(properties["picks"] as? [String: Any])
+        let item = try #require(picks["items"] as? [String: Any])
+        let itemProps = try #require(item["properties"] as? [String: Any])
+        let id = try #require(itemProps["id"] as? [String: Any])
+        let reason = try #require(itemProps["reason"] as? [String: Any])
+        #expect(id["pattern"] as? String == "^p[0-9]{2}$")
+        #expect(reason["maxLength"] as? Int == 60)
+    }
+
+    @Test func finalRoundMessageListsPickCountAndEveryToken() {
+        let frames: [(token: String, path: String, score: Int)] = [
+            ("p01", "final/p01.jpg", 8), ("p02", "final/p02.jpg", 6), ("p03", "final/p03.jpg", 7),
+        ]
+        let message = CullPromptBuilder.finalRoundUserMessage(round: 1, batch: 2, batchCount: 3, pick: 2, frames: frames)
+        #expect(message.contains("Pick exactly 2"))
+        #expect(message.contains("batch 2 of 3"))
+        for f in frames {
+            #expect(message.contains("\(f.token): \(f.path) (score \(f.score))"))
+        }
+    }
+
+    @Test func finalRoundRunSectionIgnoresCustomPrompts() {
+        var settings = CullSettings()
+        settings.mode = .selects
+        settings.setCustomPrompt("custom selects", for: .selects)
+        let section = CullPromptBuilder.finalRoundRunSection(settings: settings)
+        #expect(!section.contains("custom selects"))
+        #expect(section.contains(CullModePrompts.greatPhotoGuide))
+        #expect(section.contains("near-duplicates"))
+        #expect(section.contains("best first"))
+        #expect(!CullPromptBuilder.finalRoundSystemPrompt.isEmpty)
     }
 
     @Test func jsonSchemaParses() throws {
