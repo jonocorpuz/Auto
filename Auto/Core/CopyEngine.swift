@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 
 nonisolated struct CopyJob: Sendable {
     let file: MediaFile
@@ -89,6 +90,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
     var onVerifyChunk: (@Sendable (Int64) -> Void)?
 
     private static let chunk = 8 << 20
+    private static let log = Logger(subsystem: "Auto", category: "CopyEngine")
 
     func run(_ jobs: [CopyJob], onProgress: @escaping @MainActor @Sendable (CopyProgress) -> Void) async -> CopyOutcome {
         // Progress flows through a stream consumed on the main actor; `run` awaits the
@@ -261,7 +263,10 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             var keep: [FileAttributeKey: Any] = [:]
             if let created = attrs?[.creationDate] { keep[.creationDate] = created }
             if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
-            try? fm.setAttributes(keep, ofItemAtPath: partial.path)
+            // Not fatal (the bytes are verified), but flat-layout photo pairing relies on mtimes.
+            do { try fm.setAttributes(keep, ofItemAtPath: partial.path) } catch {
+                Self.log.error("Could not keep dates on \(dest.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
             let final: URL
             do {
                 final = try Self.moveWithoutOverwriting(partial, to: dest, renameOnCollision: job.onCollision == .renameUnique)
