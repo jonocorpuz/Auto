@@ -21,7 +21,6 @@ struct CullSettingsSheet: View {
                     criteriaSection(settings: $model.cullSettings)
                     strictnessSection(settings: $model.cullSettings)
                     modelSection(settings: $model.cullSettings)
-                    promptSection(settings: $model.cullSettings)
                     advancedSection(settings: $model.cullSettings)
                     reviewSection(settings: $model.cullSettings)
                     if let notice = model.cullBusyNotice() {
@@ -39,7 +38,7 @@ struct CullSettingsSheet: View {
         .frame(width: 520)
         .frame(maxHeight: 700)
         .background(Theme.panel)
-        .task(id: model.cullSettings.model) {
+        .task(id: "\(model.cullSettings.model.rawValue)-\(model.cullSettings.mode.rawValue)") {
             let result = await model.cullPreflight(shootID: shootID)
             preflight = result
             loaded = true
@@ -94,13 +93,37 @@ struct CullSettingsSheet: View {
     private func strictnessSection(settings: Binding<CullSettings>) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeader("Mode")
-            Picker("Mode", selection: settings.mode) {
-                ForEach(CullMode.allCases) { Text($0.title).tag($0) }
+            VStack(spacing: 8) {
+                ForEach(CullMode.allCases) { mode in
+                    let selected = settings.wrappedValue.mode == mode
+                    Button { settings.wrappedValue.mode = mode } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(mode.title).font(.system(size: 13, weight: .semibold))
+                                Text(mode.blurb).font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 8)
+                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(selected ? Theme.accent : Color.secondary.opacity(0.5))
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius)
+                            .strokeBorder(selected ? Theme.accent : Theme.border, lineWidth: selected ? 2 : 1))
+                        .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            Text(settings.wrappedValue.mode.blurb)
-                .font(.caption).foregroundStyle(.secondary)
+            if settings.wrappedValue.mode == .selects, loaded, let preflight, preflight.photos > 0 {
+                let keep = max(1, Int((Double(preflight.photos) * CullMode.selectsKeepFraction).rounded(.up)))
+                Text("Keeps about \(keep) of \(preflight.photos) photos. Rejects are moved to _Rejects and can be undone.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -114,44 +137,6 @@ struct CullSettingsSheet: View {
             .labelsHidden()
             Text("Sonnet is the best balance of accuracy and cost.")
                 .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    private func promptSection(settings: Binding<CullSettings>) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionHeader("Prompt")
-            DisclosureGroup("Edit prompt") {
-                VStack(alignment: .leading, spacing: 8) {
-                    TextEditor(text: Binding(
-                        get: { settings.wrappedValue.customPrompt(for: settings.wrappedValue.mode) ?? model.cullRunPromptPreview(mode: settings.wrappedValue.mode) },
-                        set: { settings.wrappedValue.setCustomPrompt($0, for: settings.wrappedValue.mode) }
-                    ))
-                    .font(.system(size: 12, design: .monospaced))
-                    .scrollContentBackground(.hidden)
-                    .padding(6)
-                    .frame(height: 8 * 16 + 12)
-                    .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: Theme.rowRadius))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.rowRadius).strokeBorder(Theme.border))
-                    HStack(spacing: 6) {
-                        if settings.wrappedValue.customPrompt(for: settings.wrappedValue.mode) != nil {
-                            Text("Edited ·").foregroundStyle(.secondary)
-                            Button("Reset") { settings.wrappedValue.setCustomPrompt(nil, for: settings.wrappedValue.mode) }
-                                .buttonStyle(.link)
-                        }
-                        Spacer()
-                    }
-                    .font(.caption)
-                    HStack(spacing: 6) {
-                        Text("Fixed rules live in the cull workspace's CLAUDE.md.")
-                            .foregroundStyle(.secondary)
-                        Button("Open Workspace") { model.revealCullWorkspace() }
-                            .buttonStyle(.link)
-                        Spacer()
-                    }
-                    .font(.caption)
-                }
-                .padding(.top, 6)
-            }
         }
     }
 
@@ -170,9 +155,44 @@ struct CullSettingsSheet: View {
                         .frame(width: 70)
                     Spacer()
                 }
+                promptEditor(settings: settings)
             }
             .font(.callout)
             .padding(.top, 6)
+        }
+    }
+
+    private func promptEditor(settings: Binding<CullSettings>) -> some View {
+        let mode = settings.wrappedValue.mode
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Prompt for \(mode.title)").font(.system(size: 13, weight: .semibold))
+            TextEditor(text: Binding(
+                get: { settings.wrappedValue.customPrompt(for: mode) ?? model.cullRunPromptPreview(mode: mode) },
+                set: { settings.wrappedValue.setCustomPrompt($0, for: mode) }
+            ))
+            .font(.system(size: 12, design: .monospaced))
+            .scrollContentBackground(.hidden)
+            .padding(6)
+            .frame(height: 8 * 16 + 12)
+            .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: Theme.rowRadius))
+            .overlay(RoundedRectangle(cornerRadius: Theme.rowRadius).strokeBorder(Theme.border))
+            HStack(spacing: 6) {
+                if settings.wrappedValue.customPrompt(for: mode) != nil {
+                    Text("Edited ·").foregroundStyle(.secondary)
+                    Button("Reset") { settings.wrappedValue.setCustomPrompt(nil, for: mode) }
+                        .buttonStyle(.link)
+                }
+                Spacer()
+            }
+            .font(.caption)
+            HStack(spacing: 6) {
+                Text("Fixed rules live in the cull workspace's CLAUDE.md.")
+                    .foregroundStyle(.secondary)
+                Button("Open Workspace") { model.revealCullWorkspace() }
+                    .buttonStyle(.link)
+                Spacer()
+            }
+            .font(.caption)
         }
     }
 
