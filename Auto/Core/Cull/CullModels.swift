@@ -8,11 +8,10 @@ nonisolated enum CullModel: String, Sendable, Codable, CaseIterable {
 
 nonisolated struct CullSettings: Sendable, Codable, Equatable {
     var criteria: Set<String>
-    /// 1...5, clamped.
-    var aggressiveness: Int
+    var mode: CullMode
     var model: CullModel
-    /// nil = generated run section.
-    var customRunPrompt: String?
+    /// Custom run prompts keyed by `CullMode.rawValue`; a missing or empty entry = generated.
+    var customPrompts: [String: String]
     /// UI only; has no effect on applying decisions.
     var reviewBeforeApplying: Bool
     /// 1...4, clamped.
@@ -21,40 +20,86 @@ nonisolated struct CullSettings: Sendable, Codable, Equatable {
 
     init(
         criteria: Set<String> = Set(CullCriterion.all.map(\.id)),
-        aggressiveness: Int = 2,
+        mode: CullMode = .balanced,
         model: CullModel = .sonnet,
-        customRunPrompt: String? = nil,
+        customPrompts: [String: String] = [:],
         reviewBeforeApplying: Bool = false,
         maxConcurrentCalls: Int = 2,
-        maxRunBudgetUSD: Double = 5.0
+        maxRunBudgetUSD: Double = 10
     ) {
         self.criteria = criteria
-        self.aggressiveness = aggressiveness
+        self.mode = mode
         self.model = model
-        self.customRunPrompt = customRunPrompt
+        self.customPrompts = customPrompts
         self.reviewBeforeApplying = reviewBeforeApplying
         self.maxConcurrentCalls = maxConcurrentCalls
         self.maxRunBudgetUSD = maxRunBudgetUSD
     }
 
+    func customPrompt(for mode: CullMode) -> String? {
+        guard let p = customPrompts[mode.rawValue], !p.isEmpty else { return nil }
+        return p
+    }
+
+    mutating func setCustomPrompt(_ prompt: String?, for mode: CullMode) {
+        if let prompt, !prompt.isEmpty {
+            customPrompts[mode.rawValue] = prompt
+        } else {
+            customPrompts[mode.rawValue] = nil
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case criteria, mode, model, customPrompts, reviewBeforeApplying, maxConcurrentCalls, maxRunBudgetUSD
+    }
+
+    /// Legacy keys, read only.
+    private enum LegacyKeys: String, CodingKey {
+        case aggressiveness, customRunPrompt
+    }
+
     /// Tolerates older or partial JSON: every missing key takes its default.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let legacy = try decoder.container(keyedBy: LegacyKeys.self)
         let defaults = CullSettings()
         self.criteria = try c.decodeIfPresent(Set<String>.self, forKey: .criteria) ?? defaults.criteria
-        self.aggressiveness = try c.decodeIfPresent(Int.self, forKey: .aggressiveness) ?? defaults.aggressiveness
+        self.customPrompts = try c.decodeIfPresent([String: String].self, forKey: .customPrompts) ?? [:]
+        if let mode = try c.decodeIfPresent(CullMode.self, forKey: .mode) {
+            self.mode = mode
+        } else if let level = try legacy.decodeIfPresent(Int.self, forKey: .aggressiveness) {
+            let migrated = CullMode.migrated(fromAggressiveness: level)
+            self.mode = migrated
+            if let old = try legacy.decodeIfPresent(String.self, forKey: .customRunPrompt), !old.isEmpty,
+               customPrompts[migrated.rawValue] == nil {
+                customPrompts[migrated.rawValue] = old
+            }
+        } else {
+            self.mode = defaults.mode
+        }
         self.model = try c.decodeIfPresent(CullModel.self, forKey: .model) ?? defaults.model
-        self.customRunPrompt = try c.decodeIfPresent(String.self, forKey: .customRunPrompt)
         self.reviewBeforeApplying = try c.decodeIfPresent(Bool.self, forKey: .reviewBeforeApplying) ?? defaults.reviewBeforeApplying
         self.maxConcurrentCalls = try c.decodeIfPresent(Int.self, forKey: .maxConcurrentCalls) ?? defaults.maxConcurrentCalls
-        self.maxRunBudgetUSD = try c.decodeIfPresent(Double.self, forKey: .maxRunBudgetUSD) ?? defaults.maxRunBudgetUSD
+        var budget = try c.decodeIfPresent(Double.self, forKey: .maxRunBudgetUSD) ?? defaults.maxRunBudgetUSD
+        if budget == 5.0 { budget = 10 }   // the old default
+        self.maxRunBudgetUSD = budget
         self = clamped()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(criteria, forKey: .criteria)
+        try c.encode(mode, forKey: .mode)
+        try c.encode(model, forKey: .model)
+        try c.encode(customPrompts, forKey: .customPrompts)
+        try c.encode(reviewBeforeApplying, forKey: .reviewBeforeApplying)
+        try c.encode(maxConcurrentCalls, forKey: .maxConcurrentCalls)
+        try c.encode(maxRunBudgetUSD, forKey: .maxRunBudgetUSD)
     }
 
     /// Returns a copy with numeric fields pulled into their supported ranges.
     func clamped() -> CullSettings {
         var s = self
-        s.aggressiveness = min(max(s.aggressiveness, 1), 5)
         s.maxConcurrentCalls = min(max(s.maxConcurrentCalls, 1), 4)
         s.maxRunBudgetUSD = s.maxRunBudgetUSD.isNaN ? CullSettings().maxRunBudgetUSD : max(s.maxRunBudgetUSD, 0.1)
         return s
@@ -117,7 +162,7 @@ nonisolated enum Verdict: String, Sendable, Codable {
 }
 
 nonisolated enum DecisionSource: String, Sendable, Codable {
-    case model, localTriage, validatorOverride, defaultKeep
+    case model, localTriage, validatorOverride, defaultKeep, finalRound
 }
 
 nonisolated struct CullDecision: Sendable, Codable, Equatable {
@@ -128,6 +173,8 @@ nonisolated struct CullDecision: Sendable, Codable, Equatable {
     var keeperID: String?
     var confidence: Double
     var source: DecisionSource
+    /// 1...10 frame score (Strict and Selects only).
+    var score: Int? = nil
 }
 
 nonisolated struct CullPlan: Sendable {
@@ -143,6 +190,7 @@ nonisolated enum CullPhase: Sendable, Equatable {
     case cataloging
     case preparing(done: Int, total: Int)
     case analyzing(done: Int, total: Int)
+    case finalRound(done: Int, total: Int)
     case applying(done: Int, total: Int)
     case reverting(done: Int, total: Int)
     case undoing(done: Int, total: Int)

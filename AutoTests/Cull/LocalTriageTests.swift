@@ -13,8 +13,8 @@ struct LocalTriageTests {
                                   horizonTiltDeg: nil, faces: faces))
     }
 
-    static func settings(_ ids: Set<String>, level: Int = 2) -> CullSettings {
-        CullSettings(criteria: ids, aggressiveness: level)
+    static func settings(_ ids: Set<String>, mode: CullMode = .gentle) -> CullSettings {
+        CullSettings(criteria: ids, mode: mode)
     }
 
     @Test func blackRejectedOnlyWhenUnusableEnabled() {
@@ -28,37 +28,37 @@ struct LocalTriageTests {
         #expect(LocalTriage.decide(black, settings: Self.settings(["exposure", "eyes"])) == nil)
     }
 
-    @Test(arguments: [(1, false), (2, false), (3, false), (4, true), (5, true)])
-    func clipThresholdMovesWithLevel(level: Int, rejected: Bool) {
-        // thresholds: 0.92, 0.89, 0.86, 0.83, 0.80; 0.85 clips at 4 and 5
-        let d = LocalTriage.decide(Self.record(hi: 0.85), settings: Self.settings(["exposure"], level: level))
+    @Test(arguments: [(CullMode.gentle, false), (.balanced, true), (.selects, true)])
+    func clipThresholdMovesWithMode(mode: CullMode, rejected: Bool) {
+        // thresholds: 0.89 gentle (level 2), 0.80 otherwise (level 5)
+        let d = LocalTriage.decide(Self.record(hi: 0.85), settings: Self.settings(["exposure"], mode: mode))
         #expect((d != nil) == rejected)
     }
 
     @Test func clipEndpointsAndReason() {
         #expect(LocalTriage.clipThreshold(level: 1) == 0.92)
         #expect(abs(LocalTriage.clipThreshold(level: 5) - 0.80) < 1e-9)
-        let d = LocalTriage.decide(Self.record(hi: 0.94), settings: Self.settings(["exposure"], level: 1))
+        let d = LocalTriage.decide(Self.record(hi: 0.94), settings: Self.settings(["exposure"], mode: .gentle))
         #expect(d?.reason == "highlights blown 94%")
         #expect(d?.criterion == "exposure")
-        #expect(LocalTriage.decide(Self.record(lo: 0.95), settings: Self.settings(["exposure"], level: 1)) != nil)
+        #expect(LocalTriage.decide(Self.record(lo: 0.95), settings: Self.settings(["exposure"], mode: .gentle)) != nil)
     }
 
     @Test func disabledCriterionReturnsNil() {
-        #expect(LocalTriage.decide(Self.record(hi: 0.99), settings: Self.settings(["unusable"], level: 5)) == nil)
-        #expect(LocalTriage.decide(Self.record(sharp: 1), settings: Self.settings(["exposure"], level: 5)) == nil)
+        #expect(LocalTriage.decide(Self.record(hi: 0.99), settings: Self.settings(["unusable"], mode: .balanced)) == nil)
+        #expect(LocalTriage.decide(Self.record(sharp: 1), settings: Self.settings(["exposure"], mode: .balanced)) == nil)
     }
 
-    @Test(arguments: [(1, 4.0, true), (2, 6.0, false), (3, 9.0, true), (3, 11.0, false), (5, 14.0, true), (5, 16.0, false)])
-    func blurThresholdPerLevel(level: Int, sharp: Double, rejected: Bool) {
-        let d = LocalTriage.decide(Self.record(sharp: sharp), settings: Self.settings(["unusable"], level: level))
+    @Test(arguments: [(CullMode.gentle, 4.0, true), (.gentle, 6.0, false), (.balanced, 14.0, true), (.balanced, 16.0, false)])
+    func blurThresholdPerMode(mode: CullMode, sharp: Double, rejected: Bool) {
+        let d = LocalTriage.decide(Self.record(sharp: sharp), settings: Self.settings(["unusable"], mode: mode))
         #expect((d != nil) == rejected)
         if rejected { #expect(d?.reason == "severely blurred") }
     }
 
     @Test func blurIgnoredWhenFacesPresent() {
         let face = FaceInfo(box: .zero, eyesClosed: false, edgeCut: false, quality: nil)
-        #expect(LocalTriage.decide(Self.record(sharp: 1, faces: [face]), settings: Self.settings(["unusable"], level: 5)) == nil)
+        #expect(LocalTriage.decide(Self.record(sharp: 1, faces: [face]), settings: Self.settings(["unusable"], mode: .balanced)) == nil)
     }
 
     @Test func nilMetricsReturnsNil() {

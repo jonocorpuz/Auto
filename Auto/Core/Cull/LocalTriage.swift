@@ -18,7 +18,7 @@ nonisolated enum LocalTriage {
 
     static func decide(_ p: PhotoRecord, settings: CullSettings) -> CullDecision? {
         guard let m = p.metrics else { return nil }
-        let level = min(max(settings.aggressiveness, 1), 5)
+        let level = settings.mode.triageLevel
 
         func reject(_ reason: String, _ criterion: CullCriterion) -> CullDecision {
             CullDecision(photoID: p.id, verdict: .reject, reason: reason, criterion: criterion.id,

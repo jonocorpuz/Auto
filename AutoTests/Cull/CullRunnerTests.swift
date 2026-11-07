@@ -175,7 +175,7 @@ import Testing
             case .waiting: return -1
             case .cataloging: return 0
             case .preparing: return 1
-            case .analyzing: return 2
+            case .analyzing, .finalRound: return 2
             case .applying: return 3
             case .reverting, .undoing: return 4
             }

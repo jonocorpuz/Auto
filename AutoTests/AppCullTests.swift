@@ -58,12 +58,11 @@ struct AppCullTests {
         let env = try makeEnv()
         defer { try? FileManager.default.removeItem(at: env.dir) }
         env.model.cullSettings.model = .haiku
-        env.model.cullSettings.aggressiveness = 99
-        #expect(env.model.cullSettings.aggressiveness == 5)
+        env.model.cullSettings.mode = .strict
         let again = AppModel(registryURL: env.dir.appendingPathComponent("other.json"), thumbnails: FakeThumbnailProvider(),
                              defaults: env.defaults)
         #expect(again.cullSettings.model == .haiku)
-        #expect(again.cullSettings.aggressiveness == 5)
+        #expect(again.cullSettings.mode == .strict)
         #expect(env.defaults.data(forKey: "settings.cull.v1") != nil)
     }
 

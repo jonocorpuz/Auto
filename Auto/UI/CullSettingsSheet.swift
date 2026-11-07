@@ -10,10 +10,6 @@ struct CullSettingsSheet: View {
     @State private var preflight: (photos: Int, estimate: (low: Double, high: Double, calls: Int))?
     @State private var loaded = false
 
-    private static let strictness = [
-        1: "Only obvious failures", 2: "Gentle", 3: "Balanced", 4: "Selective", 5: "Best of each burst only",
-    ]
-
     private var shootName: String { model.shoots.first { $0.id == shootID }?.record.name ?? "this shoot" }
 
     var body: some View {
@@ -96,17 +92,15 @@ struct CullSettingsSheet: View {
     }
 
     private func strictnessSection(settings: Binding<CullSettings>) -> some View {
-        let level = settings.wrappedValue.aggressiveness
-        return VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(title: "Strictness") {
-                Text(Self.strictness[level] ?? "").font(.callout).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader("Mode")
+            Picker("Mode", selection: settings.mode) {
+                ForEach(CullMode.allCases) { Text($0.title).tag($0) }
             }
-            SurfaceCard(padding: 12) {
-                Slider(value: Binding(
-                    get: { Double(settings.wrappedValue.aggressiveness) },
-                    set: { settings.wrappedValue.aggressiveness = Int($0.rounded()) }
-                ), in: 1...5, step: 1)
-            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text(settings.wrappedValue.mode.blurb)
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -129,8 +123,8 @@ struct CullSettingsSheet: View {
             DisclosureGroup("Edit prompt") {
                 VStack(alignment: .leading, spacing: 8) {
                     TextEditor(text: Binding(
-                        get: { settings.wrappedValue.customRunPrompt ?? model.cullRunPromptPreview },
-                        set: { settings.wrappedValue.customRunPrompt = $0 }
+                        get: { settings.wrappedValue.customPrompt(for: settings.wrappedValue.mode) ?? model.cullRunPromptPreview(mode: settings.wrappedValue.mode) },
+                        set: { settings.wrappedValue.setCustomPrompt($0, for: settings.wrappedValue.mode) }
                     ))
                     .font(.system(size: 12, design: .monospaced))
                     .scrollContentBackground(.hidden)
@@ -139,9 +133,9 @@ struct CullSettingsSheet: View {
                     .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: Theme.rowRadius))
                     .overlay(RoundedRectangle(cornerRadius: Theme.rowRadius).strokeBorder(Theme.border))
                     HStack(spacing: 6) {
-                        if settings.wrappedValue.customRunPrompt != nil {
+                        if settings.wrappedValue.customPrompt(for: settings.wrappedValue.mode) != nil {
                             Text("Edited ·").foregroundStyle(.secondary)
-                            Button("Reset") { settings.wrappedValue.customRunPrompt = nil }
+                            Button("Reset") { settings.wrappedValue.setCustomPrompt(nil, for: settings.wrappedValue.mode) }
                                 .buttonStyle(.link)
                         }
                         Spacer()

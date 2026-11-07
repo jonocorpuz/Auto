@@ -2761,7 +2761,12 @@ extension AppModel {
         return nil
     }
 
-    var cullRunPromptPreview: String { CullPromptBuilder.runSection(settings: cullSettings) }
+    func cullRunPromptPreview(mode: CullMode) -> String {
+        var s = cullSettings
+        s.mode = mode
+        s.setCustomPrompt(nil, for: mode)
+        return CullPromptBuilder.runSection(settings: s)
+    }
 
     func revealCullWorkspace() { NSWorkspace.shared.activateFileViewerSelecting([cullWorkspaceRoot]) }
 

@@ -5,16 +5,15 @@ import Testing
 struct CullModelsTests {
 
     @Test func settingsRoundTripThroughJSON() throws {
-        var settings = CullSettings(
+        let settings = CullSettings(
             criteria: ["exposure", "eyes"],
-            aggressiveness: 4,
+            mode: .strict,
             model: .opus,
-            customRunPrompt: "Keep everything sharp.",
+            customPrompts: ["strict": "Keep everything sharp."],
             reviewBeforeApplying: true,
             maxConcurrentCalls: 3,
             maxRunBudgetUSD: 7.5
         )
-        settings.customRunPrompt = "Keep everything sharp."
 
         let data = try JSONEncoder().encode(settings)
         let decoded = try JSONDecoder().decode(CullSettings.self, from: data)
@@ -22,15 +21,15 @@ struct CullModelsTests {
     }
 
     @Test func partialSettingsJSONDecodesAndClamps() throws {
-        let json = Data(#"{"aggressiveness":9}"#.utf8)
+        let json = Data(#"{"maxConcurrentCalls":9}"#.utf8)
         let settings = try JSONDecoder().decode(CullSettings.self, from: json)
 
-        #expect(settings.aggressiveness == 5)
+        #expect(settings.maxConcurrentCalls == 4)
+        #expect(settings.mode == .balanced)
         #expect(settings.model == .sonnet)
-        #expect(settings.maxConcurrentCalls == 2)
-        #expect(settings.maxRunBudgetUSD == 5.0)
+        #expect(settings.maxRunBudgetUSD == 10)
         #expect(settings.criteria == Set(CullCriterion.all.map(\.id)))
-        #expect(settings.customRunPrompt == nil)
+        #expect(settings.customPrompts.isEmpty)
         #expect(settings.reviewBeforeApplying == false)
     }
 
@@ -41,21 +40,17 @@ struct CullModelsTests {
 
     @Test func clampedPullsValuesIntoRange() {
         var low = CullSettings()
-        low.aggressiveness = 0
         low.maxConcurrentCalls = 0
         low.maxRunBudgetUSD = 0.01
         let clampedLow = low.clamped()
-        #expect(clampedLow.aggressiveness == 1)
         #expect(clampedLow.maxConcurrentCalls == 1)
         #expect(clampedLow.maxRunBudgetUSD == 0.1)
 
         var high = CullSettings()
-        high.aggressiveness = 12
         high.maxConcurrentCalls = 9
         let clampedHigh = high.clamped()
-        #expect(clampedHigh.aggressiveness == 5)
         #expect(clampedHigh.maxConcurrentCalls == 4)
-        #expect(clampedHigh.maxRunBudgetUSD == 5.0)
+        #expect(clampedHigh.maxRunBudgetUSD == 10)
     }
 
     @Test func criterionIDsAreUniqueAndComplete() {

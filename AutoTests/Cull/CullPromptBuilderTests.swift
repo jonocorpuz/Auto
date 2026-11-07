@@ -88,16 +88,15 @@ struct CullPromptBuilderTests {
     }
 
     @Test func eachStrictnessLevelHasItsOwnRule() {
-        let rules: [(level: Int, snippet: String)] = [
-            (1, "Reject only obvious technical failures"),
-            (2, "Reject clear technical failures"),
-            (3, "Reject frames that clearly fail an enabled criterion"),
-            (4, "Be selective."),
-            (5, "Keep only the single best frame per pose"),
+        let rules: [(level: Int, mode: CullMode, snippet: String)] = [
+            (2, .gentle, "Reject clear technical failures"),
+            (3, .balanced, "Reject frames that clearly fail an enabled criterion"),
+            (4, .selective, "Be selective."),
+            (5, .strict, "Keep only the single best frame per pose"),
         ]
-        for (level, snippet) in rules {
+        for (level, mode, snippet) in rules {
             var settings = CullSettings()
-            settings.aggressiveness = level
+            settings.mode = mode
             let section = CullPromptBuilder.runSection(settings: settings)
 
             #expect(section.contains("Strictness: level \(level) of 5"))
@@ -108,32 +107,24 @@ struct CullPromptBuilderTests {
         }
     }
 
-    @Test func outOfRangeStrictnessIsClamped() {
-        var settings = CullSettings()
-        settings.aggressiveness = 9
-        #expect(CullPromptBuilder.runSection(settings: settings).contains("Strictness: level 5 of 5"))
-        settings.aggressiveness = 0
-        #expect(CullPromptBuilder.runSection(settings: settings).contains("Strictness: level 1 of 5"))
-    }
-
     @Test func customRunPromptIsReturnedVerbatim() {
         var settings = CullSettings()
         let custom = "Keep only sharp frames.\n  Be strict about \"eyes\"."
-        settings.customRunPrompt = custom
+        settings.setCustomPrompt(custom, for: settings.mode)
         #expect(CullPromptBuilder.runSection(settings: settings) == custom)
     }
 
     @Test func emptyCustomRunPromptFallsBackToGenerated() {
         var settings = CullSettings()
-        settings.customRunPrompt = ""
+        settings.customPrompts[settings.mode.rawValue] = ""
         let section = CullPromptBuilder.runSection(settings: settings)
         #expect(section.hasPrefix("Criteria in use"))
     }
 
     @Test func noPlaceholdersInAnyOutput() {
         var settings = CullSettings()
-        for level in 1...5 {
-            settings.aggressiveness = level
+        for mode in CullMode.allCases {
+            settings.mode = mode
             #expect(!CullPromptBuilder.runSection(settings: settings).contains("{{"))
         }
         let group = Self.burstGroup()

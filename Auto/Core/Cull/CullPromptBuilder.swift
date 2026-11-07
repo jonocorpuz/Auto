@@ -51,10 +51,10 @@ nonisolated enum CullPromptBuilder {
     /// prompt is returned verbatim; otherwise the criteria in use (in
     /// `CullCriterion.all` order) and the strictness rule are generated.
     static func runSection(settings: CullSettings) -> String {
-        if let custom = settings.customRunPrompt, !custom.isEmpty {
+        if let custom = settings.customPrompt(for: settings.mode) {
             return custom
         }
-        let level = min(max(settings.aggressiveness, 1), 5)
+        let level = [CullMode.gentle: 2, .balanced: 3, .selective: 4, .strict: 5, .selects: 5][settings.mode] ?? 3
         let enabled = CullCriterion.all
             .filter { settings.criteria.contains($0.id) }
             .map { "- \($0.id): \($0.definition)" }

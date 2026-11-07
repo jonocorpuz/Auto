@@ -257,6 +257,7 @@ private struct CullProgressRow: View {
         case .cataloging: "Reading photos"
         case .preparing(let d, let t): "Preparing previews \(d)/\(t)"
         case .analyzing(let d, let t): "Claude is reviewing group \(min(d + 1, max(t, 1))) of \(t)"
+        case .finalRound(let d, let t): "Final round \(d)/\(t)"
         case .applying(let d, let t): "Moving rejects \(d)/\(t)"
         case .reverting: "Reverting…"
         case .undoing: "Undoing…"
