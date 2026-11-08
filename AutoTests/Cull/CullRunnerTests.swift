@@ -147,6 +147,36 @@ import Testing
         #expect(plan.catalogCopy == env.copy)
     }
 
+    @Test func writesAnalysisReportWithEveryDecisionAndCall() async {
+        let env = Self.makeEnv()
+        defer { cleanup(env) }
+        guard case .completed = await go(env) else { Issue.record("expected completed"); return }
+        let reports = CullAnalysisLog.reports(in: env.copy)
+        #expect(reports.count == 1)
+        guard let r = reports.first else { return }
+        #expect(r.decisions.count == 24)
+        #expect(r.decisions.filter { $0.verdict == .keep }.count == 21)
+        #expect(r.calls.count == 3)
+        #expect(r.calls.allSatisfy { $0.kind == "group" && $0.outcome == "ok" && $0.costUSD == 0.01 })
+        #expect(Set(r.calls.flatMap(\.photoIDs)).count == 24)
+        #expect(abs(r.spentUSD - 0.03) < 1e-9)
+        #expect(r.promptVersion == CullPromptBuilder.promptVersion)
+        let plan = env.applier.plans[0]
+        #expect(abs(plan.spentUSD - 0.03) < 1e-9 && plan.groupsDone == 3 && plan.groupsTotal == 3)
+    }
+
+    @Test func analysisReportRecordsUnreadableReplies() async {
+        let env = Self.makeEnv { _, _ in
+            .success(ClaudeResponse(structured: Data("nope".utf8), costUSD: 0.02, inputTokens: 100, outputTokens: 5,
+                                    cacheReadTokens: nil))
+        }
+        defer { cleanup(env) }
+        _ = await go(env)
+        let calls = CullAnalysisLog.reports(in: env.copy).first?.calls ?? []
+        #expect(calls.count == 3)
+        #expect(calls.allSatisfy { $0.outcome == "unreadable" && $0.inputTokens == 100 })
+    }
+
     @Test func stopDuringAnalysisAppliesNothing() async throws {
         let env = Self.makeEnv(hang: true)
         defer { cleanup(env) }

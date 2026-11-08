@@ -48,6 +48,13 @@ struct ClaudeCLITests {
         #expect(r.inputTokens == 6)
         #expect(r.outputTokens == 153)
         #expect(r.cacheReadTokens == 17168)
+        #expect(r.cacheWriteTokens == 7063)
+        #expect(r.durationMS == nil)
+    }
+
+    @Test func parsesDuration() throws {
+        let r = try ClaudeCLI.parse(stdout: data(#"{"is_error":false,"duration_ms":4210,"structured_output":{"a":1}}"#))
+        #expect(r.durationMS == 4210)
     }
 
     @Test func fallsBackToResultAsJSON() throws {

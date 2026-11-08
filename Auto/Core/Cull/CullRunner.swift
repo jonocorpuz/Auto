@@ -69,6 +69,8 @@ nonisolated struct CullRunner: Sendable {
     ) async -> CullOutcome {
         guard let primary = copies.first else { return .failed(.noCopiesOnline, nil) }
         let runID = UUID()
+        let runDate = Date()
+        let callLog = CullCallLog()
         defer { CullWorkspace.removeRun(workspaceRoot, runID: runID) }
 
         // 1. Catalog.
@@ -158,13 +160,20 @@ nonisolated struct CullRunner: Sendable {
                         let req = request.request
                         let position = item.position
                         let thumbnailer = self.thumbnailer
+                        let callIDs = item.callGroup.photos.map(\.id)
                         tg.addTask {
                             var output: ModelDecisions?
+                            let started = ContinuousClock.now
+                            func ms() -> Int { Int((ContinuousClock.now - started) / .milliseconds(1)) }
                             do {
                                 let response = try await claude.run(req)
                                 tracker.addSpend(response.costUSD ?? 0)
                                 output = try? JSONDecoder().decode(ModelDecisions.self, from: response.structured)
+                                callLog.record(kind: "group", label: String(position + 1), photoIDs: callIDs,
+                                               response: response, decoded: output != nil, error: nil, durationMS: ms())
                             } catch let error as ClaudeRunnerError {
+                                callLog.record(kind: "group", label: String(position + 1), photoIDs: callIDs,
+                                               response: nil, decoded: false, error: error, durationMS: ms())
                                 switch error {
                                 case .notInstalled, .notLoggedIn: throw error
                                 default: break
@@ -211,7 +220,8 @@ nonisolated struct CullRunner: Sendable {
         // 5b. Selects final round: only the best frames across the whole shoot stay.
         if settings.mode.hasFinalRound {
             switch await finalRound(decisions, records: records, photoCount: scanned.count, runID: runID,
-                                    settings: settings, gate: gate, tracker: tracker, emitRejects: emitRejects) {
+                                    settings: settings, gate: gate, tracker: tracker, callLog: callLog,
+                                    emitRejects: emitRejects) {
             case .decided(let d, let byScore):
                 decisions = d
                 if byScore { runNote = "Final round finished by score (budget reached)" }
@@ -223,7 +233,18 @@ nonisolated struct CullRunner: Sendable {
 
         // 6. Plan.
         let rejectCount = decisions.filter { $0.verdict == .reject }.count
-        let plan = CullPlan(runID: runID, settings: settings, decisions: decisions, records: records, catalogCopy: primary)
+        var draft = CullPlan(runID: runID, settings: settings, decisions: decisions, records: records, catalogCopy: primary)
+        draft.spentUSD = tracker.spent
+        draft.groupsDone = groupsDone
+        draft.groupsTotal = groupsTotal
+        draft.note = runNote
+        let plan = draft
+        // Diagnostic report for prompt tuning; a failed write never stops the cull.
+        let report = CullAnalysisReport(
+            runID: runID, date: runDate, mode: settings.mode, model: settings.model,
+            promptVersion: CullPromptBuilder.promptVersion, criteria: settings.criteria.sorted(),
+            photos: scanned.count, spentUSD: tracker.spent, calls: callLog.records, decisions: decisions)
+        _ = try? CullAnalysisLog.write(report, in: primary)
         let groupsDoneFinal = groupsDone
         let finalNote = runNote
         let summary: @Sendable (Int, Bool) -> CullRunSummary = { rejected, undone in
@@ -314,6 +335,7 @@ nonisolated struct CullRunner: Sendable {
         settings: CullSettings,
         gate: @escaping @Sendable () async -> Void,
         tracker: ProgressTracker,
+        callLog: CullCallLog,
         emitRejects: @escaping @Sendable ([CullLiveReject]) -> Void
     ) async -> FinalRoundOutcome {
         typealias Candidate = SelectsPlanner.Candidate
@@ -404,15 +426,22 @@ nonisolated struct CullRunner: Sendable {
                                 maxBudgetUSD: min(max(3 * estimate.high, 0.05), 1.00))
                             let claude = self.claude
                             let ids = tokenToID
+                            let label = "r\(round + 1)b\(next)"
+                            let batchIDs = batch.map(\.photoID)
                             tg.addTask {
                                 var picks: [String] = []
+                                let started = ContinuousClock.now
+                                func ms() -> Int { Int((ContinuousClock.now - started) / .milliseconds(1)) }
                                 do {
                                     let response = try await claude.run(request)
                                     tracker.addSpend(response.costUSD ?? 0)
-                                    if let out = try? JSONDecoder().decode(FinalPicks.self, from: response.structured) {
-                                        picks = out.picks.compactMap { ids[$0.id] }
-                                    }
+                                    let out = try? JSONDecoder().decode(FinalPicks.self, from: response.structured)
+                                    if let out { picks = out.picks.compactMap { ids[$0.id] } }
+                                    callLog.record(kind: "final", label: label, photoIDs: batchIDs, response: response,
+                                                   decoded: out != nil, error: nil, durationMS: ms())
                                 } catch let error as ClaudeRunnerError {
+                                    callLog.record(kind: "final", label: label, photoIDs: batchIDs, response: nil,
+                                                   decoded: false, error: error, durationMS: ms())
                                     switch error {
                                     case .notInstalled, .notLoggedIn: throw error
                                     default: break

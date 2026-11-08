@@ -19,6 +19,8 @@ nonisolated struct ClaudeResponse: Sendable {
     let inputTokens: Int?
     let outputTokens: Int?
     let cacheReadTokens: Int?
+    var cacheWriteTokens: Int? = nil
+    var durationMS: Int? = nil
 }
 
 nonisolated enum ClaudeRunnerError: LocalizedError, Equatable {
@@ -135,7 +137,9 @@ nonisolated enum ClaudeCLI {
             costUSD: (obj["total_cost_usd"] as? NSNumber)?.doubleValue,
             inputTokens: int("input_tokens"),
             outputTokens: int("output_tokens"),
-            cacheReadTokens: int("cache_read_input_tokens")
+            cacheReadTokens: int("cache_read_input_tokens"),
+            cacheWriteTokens: int("cache_creation_input_tokens"),
+            durationMS: (obj["duration_ms"] as? NSNumber)?.intValue
         )
     }
 }
