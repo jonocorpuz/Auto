@@ -64,7 +64,7 @@ struct MainView: View {
         case .media:
             MediaView()
         case .videoEdit:
-            EditPlaceholderView(tab: .videoEdit, message: "Proxies, organizing and DaVinci Resolve project setup will live here.")
+            VideoEditView()
         case .photoEdit:
             PhotoEditView()
         case .settings:

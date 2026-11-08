@@ -310,6 +310,20 @@ final class AppModel {
     /// Most relevant run per shoot, read from the primary's journal by `loadLastCullRun`.
     private(set) var cullLastRuns: [UUID: CullRunSummary] = [:]
 
+    // MARK: Video edit state (see AppModel+VideoEdit)
+    /// Options for the next video edit; clamped and saved to defaults on every set.
+    var videoEditSettings: VideoEditSettings {
+        didSet {
+            let clamped = videoEditSettings.clamped()
+            if clamped != videoEditSettings { videoEditSettings = clamped; return }
+            VideoEditSettingsStore.save(videoEditSettings, to: defaults)
+        }
+    }
+    /// Whether `~/.claude.json` registers the Resolve MCP server. nil until checked.
+    var resolveMCPRegistered: Bool?
+    /// Whether DaVinci Resolve is running, as of the last refresh.
+    var resolveRunning = false
+
     init(registryURL: URL = ShootStore.defaultURL(),
          thumbnails: any ThumbnailProvider = QLThumbnailProvider(),
          defaults: UserDefaults = .standard,
@@ -323,6 +337,7 @@ final class AppModel {
         self.cullApplier = cullApplier
         self.cullWorkspaceRoot = cullWorkspaceRoot
         self.cullSettings = CullSettingsStore.load(from: defaults)
+        self.videoEditSettings = VideoEditSettingsStore.load(from: defaults)
         self.registryURL = registryURL
         self.checksums = ChecksumStore(url: registryURL.deletingLastPathComponent().appendingPathComponent("checksums.json"))
         self.thumbnails = thumbnails
