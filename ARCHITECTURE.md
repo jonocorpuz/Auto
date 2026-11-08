@@ -139,6 +139,7 @@ Auto/                         # repo root
 │   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage, manual import, browser membership, mirrors, ingest fan-out, copy queue, sync scheduler, Sync Now)
 │   │   ├── AppModel+Import.swift #   manual import scheduling: fan-out to every online copy, pendingSync, queued with card ingests, cull lock
 │   │   ├── AppModel+AddFiles.swift #   Add Files sheet and Finder drop entry points
+│   │   ├── AppModel+VideoEdit.swift #  Video Edit readiness: MCP registration, Resolve running
 │   │   ├── ImportJob.swift   #   manual import job (its own job, not a pseudo-card)
 │   │   ├── ImportStaging.swift #   staged import (sources, duplicates) before commitImport
 │   │   ├── ShootItem.swift   #   ShootItem (registry record + availability, summary, thumbnail); ShootSheetRequest
@@ -152,7 +153,7 @@ Auto/                         # repo root
 │   │   ├── MediaView.swift   #   Media tab: stats, cards, Shoots grid, drives
 │   │   ├── ShootTile.swift   #   one shoot in the grid: thumbnail, counts, offline/missing state, sync badge, Copies menu, actions
 │   │   ├── ShootSyncPopover.swift #   per-shoot sync popover: copies, last check, Check Again (⌥ deep), Verify Contents, Sync Now, Stop
-│   │   ├── EditPlaceholderView.swift # empty Video Edit tab
+│   │   ├── VideoEditView.swift # Video Edit tab: shoot list, readiness checklist, sync/junk options, Claude model + budget (Build button disabled until the engine lands)
 │   │   ├── PhotoEditView.swift #   Photo Edit tab: photo cull, bottom progress bar, result banners, live rejects grid (CullLiveRejectsGrid)
 │   │   ├── CullSettingsSheet.swift #   cull settings: criteria, mode cards, model, Advanced (budget, per-mode prompt)
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
@@ -209,17 +210,22 @@ Auto/                         # repo root
 │   │       ├── SelectsRound.swift  #   Selects final round planning: pool, snake batches, exact quotas, merge
 │   │       ├── CullLiveReject.swift #  streamed reject + short tag label for the live grid
 │   │       ├── CullEstimator.swift #   cull cost estimate
-│   │       ├── CullDecisionValidator.swift # checks Claude's decisions before any move
+│   │       ├── CullGrades.swift    #   FrameRole, CullGrades (weighted quality, score), ModelGrades
+│   │       ├── CullPolicy.swift    #   grades -> one decision per photo, per mode
 │   │       ├── CullJournal.swift   #   write-ahead journal in <shoot>/.auto-cull/ for undo
 │   │       ├── CullApplier.swift   #   moves rejects (dir-fd renames, RENAME_EXCL, rollback, undo)
 │   │       ├── LiveCullApplier.swift #   live file-system implementation of the applier
 │   │       ├── CullReplay.swift    #   replays completed cull runs onto other copies
-│   │       └── CullRunner.swift    #   one run: analyze, group, triage, Claude per group, validate, apply
+│   │       └── CullRunner.swift    #   one run: analyze, group, triage, Claude per group, policy, apply
+│   │   └── VideoEdit/              #   video edit (sync + Resolve) engines
+│   │       ├── VideoEditSettings.swift # options + defaults store
+│   │       └── VideoEditReadiness.swift # pre-run checklist (footage, main copy, MCP, Resolve open)
 │   ├── Integrations/         # adapters behind protocols; faked in tests
 │   │   ├── ThumbnailProvider.swift #   protocol: preview image for a media file
 │   │   ├── QLThumbnailProvider.swift # QuickLookThumbnailing adapter
 │   │   ├── QuickLookPreviewer.swift # shared Quick Look panel; takes control via the responder chain (AppDelegate forwards)
-│   │   ├── ClaudeRunner.swift      #   Claude run interface used by the cull
+│   │   ├── ClaudeRunner.swift      #   Claude run interface (cull; video edit adds an MCP config + tool allowlist)
+│   │   ├── ResolveMCP.swift        #   reuses the user's `davinci-resolve` MCP entry from ~/.claude.json for headless runs
 │   │   ├── ClaudeCLIRunner.swift   #   `claude -p` adapter (posix_spawn in its own process group, cancel/timeout)
 │   │   ├── CullWorkspace.swift     #   app-managed workspace for `claude -p` (own CLAUDE.md, Read-only settings)
 │   │   ├── PhotoAnalyzer.swift     #   photo analysis interface (local metrics + previews)

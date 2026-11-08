@@ -100,7 +100,9 @@ Main feature: every speech and ceremony synced across cameras and recorders on i
 - [ ] Event grouping: overlapping clips across cameras/recorders; per-camera clock offset learned from strong matches
 - [ ] Audio sync candidates: cross-correlation (Accelerate), offset within one frame + confidence; recorder is the backbone when present
 - [ ] Edit run: workspace + prompt + JSON report; Claude builds bins, one stacked timeline per event, an "Everything else" timeline, review markers on low-confidence clips; per-run analysis log like the cull
-- [ ] Video Edit tab: "Edit in Resolve" on a shoot, progress, result
+- [x] Video Edit tab: shoot list, readiness checklist (footage, main copy, MCP, Resolve open), sync/junk options, model + budget; Build button disabled until the engine lands
+- [ ] Verify on screen: Video Edit tab
+- [ ] Video Edit tab: run progress and result
 - [x] Headless session reaches Resolve 21.0.0 free through the bridge (read-only spike 2026-11-08: 9 turns, 14 s, $0.30, mostly MCP tool schemas)
 - [ ] First real run: cost per event; keep the session to build steps, evidence computed locally
 
@@ -109,7 +111,7 @@ Main feature: every speech and ceremony synced across cameras and recorders on i
 - [x] Main window redesign: sidebar tabs (Media, Video Edit, Photo Edit, Settings), Ingest button, account row, floating content panel
 - [x] Light/dark/system appearance (Settings tab + account menu)
 - [x] Media tab: "Shoots" grid from the shoot registry (thumbnails, counts, availability); placeholder tiles gone
-- [ ] Video Edit tab (empty placeholder now)
+- [x] Video Edit tab (see Phase 3c)
 - [ ] Wire up "Soon" settings: eject after backup, sound, proxy codec/resolution, Resolve project + frame rate, RAW+JPEG grouping, DNG
 - [ ] User accounts (sidebar shows the local macOS user for now)
 
