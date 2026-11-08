@@ -10,6 +10,10 @@ nonisolated struct ClaudeRequest: Sendable {
     var maxBudgetUSD: Double
     var maxTurns = 3
     var timeout: Duration = .seconds(180)
+    /// MCP config file for this run (`--mcp-config`). nil: no MCP servers at all.
+    var mcpConfigPath: String? = nil
+    /// Tools the run may use without asking. MCP tools are named `mcp__<server>` (whole server) or `mcp__<server>__<tool>`.
+    var allowedTools: [String] = ["Read"]
 }
 
 nonisolated struct ClaudeResponse: Sendable {
@@ -67,7 +71,10 @@ nonisolated enum ClaudeCLI {
             "--no-session-persistence",
             "--setting-sources", "project",
             "--strict-mcp-config",
-            "--allowedTools", "Read",
+        ]
+        + (r.mcpConfigPath.map { ["--mcp-config", $0] } ?? [])
+        + ["--allowedTools"] + r.allowedTools
+        + [
             "--disallowedTools", "Bash", "Edit", "Write", "WebFetch", "WebSearch", "Task",
             "--system-prompt", r.systemPrompt,
             "--append-system-prompt", r.appendSystemPrompt,

@@ -23,6 +23,18 @@ struct ClaudeCLITests {
         #expect(!args.contains("/tmp/ws"))
     }
 
+    @Test func mcpRunsPassTheirConfigAndTools() {
+        var r = request()
+        r.mcpConfigPath = "/tmp/ws/mcp.json"
+        r.allowedTools = ["Read", "mcp__davinci-resolve"]
+        let args = ClaudeCLI.arguments(for: r)
+        let strict = args.firstIndex(of: "--strict-mcp-config")!
+        #expect(Array(args[strict...strict + 2]) == ["--strict-mcp-config", "--mcp-config", "/tmp/ws/mcp.json"])
+        let allowed = args.firstIndex(of: "--allowedTools")!
+        #expect(Array(args[allowed + 1...allowed + 2]) == ["Read", "mcp__davinci-resolve"])
+        #expect(args[allowed + 3] == "--disallowedTools")
+    }
+
     private let home = URL(fileURLWithPath: "/Users/x")
 
     @Test func locateOrder() {
