@@ -100,7 +100,7 @@ Main feature: every speech and ceremony synced across cameras and recorders on i
 - [ ] Event grouping: overlapping clips across cameras/recorders; per-camera clock offset learned from strong matches
 - [ ] Audio sync candidates: cross-correlation (Accelerate), offset within one frame + confidence; recorder is the backbone when present
 - [ ] Edit run: workspace + prompt + JSON report; Claude builds bins, one stacked timeline per event, an "Everything else" timeline, review markers on low-confidence clips; per-run analysis log like the cull
-- [x] Video Edit tab: shoot list, readiness checklist (footage, main copy, MCP, Resolve open), sync/junk options, model + budget; Build button disabled until the engine lands
+- [x] Video Edit tab: shoot list, readiness checklist (footage, main copy, MCP, Resolve open), sync/junk options, model; Build button disabled until the engine lands
 - [x] Verify on screen: Video Edit tab (2026-11-08)
 - [ ] Video Edit tab: run progress and result
 - [x] Headless session reaches Resolve 21.0.0 free through the bridge (read-only spike 2026-11-08: 9 turns, 14 s, $0.30, mostly MCP tool schemas)

@@ -7,6 +7,7 @@ nonisolated struct VideoEditSettings: Sendable, Codable, Equatable {
     /// Line up cameras and recorders by audio, one timeline per event (speech, ceremony).
     var syncByAudio = true
     var model: CullModel = .sonnet
+    /// Internal spending cap for one run; not shown in the UI.
     var maxRunBudgetUSD = 5.0
 
     static let budgetRange = 0.5...50.0

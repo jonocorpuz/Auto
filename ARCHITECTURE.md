@@ -153,7 +153,7 @@ Auto/                         # repo root
 │   │   ├── MediaView.swift   #   Media tab: stats, cards, Shoots grid, drives
 │   │   ├── ShootTile.swift   #   one shoot in the grid: thumbnail, counts, offline/missing state, sync badge, Copies menu, actions
 │   │   ├── ShootSyncPopover.swift #   per-shoot sync popover: copies, last check, Check Again (⌥ deep), Verify Contents, Sync Now, Stop
-│   │   ├── VideoEditView.swift # Video Edit tab: shoot list, readiness checklist, sync/junk options, Claude model + budget (Build button disabled until the engine lands)
+│   │   ├── VideoEditView.swift # Video Edit tab: shoot list, readiness checklist, sync/junk options, Claude model (Build button disabled until the engine lands)
 │   │   ├── PhotoEditView.swift #   Photo Edit tab: photo cull, bottom progress bar, result banners, live rejects grid (CullLiveRejectsGrid)
 │   │   ├── CullSettingsSheet.swift #   cull settings: criteria, mode cards, model, Advanced (budget, per-mode prompt)
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle

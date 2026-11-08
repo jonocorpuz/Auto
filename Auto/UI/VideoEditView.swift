@@ -151,21 +151,11 @@ private struct VideoEditDetail: View {
                 SurfaceCard {
                     VStack(alignment: .leading, spacing: 10) {
                         SectionHeader("Claude")
-                        HStack(spacing: 16) {
-                            Picker("Model", selection: $model.videoEditSettings.model) {
-                                ForEach(CullModel.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(maxWidth: 260)
-                            HStack(spacing: 6) {
-                                Text("Budget").foregroundStyle(.secondary)
-                                TextField("Budget", value: $model.videoEditSettings.maxRunBudgetUSD,
-                                          format: .currency(code: "USD"))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 80)
-                                    .labelsHidden()
-                            }
+                        Picker("Model", selection: $model.videoEditSettings.model) {
+                            ForEach(CullModel.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
                         }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 260)
                     }
                 }
 
