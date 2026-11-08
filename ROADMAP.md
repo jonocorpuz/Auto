@@ -90,6 +90,19 @@ Launch the app and tick each item. These are the UI checks still open.
 - [ ] Tests for replay-before-cull and primary-offline block (needs a mirrored-shoot fixture in AppCullTests)
 - [ ] Silence actor-isolation warnings in CullRunnerTests helpers
 
+## Phase 3c: Video edit (sync + Resolve)
+
+Main feature: every speech and ceremony synced across cameras and recorders on its own Resolve timeline. Junk clips (accidental records) are left out. Auto gathers evidence locally for free; a Claude session drives Resolve through the user's `davinci-resolve` MCP server and reasons through the cases the evidence can't settle.
+
+- [x] Claude runs can carry an MCP config + tool allowlist; `ResolveMCP` reuses the user-scope `davinci-resolve` entry from `~/.claude.json`
+- [ ] Clip catalog: start time, duration, fps, timecode, camera, audio channels (AVFoundation)
+- [ ] Junk-clip check: very short, mostly black, dark + silent + static. Never moved; Rejects bin, off the timelines
+- [ ] Event grouping: overlapping clips across cameras/recorders; per-camera clock offset learned from strong matches
+- [ ] Audio sync candidates: cross-correlation (Accelerate), offset within one frame + confidence; recorder is the backbone when present
+- [ ] Edit run: workspace + prompt + JSON report; Claude builds bins, one stacked timeline per event, an "Everything else" timeline, review markers on low-confidence clips; per-run analysis log like the cull
+- [ ] Video Edit tab: "Edit in Resolve" on a shoot, progress, result
+- [ ] First real run: does the headless session reach the bridge (Resolve 21.0 free), cost per event
+
 ## Phase 4: Polish & release
 
 - [x] Main window redesign: sidebar tabs (Media, Video Edit, Photo Edit, Settings), Ingest button, account row, floating content panel
@@ -127,6 +140,7 @@ Launch the app and tick each item. These are the UI checks still open.
 
 | Date | Decision | Why |
 | :--- | :--- | :--- |
+| 2026-11-08 | Video edit: a Claude session drives Resolve through the user's `davinci-resolve` MCP server; Auto pre-computes clip metadata, junk checks and audio-sync candidates and hands them over as evidence. Synced events become stacked timelines (no native multicam: script-created multicam needs 21.1, and free 21.1 has no Python scripting) | Auto-sync fails in real cases and needs reasoning; local evidence keeps the session short and cheap |
 | 2026-11-03 | Xcode project (not SwiftPM like Backed) | Asset catalogs, signing, previews, test hosting |
 | 2026-11-03 | App Sandbox **off** | Needs free access to `/Volumes/*`, the work folder, and spawning Resolve scripting. Revisit only for Mac App Store. |
 | 2026-11-03 | Swift Testing over XCTest | Modern API, parameterized tests |
