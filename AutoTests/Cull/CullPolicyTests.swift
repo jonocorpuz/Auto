@@ -122,7 +122,7 @@ struct CullPolicyTests {
     @Test func qualityFloorsCutOnlyUnprotectedRoles() {
         let g = Self.group(FrameRole.allCases.count)
         let weak = FrameRole.allCases.enumerated().map { i, role in Self.frame(i, role, t: 2, c: 2, s: 2, st: 2) }
-        for mode in [CullMode.selective, .strict] {
+        for mode in [CullMode.selective, .strict, .selects] {
             let out = Self.decide(g, weak, mode: mode)
             for (i, role) in FrameRole.allCases.enumerated() {
                 switch role {
@@ -133,7 +133,7 @@ struct CullPolicyTests {
                 }
             }
         }
-        for mode in [CullMode.gentle, .balanced, .selects] {
+        for mode in [CullMode.gentle, .balanced] {
             let out = Self.decide(g, weak, mode: mode)
             #expect(out[FrameRole.allCases.firstIndex(of: .candid)!].verdict == .keep, "\(mode)")
         }
@@ -149,7 +149,7 @@ struct CullPolicyTests {
     @Test func unflatteringSubjectVetoesCandidsInSelectiveAndStrict() {
         let g = Self.group(2)
         let frames = [Self.frame(0, s: 1, st: 5), Self.frame(1, .group, s: 1)]
-        for mode in [CullMode.selective, .strict] {
+        for mode in [CullMode.selective, .strict, .selects] {
             let out = Self.decide(g, frames, mode: mode)
             #expect(out[0].verdict == .reject && out[0].criterion == "eyes", "\(mode)")
             #expect(out[1].verdict == .keep, "\(mode): groups are protected")

@@ -100,11 +100,14 @@ import Testing
          "subject": 0, "story": story, "reason": reason]
     }
 
-    /// Grades (technical >= 2, so never unusable) whose derived score is `score`; 1 maps to 2.
+    /// A detail frame (protected, so past every quality floor, and not a key moment, so no ranking
+    /// boost) whose derived score is `score`; technical >= 2, so never unusable; 1 maps to 2.
     private static func frame(_ token: String, score: Int, moment: String) -> [String: Any] {
         for t in 2...5 { for c in 1...5 { for st in 1...5 {
-            let g = CullGrades(role: .candid, moment: moment, technical: t, composition: c, subject: 0, story: st)
-            if g.score == max(score, 2) { return frame(token, moment: moment, technical: t, composition: c, story: st) }
+            let g = CullGrades(role: .detail, moment: moment, technical: t, composition: c, subject: 0, story: st)
+            if g.score == max(score, 2) {
+                return frame(token, role: "detail", moment: moment, technical: t, composition: c, story: st)
+            }
         } } }
         fatalError("no grades for score \(score)")
     }

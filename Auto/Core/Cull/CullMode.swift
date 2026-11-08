@@ -39,15 +39,16 @@ nonisolated enum CullMode: String, Codable, Sendable, CaseIterable, Identifiable
     /// Behind-the-scenes frames (other photographers, gear) go.
     var rejectsCrew: Bool { self != .gentle }
     /// Unprotected roles (candid, establishing) under this weighted 1...5 quality go.
+    /// Selects shares Strict's floor; its final round then ranks what is left down to the target.
     var qualityFloor: Double? {
         switch self {
-        case .gentle, .balanced, .selects: nil
+        case .gentle, .balanced: nil
         case .selective: 2.5
-        case .strict: 3.0
+        case .strict, .selects: 3.0
         }
     }
     /// Unprotected roles whose prominent subject grades 1 (eyes closed, eating, yawning) go.
-    var subjectVeto: Bool { self == .selective || self == .strict }
+    var subjectVeto: Bool { self == .selective || self == .strict || self == .selects }
 
     /// Selects aims for this share of the shoot, scaled by how many frames grade well.
     static let selectsKeepFraction = 0.15
