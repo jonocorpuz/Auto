@@ -352,10 +352,12 @@ Photo cull runs per shoot. It needs the primary copy online and reads `Photo/**`
 2. **Analyze:** `ImageIOPhotoAnalyzer` makes local metrics and ~1024px previews with face strips. Nothing is moved until analysis finishes.
 3. **Group:** `PhotoGrouper` groups bursts by capture time and dHash.
 4. **Triage:** `LocalTriage` settles the obvious cases locally.
-5. **Claude, per group:** `ClaudeCLIRunner` runs `claude -p` in the isolated `CullWorkspace` with that group's previews. Each group waits while an ingest or sync runs.
-6. **Validate:** `CullDecisionValidator` checks every decision before anything moves.
+5. **Claude grades, per group:** `ClaudeCLIRunner` runs `claude -p` in the isolated `CullWorkspace` with that group's previews. The model only describes each frame: a role (milestone, group, celebration, establishing, candid, detail, crew, accidental), a moment label, and technical / composition / subject / story grades 1-5 (`CullGrades`). The prompt is the same in every mode. Each group waits while an ingest or sync runs.
+6. **Decide:** `CullPolicy` turns grades into verdicts, most certain first: triage, unusable, crew, one frame per moment, then the mode's quality floor for unprotected roles (candid, establishing). Mode knobs live on `CullMode`. Selects then runs its final round toward a soft ~15% target (`SelectsPlanner.targetCount`).
 7. **Apply:** under the app-wide lock, rejects move to `Photo/<cam>/_Rejects/` on every online copy. Each move is journaled write-ahead in `<shoot>/.auto-cull/`. Stop during apply rolls the run back.
 8. **Offline copies:** a copy that is offline is marked `pendingSync`. Sync Now replays completed cull runs from the primary copy onto it before copying missing files, so rejects never come back.
+
+Every run also writes `<shoot>/.auto-cull/analysis/<date>_<runID>.json` (`CullAnalysisLog`): all decisions with grades, and per-call tokens, cost and duration. It is diagnostic only and never drives undo or sync.
 
 Details: [docs/plans/photo-cull.md](docs/plans/photo-cull.md).
 
