@@ -234,8 +234,9 @@ nonisolated enum CullApplier {
         for (ci, copy) in online.enumerated() {
             let summary = CullRunSummary(runID: plan.runID, date: Date(), model: plan.settings.model,
                                          photos: plan.records.count, rejected: movedOnCopy[ci],
-                                         groupsDone: 0, groupsTotal: 0, spentUSD: 0, undone: false,
-                                         status: status, skippedCrossVolume: crossOnCopy[ci])
+                                         groupsDone: plan.groupsDone, groupsTotal: plan.groupsTotal,
+                                         spentUSD: plan.spentUSD, undone: false,
+                                         status: status, skippedCrossVolume: crossOnCopy[ci], note: plan.note)
             try? CullJournal.append(.finished(runID: plan.runID, summary: summary), runID: plan.runID, in: copy)
         }
         if let failure { throw failure }

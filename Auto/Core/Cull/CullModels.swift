@@ -183,6 +183,11 @@ nonisolated struct CullPlan: Sendable {
     let decisions: [CullDecision]
     let records: [String: PhotoRecord]
     var catalogCopy: URL? = nil
+    /// Run totals for the journal's finished summary.
+    var spentUSD: Double = 0
+    var groupsDone = 0
+    var groupsTotal = 0
+    var note: String? = nil
 }
 
 nonisolated enum CullPhase: Sendable, Equatable {

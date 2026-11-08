@@ -78,6 +78,16 @@ import Testing
         if case .finished(_, let s) = events.last { #expect(s.rejected == 1) } else { Issue.record("not finished") }
     }
 
+    @Test func finishedSummaryCarriesRunTotals() throws {
+        let copy = try temp(); defer { try? fm.removeItem(at: copy) }
+        try write(copy, "Photo/CamA/1.JPG", "one")
+        var p = plan([try record(copy, ["Photo/CamA/1.JPG"])])
+        p.spentUSD = 0.42; p.groupsDone = 3; p.groupsTotal = 4; p.note = "n"
+        _ = try apply(p, [copy])
+        guard case .finished(_, let s) = try CullJournal.events(in: copy).last else { Issue.record("not finished"); return }
+        #expect(s.spentUSD == 0.42 && s.groupsDone == 3 && s.groupsTotal == 4 && s.note == "n")
+    }
+
     @Test func decisionsOutsidePlanRecordsIgnored() throws {
         let copy = try temp(); defer { try? fm.removeItem(at: copy) }
         try write(copy, "Photo/CamA/1.JPG", "one")
