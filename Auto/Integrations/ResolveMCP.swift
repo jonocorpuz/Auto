@@ -3,7 +3,7 @@ import Foundation
 /// The DaVinci Resolve MCP server a video-edit run gives Claude.
 /// Reuses the user's own registration in `~/.claude.json` so Auto never asks for paths.
 nonisolated enum ResolveMCP {
-    static let serverName = "davinci-resolve"
+    static let serverName = VideoEditReadiness.resolveServerName
     /// Allows every tool of the server (`--allowedTools`).
     static let allowedTool = "mcp__\(serverName)"
 
@@ -18,8 +18,7 @@ nonisolated enum ResolveMCP {
 
         var errorDescription: String? {
             switch self {
-            case .notRegistered:
-                "The DaVinci Resolve MCP server isn't set up in Claude Code. Add it as \"\(ResolveMCP.serverName)\" (claude mcp add --scope user)."
+            case .notRegistered: VideoEditReadiness.mcpMissingHint
             }
         }
     }
