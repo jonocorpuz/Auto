@@ -16,11 +16,12 @@ struct ShootSummaryTests {
     }
 
     @Test func countsVideoAndPhoto() async throws {
-        let root = try makeFolder(["a/one.mp4", "a/two.MOV", "b/p.jpg", "notes.txt"])
+        let root = try makeFolder(["a/one.mp4", "a/two.MOV", "b/p.jpg", "notes.txt", "Audio/ZOOM0001.WAV", "Audio/lav.m4a"])
         defer { try? FileManager.default.removeItem(at: root) }
         let s = await ShootSummary.scan(root)
         #expect(s.videoCount == 2)
         #expect(s.photoCount == 1)
+        #expect(s.audioCount == 2)
     }
 
     @Test func prefersPhotoAsRepresentative() async throws {
