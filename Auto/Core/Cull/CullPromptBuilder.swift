@@ -3,63 +3,37 @@ import Foundation
 /// Builds every prompt the cull sends to Claude. Pure: no I/O, no SwiftUI.
 ///
 /// Stable rules go in the workspace `CLAUDE.md` (`workspaceClaudeMD`). The
-/// per-run criteria and mode stance go in the appended run section. Each group
+/// grading guide goes in the appended run section. Each group
 /// gets one user message listing its metrics and frame paths.
 nonisolated enum CullPromptBuilder {
 
     /// Bump when any prompt text or the schema changes meaning.
-    static let promptVersion = 2
+    static let promptVersion = 3
 
     /// Written verbatim into `CullWorkspace/CLAUDE.md`. Mode-neutral: each
     /// cull's stance comes in the run section.
     static let workspaceClaudeMD: String = #"""
         # Photo cull workspace
 
-        You are a photo-culling assistant for a professional photographer. You see one group of frames at a time and decide keep or reject for every frame. Rejected frames are moved to a _Rejects folder, not deleted.
+        You grade photos for a professional event photographer. You see one group of frames at a time and describe every frame with a role, a moment label and four grades. The app decides what to keep from your grades.
 
         ## How to work
         1. Read every image listed under FRAMES in a single turn (issue all Read calls together). A file ending in _faces.jpg is an enlarged strip of every detected face in that frame, numbered 0, 1, 2… left to right.
         2. Judge from the images. METRICS come from a local analyzer and are hints that can be wrong; the image is ground truth.
         3. Reply with JSON only, matching the schema, with exactly one entry per frame id. No prose.
 
-        ## This run
-        Each run states the stance and task for this cull; follow it. The criteria it lists are the flaws that can justify a reject; the stance says how hard to apply them and whether quality alone may also justify one.
-
         ## Fields
-        - reason: 12 words or fewer, concrete, e.g. "eyes closed; p02 sharper" or "lens cap, black frame".
-        - criterion: the id of the criterion behind a reject, or "weak" when the frame goes on quality alone.
-        - keeper: when you reject a frame because a similar frame is better, that frame's id.
-        - confidence: 0 to 1, how sure you are the verdict is right.
-        - score: only when the schema asks for it, an integer 1 to 10 for every frame, kept or rejected, using the rubric in the run section.
+        - role, moment, technical, composition, subject, story: as defined in the run section.
+        - reason: 12 words or fewer, the most decisive thing about the frame, e.g. "trophy handover, winner beaming" or "eyes closed, soft focus".
         """#
 
     /// One short paragraph for `--system-prompt`.
     static let roleSystemPrompt = "You cull photos for a professional photographer. Follow CLAUDE.md in this folder exactly. Output only JSON matching the schema."
 
-    /// The run section appended to the system prompt. A non-empty custom
-    /// prompt for the current mode is returned verbatim; otherwise the
-    /// criteria in use (in `CullCriterion.all` order), the mode and its
-    /// stance, plus the great-photo guide for scoring modes.
+    /// The run section appended to the system prompt: a non-empty custom prompt for the
+    /// current mode verbatim, otherwise the mode-neutral grading guide.
     static func runSection(settings: CullSettings) -> String {
-        if let custom = settings.customPrompt(for: settings.mode) {
-            return custom
-        }
-        let mode = settings.mode
-        let enabled = CullCriterion.all
-            .filter { settings.criteria.contains($0.id) }
-            .map { "- \($0.id): \($0.definition)" }
-        let criteria = enabled.isEmpty ? "(none enabled)" : enabled.joined(separator: "\n")
-        var section = """
-        Criteria in use
-        \(criteria)
-
-        Mode: \(mode.title)
-        \(CullModePrompts.stance(mode))
-        """
-        if mode.scoresFrames {
-            section += "\n\n" + CullModePrompts.greatPhotoGuide
-        }
-        return section
+        settings.customPrompt(for: settings.mode) ?? CullModePrompts.gradingGuide
     }
 
     /// Token per photo in group order: "p01", "p02"… Two digits minimum.
@@ -148,25 +122,18 @@ nonisolated enum CullPromptBuilder {
         return parts.joined(separator: " ")
     }
 
-    /// JSON schema for non-scoring modes, kept for existing callers. Same as
-    /// `jsonSchema(for: .balanced)`.
-    static let jsonSchema: String = jsonSchema(for: .balanced)
-
-    /// JSON schema passed to `--json-schema`. One decision per frame id;
-    /// scoring modes add a required 1-10 `score`.
-    static func jsonSchema(for mode: CullMode) -> String {
-        let required = mode.scoresFrames
-            ? #"["id","verdict","reason","confidence","score"]"#
-            : #"["id","verdict","reason","confidence"]"#
-        let score = mode.scoresFrames
-            ? #","score":{"type":"integer","minimum":1,"maximum":10}"#
-            : ""
-        return #"{"type":"object","additionalProperties":false,"required":["decisions"],"properties":{"decisions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":"#
-            + required
-            + #","properties":{"id":{"type":"string","pattern":"^p[0-9]{2}$"},"verdict":{"enum":["keep","reject"]},"reason":{"type":"string","maxLength":90},"criterion":{"type":"string"},"keeper":{"type":"string","pattern":"^p[0-9]{2}$"},"confidence":{"type":"number","minimum":0,"maximum":1}"#
-            + score
-            + "}}}}}"
-    }
+    /// JSON schema passed to `--json-schema`: one graded entry per frame id, every mode.
+    static let jsonSchema: String = {
+        let roles = FrameRole.allCases.map { "\"\($0.rawValue)\"" }.joined(separator: ",")
+        func grade(_ min: Int) -> String { #"{"type":"integer","minimum":"# + "\(min)" + #","maximum":5}"# }
+        return #"{"type":"object","additionalProperties":false,"required":["frames"],"properties":{"frames":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","role","moment","technical","composition","subject","story","reason"],"properties":{"id":{"type":"string","pattern":"^p[0-9]{2}$"},"role":{"enum":["#
+            + roles
+            + #"]},"moment":{"type":"string","pattern":"^m[0-9]{1,3}$"},"technical":"# + grade(1)
+            + #","composition":"# + grade(1)
+            + #","subject":"# + grade(0)
+            + #","story":"# + grade(1)
+            + #","reason":{"type":"string","maxLength":90}}}}}}"#
+    }()
 
     // MARK: Final round (Selects)
 
@@ -177,13 +144,13 @@ nonisolated enum CullPromptBuilder {
     static func finalRoundRunSection(settings: CullSettings) -> String {
         """
         Final round: choose the selects
-        These candidate frames come from across the whole shoot. Each survived the first pass, which saw one group at a time, and carries its first-pass score as a hint. From these candidates pick exactly the number of frames the message asks for, best first.
+        These candidate frames come from across the whole shoot. Each survived the first pass, which saw one group at a time, and carries its first-pass score (1-10) and role as hints. From these candidates pick exactly the number of frames the message asks for, best first.
         - Favour variety: do not pick near-duplicates of the same moment. When several candidates show one moment, pick only the strongest frame of it.
         - Prefer frames that add something different to the gallery: another moment, person, angle or emotion.
         - The image is ground truth; scores are hints.
         - reason: 10 words or fewer, concrete, e.g. "peak laugh, clean background".
 
-        \(CullModePrompts.greatPhotoGuide)
+        \(CullModePrompts.finalRoundGuide)
         """
     }
 
@@ -194,9 +161,11 @@ nonisolated enum CullPromptBuilder {
         batch: Int,
         batchCount: Int,
         pick: Int,
-        frames: [(token: String, path: String, score: Int)]
+        frames: [(token: String, path: String, score: Int, role: String?)]
     ) -> String {
-        let lines = frames.map { "\($0.token): \($0.path) (score \($0.score))" }
+        let lines = frames.map { f in
+            "\(f.token): \(f.path) (score \(f.score)" + (f.role.map { ", \($0)" } ?? "") + ")"
+        }
         return """
         Final round \(round), batch \(batch) of \(batchCount): \(frames.count) candidates. Pick exactly \(pick), best first.
         Read every image listed under FRAMES in a single turn (issue all Read calls together).

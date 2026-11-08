@@ -88,20 +88,37 @@ import Testing
     }
 
     private static func response(_ items: [[String: Any]], cost: Double? = 0.01) -> Result<ClaudeResponse, Error> {
-        let data = try! JSONSerialization.data(withJSONObject: ["decisions": items])
+        let data = try! JSONSerialization.data(withJSONObject: ["frames": items])
         return .success(ClaudeResponse(structured: data, costUSD: cost, inputTokens: nil, outputTokens: nil, cacheReadTokens: nil))
     }
 
-    /// Rejects the first frame of every group with high confidence, keeps the rest.
+    /// One graded frame. `subject` 0 so quality depends on technical, composition and story only.
+    private static func frame(_ token: String, role: String = "candid", moment: String,
+                              technical: Int = 3, composition: Int = 3, story: Int = 3,
+                              reason: String = "fine") -> [String: Any] {
+        ["id": token, "role": role, "moment": moment, "technical": technical, "composition": composition,
+         "subject": 0, "story": story, "reason": reason]
+    }
+
+    /// Grades (technical >= 2, so never unusable) whose derived score is `score`; 1 maps to 2.
+    private static func frame(_ token: String, score: Int, moment: String) -> [String: Any] {
+        for t in 2...5 { for c in 1...5 { for st in 1...5 {
+            let g = CullGrades(role: .candid, moment: moment, technical: t, composition: c, subject: 0, story: st)
+            if g.score == max(score, 2) { return frame(token, moment: moment, technical: t, composition: c, story: st) }
+        } } }
+        fatalError("no grades for score \(score)")
+    }
+
+    /// Rejects the first frame of every group as accidental (unusable), keeps the rest.
     private static func rejectFirst(_ req: ClaudeRequest, _ rejected: StringSet, cost: Double? = 0.01) -> Result<ClaudeResponse, Error> {
         let frames = tokens(in: req.userPrompt)
         var items: [[String: Any]] = []
         for (n, f) in frames.enumerated() {
             if n == 0 {
                 rejected.insert(photoName(f.index))
-                items.append(["id": f.token, "verdict": "reject", "reason": "soft", "confidence": 0.99, "criterion": "exposure"])
+                items.append(frame(f.token, role: "accidental", moment: "m\(n + 1)", technical: 1, reason: "soft"))
             } else {
-                items.append(["id": f.token, "verdict": "keep", "reason": "fine", "confidence": 0.9])
+                items.append(frame(f.token, moment: "m\(n + 1)"))
             }
         }
         return response(items, cost: cost)
@@ -346,7 +363,7 @@ import Testing
             #expect(r.model == "sonnet")
             #expect(r.appendSystemPrompt == CullPromptBuilder.runSection(settings: s))
             #expect(r.systemPrompt == CullPromptBuilder.roleSystemPrompt)
-            #expect(r.jsonSchema == CullPromptBuilder.jsonSchema(for: s.mode))
+            #expect(r.jsonSchema == CullPromptBuilder.jsonSchema)
             #expect(r.maxBudgetUSD >= 0.05 && r.maxBudgetUSD <= 1.0)
             #expect(!r.userPrompt.contains(env.shoot.root.path))
             #expect(!r.userPrompt.contains(env.workspace.path))
@@ -364,15 +381,36 @@ import Testing
 
     // MARK: - Mode schema
 
-    @Test func strictRunPassesScoreSchemaAndHasNoFinalRound() async {
-        let env = Self.makeEnv()
+    @Test func everyModeSendsTheSameGradingSchemaAndGuide() async {
+        for mode in CullMode.allCases where !mode.hasFinalRound {
+            let env = Self.makeEnv()
+            defer { cleanup(env) }
+            var s = CullSettings(); s.mode = mode
+            _ = await go(env, settings: s)
+            let requests = env.claude.requests
+            #expect(requests.count == 3)
+            #expect(requests.allSatisfy { $0.jsonSchema == CullPromptBuilder.jsonSchema })
+            #expect(requests.allSatisfy { $0.appendSystemPrompt == CullModePrompts.gradingGuide })
+        }
+    }
+
+    @Test func strictPolicyRejectsWeakCandidsButKeepsKeyMoments() async {
+        // Every frame its own moment; even positions are weak candids, odd positions weak milestones.
+        let env = Self.makeEnv { req, _ in
+            let items = Self.tokens(in: req.userPrompt).enumerated().map { n, f in
+                Self.frame(f.token, role: n % 2 == 0 ? "candid" : "milestone", moment: "m\(n + 1)",
+                           technical: 2, composition: 2, story: 2)
+            }
+            return Self.response(items)
+        }
         defer { cleanup(env) }
         var s = CullSettings(); s.mode = .strict
         _ = await go(env, settings: s)
-        let requests = env.claude.requests
-        #expect(requests.count == 3)
-        #expect(requests.allSatisfy { $0.jsonSchema == CullPromptBuilder.jsonSchema(for: .strict) })
-        #expect(requests.allSatisfy { $0.jsonSchema.contains("\"score\"") })
+        guard let plan = env.applier.plans.first else { Issue.record("no plan"); return }
+        let rejects = plan.decisions.filter { $0.verdict == .reject }
+        #expect(rejects.count == 12)
+        #expect(rejects.allSatisfy { $0.criterion == "weak" && $0.grades?.role == .candid })
+        #expect(plan.decisions.filter { $0.verdict == .keep }.allSatisfy { $0.grades?.role == .milestone })
     }
 
     // MARK: - Selects final round
@@ -384,14 +422,22 @@ import Testing
         return Int(prompt[r].split(separator: " ").last!)!
     }
 
-    /// Group calls keep every frame with score 1 + index % 10 (none when `unscored` matches).
-    private static func scoredKeeps(_ req: ClaudeRequest, unscored: (Int) -> Bool = { _ in false }) -> Result<ClaudeResponse, Error> {
-        let items: [[String: Any]] = tokens(in: req.userPrompt).map { f in
-            var item: [String: Any] = ["id": f.token, "verdict": "keep", "reason": "fine", "confidence": 0.9]
-            if !unscored(f.index) { item["score"] = 1 + f.index % 10 }
-            return item
+    /// Group calls grade every frame as its own moment with score `score(index)`. The default,
+    /// 1 + index % 6 (1 comes back as 2), has no strong frames, so the soft target sits at its 10% floor:
+    /// score 6 = indices 5, 11, 17, 23…, score 5 = 4, 10, 16, 22…. Frames matching `unscored` are left
+    /// out, so they stay default keeps.
+    private static func scoredKeeps(_ req: ClaudeRequest, unscored: (Int) -> Bool = { _ in false },
+                                    score: (Int) -> Int = { 1 + $0 % 6 }) -> Result<ClaudeResponse, Error> {
+        let items: [[String: Any]] = tokens(in: req.userPrompt).enumerated().compactMap { n, f in
+            unscored(f.index) ? nil : frame(f.token, score: score(f.index), moment: "m\(n + 1)")
         }
         return response(items, cost: 0)
+    }
+
+    /// The soft Selects target the runner used: strong frames are the first-pass scores of 7+.
+    private static func target(_ plan: CullPlan) -> Int {
+        SelectsPlanner.targetCount(photoCount: plan.decisions.count,
+                                   strongCount: plan.decisions.filter { ($0.score ?? 0) >= SelectsPlanner.strongScore }.count)
     }
 
     /// Final-round calls pick the *last* frames listed, so the result differs from the score fallback.
@@ -415,10 +461,10 @@ import Testing
         let outcome = await go(env, settings: Self.selects, rejects: rejects)
         guard case .completed(let summary) = outcome else { Issue.record("got \(outcome)"); return }
         guard let plan = env.applier.plans.first else { Issue.record("no plan"); return }
-        #expect(SelectsPlanner.targetCount(photoCount: 40) == 4)
+        #expect(Self.target(plan) == 4)
         #expect(plan.decisions.count == 40)
-        // Pool = four 10s, four 9s, 0007 and 0017 (8s); the model picks the four lowest-ranked of the pool.
-        #expect(Self.kept(plan) == Set([28, 38, 7, 17].map(Self.photoName)))
+        // Pool = six 6s, then the 5s 0004, 0010, 0016, 0022; the model picks the four lowest-ranked of the pool.
+        #expect(Self.kept(plan) == Set([4, 10, 16, 22].map(Self.photoName)))
         let cuts = plan.decisions.filter { $0.verdict == .reject }
         #expect(cuts.count == 36)
         #expect(cuts.allSatisfy { $0.criterion == "select" && $0.source == .finalRound && $0.reason == "not a select"
@@ -427,7 +473,7 @@ import Testing
 
         let groupCalls = env.claude.requests.filter { !Self.isFinal($0) }
         let finalCalls = env.claude.requests.filter(Self.isFinal)
-        #expect(groupCalls.allSatisfy { $0.jsonSchema == CullPromptBuilder.jsonSchema(for: .selects) })
+        #expect(groupCalls.allSatisfy { $0.jsonSchema == CullPromptBuilder.jsonSchema })
         #expect(finalCalls.count == 1)
         for r in finalCalls {
             #expect(r.jsonSchema == CullPromptBuilder.finalRoundSchema)
@@ -452,7 +498,8 @@ import Testing
         let outcome = await go(env, settings: Self.selects, gate: { try? await Task.sleep(for: .milliseconds(20)) },
                                collector: collector)
         guard case .completed = outcome, let plan = env.applier.plans.first else { Issue.record("got \(outcome)"); return }
-        let target = SelectsPlanner.targetCount(photoCount: 80)
+        let target = Self.target(plan)
+        #expect(target == 8)
         #expect(Self.kept(plan).count == target)
         let pool = SelectsPlanner.poolSize(target: target)
         let rounds = SelectsPlanner.roundPlan(poolCount: pool, target: target, batchSize: SelectsPlanner.batchSize)
@@ -470,7 +517,7 @@ import Testing
             defer { cleanup(env) }
             let outcome = await go(env, settings: Self.selects)
             guard case .completed = outcome, let plan = env.applier.plans.first else { Issue.record("got \(outcome)"); continue }
-            #expect(Self.kept(plan) == Set([9, 19, 29, 39].map(Self.photoName)))
+            #expect(Self.kept(plan) == Set([5, 11, 17, 23].map(Self.photoName)))
         }
     }
 
@@ -482,6 +529,7 @@ import Testing
         defer { cleanup(env) }
         let outcome = await go(env, settings: Self.selects)
         guard case .completed = outcome, let plan = env.applier.plans.first else { Issue.record("got \(outcome)"); return }
+        #expect(Self.target(plan) == 4)
         let unscoredIDs = Set((0..<40).filter(unscored).map(Self.photoName))
         let kept = Self.kept(plan)
         #expect(unscoredIDs.isSubset(of: kept))
@@ -513,7 +561,7 @@ import Testing
         let outcome = await go(env, settings: s)
         guard case .completed(let summary) = outcome, let plan = env.applier.plans.first else { Issue.record("got \(outcome)"); return }
         #expect(env.claude.requests.filter(Self.isFinal).count == 1)
-        #expect(Self.kept(plan).count == SelectsPlanner.targetCount(photoCount: 80))
+        #expect(Self.kept(plan).count == Self.target(plan))
         #expect(summary.note?.contains("by score") == true)
     }
 
@@ -525,7 +573,7 @@ import Testing
         defer { cleanup(env) }
         let outcome = await go(env, settings: Self.selects)
         guard case .completed = outcome, let plan = env.applier.plans.first else { Issue.record("got \(outcome)"); return }
-        #expect(Self.kept(plan) == Set([9, 19, 29, 39].map(Self.photoName)))
+        #expect(Self.kept(plan) == Set([5, 11, 17, 23].map(Self.photoName)))
     }
 
     @Test func overQuotaPicksKeepClaudesOrder() async {
@@ -540,7 +588,7 @@ import Testing
         let outcome = await go(env, settings: Self.selects)
         guard case .completed = outcome, let plan = env.applier.plans.first else { Issue.record("got \(outcome)"); return }
         #expect(Self.kept(plan).count == 4)
-        #expect(Self.kept(plan) == Set([28, 38, 7, 17].map(Self.photoName)))
+        #expect(Self.kept(plan) == Set([4, 10, 16, 22].map(Self.photoName)))
     }
 
     @Test func notLoggedInInFinalRoundFailsAndFinishesRejectStream() async {
@@ -582,7 +630,7 @@ import Testing
         #expect(batches.allSatisfy { $0.count == 1 })
         let live = batches.flatMap { $0 }
         #expect(Set(live.map(\.id)) == env.rejected.value)
-        #expect(live.allSatisfy { $0.label == "Exposure" && $0.reason == "soft" })
+        #expect(live.allSatisfy { $0.label == "Unusable" && $0.reason == "soft" })
         #expect(live.allSatisfy { $0.thumbnailJPEG.map { String(decoding: $0, as: UTF8.self).hasPrefix("thumb:a") } == true })
     }
 

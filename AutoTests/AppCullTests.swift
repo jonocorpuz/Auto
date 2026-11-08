@@ -27,7 +27,7 @@ struct AppCullTests {
             metrics[String(format: "IMG_%04d.JPG", i)] = m
         }
         let claude = FakeClaudeRunner(hang: hang) { _ in
-            .success(ClaudeResponse(structured: try! JSONSerialization.data(withJSONObject: ["decisions": [[String: Any]]()]),
+            .success(ClaudeResponse(structured: try! JSONSerialization.data(withJSONObject: ["frames": [[String: Any]]()]),
                                     costUSD: 0.01, inputTokens: nil, outputTokens: nil, cacheReadTokens: nil))
         }
         let model = AppModel(registryURL: dir.appendingPathComponent("shoots.json"), thumbnails: FakeThumbnailProvider(),

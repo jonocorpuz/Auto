@@ -62,56 +62,11 @@ struct CullPromptBuilderTests {
 
     // MARK: Criteria and strictness
 
-    @Test func onlyEnabledCriteriaAppear() {
-        var settings = CullSettings()
-        settings.criteria = ["exposure", "eyes"]
-        let section = CullPromptBuilder.runSection(settings: settings)
-
-        #expect(section.contains("- exposure: "))
-        #expect(section.contains("- eyes: "))
-        for disabled in ["duplicates", "unusable", "horizon", "cropped"] {
-            #expect(!section.contains("- \(disabled):"))
-        }
-    }
-
-    @Test func criteriaFollowCatalogOrder() {
-        let section = CullPromptBuilder.runSection(settings: CullSettings())
-        let ids = CullCriterion.all.map(\.id)
-        var previous = section.startIndex
-        for id in ids {
-            guard let range = section.range(of: "- \(id): ", range: previous..<section.endIndex) else {
-                Issue.record("missing criterion \(id) in order")
-                return
-            }
-            previous = range.upperBound
-        }
-    }
-
-    @Test func eachModeGetsItsOwnStance() {
+    @Test func everyModeGetsTheSameGradingGuide() {
         for mode in CullMode.allCases {
             var settings = CullSettings()
             settings.mode = mode
-            let section = CullPromptBuilder.runSection(settings: settings)
-
-            #expect(section.contains("Mode: \(mode.title)\n"))
-            #expect(section.contains(CullModePrompts.stance(mode)))
-            for other in CullMode.allCases where other != mode {
-                #expect(!section.contains(CullModePrompts.stance(other)))
-            }
-        }
-    }
-
-    @Test func scoringModesCarryTheGreatPhotoGuide() {
-        for mode in CullMode.allCases {
-            var settings = CullSettings()
-            settings.mode = mode
-            let section = CullPromptBuilder.runSection(settings: settings)
-            #expect(section.contains(CullModePrompts.greatPhotoGuide) == mode.scoresFrames)
-            if mode.scoresFrames {
-                for term in ["decisive instant", "Score rubric", "score inflation", "median frame is about 5"] {
-                    #expect(section.contains(term))
-                }
-            }
+            #expect(CullPromptBuilder.runSection(settings: settings) == CullModePrompts.gradingGuide)
         }
     }
 
@@ -134,7 +89,7 @@ struct CullPromptBuilderTests {
                     #expect(section == custom)
                 } else {
                     #expect(!section.contains(custom))
-                    #expect(section.hasPrefix("Criteria in use"))
+                    #expect(section == CullModePrompts.gradingGuide)
                 }
             }
         }
@@ -143,8 +98,7 @@ struct CullPromptBuilderTests {
     @Test func emptyCustomRunPromptFallsBackToGenerated() {
         var settings = CullSettings()
         settings.customPrompts[settings.mode.rawValue] = ""
-        let section = CullPromptBuilder.runSection(settings: settings)
-        #expect(section.hasPrefix("Criteria in use"))
+        #expect(CullPromptBuilder.runSection(settings: settings) == CullModePrompts.gradingGuide)
     }
 
     @Test func noPlaceholdersInAnyOutput() {
@@ -174,9 +128,8 @@ struct CullPromptBuilderTests {
         #expect(md.contains("## How to work\n1. Read every image listed under FRAMES"))
         #expect(md.contains("_faces.jpg"))
         #expect(md.contains("the image is ground truth"))
-        #expect(md.contains("Each run states the stance and task for this cull; follow it."))
+        #expect(md.contains("The app decides what to keep from your grades."))
         #expect(md.contains("- reason: 12 words or fewer"))
-        #expect(md.contains("- score: only when the schema asks for it"))
     }
 
     @Test func workspaceIsModeNeutral() {
@@ -192,32 +145,29 @@ struct CullPromptBuilderTests {
     }
 
     @Test func promptVersionIsTwo() {
-        #expect(CullPromptBuilder.promptVersion == 2)
+        #expect(CullPromptBuilder.promptVersion == 3)
     }
 
-    private static func decisionItem(_ schema: String) throws -> [String: Any] {
+    private static func frameItem(_ schema: String) throws -> [String: Any] {
         let object = try JSONSerialization.jsonObject(with: Data(schema.utf8)) as? [String: Any]
         let root = try #require(object)
         let properties = try #require(root["properties"] as? [String: Any])
-        let decisions = try #require(properties["decisions"] as? [String: Any])
-        return try #require(decisions["items"] as? [String: Any])
+        let frames = try #require(properties["frames"] as? [String: Any])
+        return try #require(frames["items"] as? [String: Any])
     }
 
-    @Test func scoreIsInTheSchemaOnlyForScoringModes() throws {
-        for mode in CullMode.allCases {
-            let item = try Self.decisionItem(CullPromptBuilder.jsonSchema(for: mode))
-            let props = try #require(item["properties"] as? [String: Any])
-            let required = try #require(item["required"] as? [String])
-            #expect((props["score"] != nil) == mode.scoresFrames)
-            #expect(required.contains("score") == mode.scoresFrames)
-            if mode.scoresFrames {
-                let score = try #require(props["score"] as? [String: Any])
-                #expect(score["type"] as? String == "integer")
-                #expect(score["minimum"] as? Int == 1)
-                #expect(score["maximum"] as? Int == 10)
-            }
+    @Test func gradingSchemaRequiresRoleMomentAndFourGrades() throws {
+        let item = try Self.frameItem(CullPromptBuilder.jsonSchema)
+        let props = try #require(item["properties"] as? [String: Any])
+        let required = try #require(item["required"] as? [String])
+        #expect(Set(required) == ["id", "role", "moment", "technical", "composition", "subject", "story", "reason"])
+        let role = try #require(props["role"] as? [String: Any])
+        #expect(role["enum"] as? [String] == FrameRole.allCases.map(\.rawValue))
+        for (axis, low) in [("technical", 1), ("composition", 1), ("subject", 0), ("story", 1)] {
+            let g = try #require(props[axis] as? [String: Any])
+            #expect(g["minimum"] as? Int == low && g["maximum"] as? Int == 5, "\(axis)")
         }
-        #expect(CullPromptBuilder.jsonSchema == CullPromptBuilder.jsonSchema(for: .balanced))
+        #expect(props["verdict"] == nil && props["confidence"] == nil)
     }
 
     @Test func finalRoundSchemaParses() throws {
@@ -235,14 +185,14 @@ struct CullPromptBuilderTests {
     }
 
     @Test func finalRoundMessageListsPickCountAndEveryToken() {
-        let frames: [(token: String, path: String, score: Int)] = [
-            ("p01", "final/p01.jpg", 8), ("p02", "final/p02.jpg", 6), ("p03", "final/p03.jpg", 7),
+        let frames: [(token: String, path: String, score: Int, role: String?)] = [
+            ("p01", "final/p01.jpg", 8, "milestone"), ("p02", "final/p02.jpg", 6, nil), ("p03", "final/p03.jpg", 7, "group"),
         ]
         let message = CullPromptBuilder.finalRoundUserMessage(round: 1, batch: 2, batchCount: 3, pick: 2, frames: frames)
         #expect(message.contains("Pick exactly 2"))
         #expect(message.contains("batch 2 of 3"))
         for f in frames {
-            #expect(message.contains("\(f.token): \(f.path) (score \(f.score))"))
+            #expect(message.contains("\(f.token): \(f.path) (score \(f.score)" + (f.role.map { ", \($0)" } ?? "") + ")"))
         }
     }
 
@@ -252,7 +202,7 @@ struct CullPromptBuilderTests {
         settings.setCustomPrompt("custom selects", for: .selects)
         let section = CullPromptBuilder.finalRoundRunSection(settings: settings)
         #expect(!section.contains("custom selects"))
-        #expect(section.contains(CullModePrompts.greatPhotoGuide))
+        #expect(section.contains(CullModePrompts.finalRoundGuide))
         #expect(section.contains("near-duplicates"))
         #expect(section.contains("best first"))
         #expect(!CullPromptBuilder.finalRoundSystemPrompt.isEmpty)
@@ -263,17 +213,8 @@ struct CullPromptBuilderTests {
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let root = try #require(object)
         #expect(root["type"] as? String == "object")
-        #expect(root["required"] as? [String] == ["decisions"])
-
-        let properties = try #require(root["properties"] as? [String: Any])
-        let decisions = try #require(properties["decisions"] as? [String: Any])
-        let items = try #require(decisions["items"] as? [String: Any])
-        let itemProperties = try #require(items["properties"] as? [String: Any])
-        #expect(itemProperties["keeper"] != nil)
-        #expect(itemProperties["confidence"] != nil)
+        #expect(root["required"] as? [String] == ["frames"])
     }
-
-    // MARK: Tokens
 
     @Test func tokensAreZeroPaddedInGroupOrder() {
         let photos = (1...12).map { Self.record("img\($0).jpg") }

@@ -9,11 +9,11 @@ import Foundation
 /// - Face strips: about 300 tokens each, assumed on 30% of photos. Only counted
 ///   while the `eyes` or `cropped` criterion is enabled, which is the same gate
 ///   the pipeline uses to write a strip.
-/// - System prompt and workspace CLAUDE.md: about 1500 tokens per call. About
+/// - System prompt, grading guide and workspace CLAUDE.md: about 2000 tokens per call. About
 ///   90% of it is a prompt-cache read billed at 0.1x. The other 10% is billed at
 ///   full price to cover cache misses.
-/// - Output: about 40 tokens per photo. Scoring modes (strict, selects) add
-///   about 10 more per photo for the score field.
+/// - Output: about 50 tokens per photo (role, moment, four grades, reason), the
+///   same in every mode since the model only grades.
 /// - Selects pass 2 (the elimination rounds over the top candidates): the pool
 ///   is about 25% of the photos (`selectsPoolShare`), each pool image is seen
 ///   about twice across rounds (`selectsRevisitFactor`), batches of 10 images
@@ -31,11 +31,10 @@ nonisolated enum CullEstimator {
     static let imageTokensPerPhoto = 1000.0
     static let faceStripTokens = 300.0
     static let faceStripShare = 0.3
-    static let systemTokensPerCall = 1500.0
+    static let systemTokensPerCall = 2000.0
     static let cachedShare = 0.9
     static let cacheReadMultiplier = 0.1
-    static let outputTokensPerPhoto = 40.0
-    static let scoringOutputTokensPerPhoto = 10.0
+    static let outputTokensPerPhoto = 50.0
     static let selectsPoolShare = 0.25
     static let selectsRevisitFactor = 2.0
     static let selectsBatchSize = 10
@@ -70,7 +69,7 @@ nonisolated enum CullEstimator {
         var photoInput = photos * (imageTokensPerPhoto + stripShare * faceStripTokens)
         let effectiveSystemTokens = systemTokensPerCall
             * (cachedShare * cacheReadMultiplier + (1 - cachedShare))
-        var outputTokens = photos * (outputTokensPerPhoto + (mode.scoresFrames ? scoringOutputTokensPerPhoto : 0))
+        var outputTokens = photos * outputTokensPerPhoto
 
         if mode.hasFinalRound {
             let pool = photos * selectsPoolShare

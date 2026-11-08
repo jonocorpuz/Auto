@@ -173,8 +173,10 @@ nonisolated struct CullDecision: Sendable, Codable, Equatable {
     var keeperID: String?
     var confidence: Double
     var source: DecisionSource
-    /// 1...10 frame score (Strict and Selects only).
+    /// 1...10 frame score, derived from `grades`.
     var score: Int? = nil
+    /// The model's grades, when the model graded this frame.
+    var grades: CullGrades? = nil
 }
 
 nonisolated struct CullPlan: Sendable {

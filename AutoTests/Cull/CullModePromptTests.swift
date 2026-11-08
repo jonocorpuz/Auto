@@ -4,51 +4,29 @@ import Testing
 
 struct CullModePromptTests {
 
-    @Test func fiveDistinctStances() {
-        let stances = CullMode.allCases.map(CullModePrompts.stance)
-        #expect(Set(stances).count == CullMode.allCases.count)
-        for stance in stances {
-            #expect(!stance.isEmpty)
-            #expect(stance.hasPrefix("Stance: "))
+    @Test func gradingGuideDefinesEveryRoleAndAxis() {
+        let guide = CullModePrompts.gradingGuide
+        for role in FrameRole.allCases {
+            #expect(guide.contains("- \(role.rawValue):"), "guide missing role \(role)")
+        }
+        for axis in ["technical:", "composition:", "subject:", "story:", "Moments.", "Calibration:"] {
+            #expect(guide.contains(axis), "guide missing \(axis)")
         }
     }
 
-    @Test func eachStanceCarriesItsOwnRules() {
-        let markers: [CullMode: [String]] = [
-            .gentle: ["Every duplicate", "When unsure, keep", "lens cap"],
-            .balanced: ["single best frame of each moment", "eyes open, then sharp focus on the eyes"],
-            .selective: ["weak and add nothing", "badly cropped"],
-            .strict: ["portfolio editor", "\"mid\" frames", "Score every frame", "entire burst may go"],
-            .selects: ["picture editor", "top 10%", "Score every frame", "later round"],
-        ]
-        for (mode, terms) in markers {
-            let stance = CullModePrompts.stance(mode)
-            for term in terms {
-                #expect(stance.contains(term), "\(mode) missing \(term)")
-            }
-        }
-    }
-
-    @Test func everyStanceKeepsDeliberateCreativeChoices() {
-        for mode in CullMode.allCases {
-            #expect(CullModePrompts.stance(mode).contains("Deliberate creative choices"))
-        }
-    }
-
-    @Test func conservativeStancesCarryRecoveryCaveats() {
-        for mode in [CullMode.gentle, .balanced] {
-            let stance = CullModePrompts.stance(mode)
-            #expect(stance.contains("RAW"))
-            #expect(stance.contains("horizon"))
-            #expect(stance.contains("joint"))
-        }
-    }
-
-    @Test func greatPhotoGuideCoversTheBasicsAndRubric() {
-        let guide = CullModePrompts.greatPhotoGuide
-        for term in ["Moment", "Light", "Composition", "Story", "Technical execution",
-                     "1-3", "4-5", "6-7", "8:", "9-10", "score inflation", "within the group"] {
+    @Test func gradingGuideCarriesTheTuningRules() {
+        let guide = CullModePrompts.gradingGuide
+        for term in ["Scale-aware", "Use 0 when no person matters", "cannot be recovered from RAW",
+                     "someone pointing a camera at the lens", "A busy room is context",
+                     "Feet or limbs cut off", "the app decides"] {
             #expect(guide.contains(term), "guide missing \(term)")
         }
+    }
+
+    @Test func finalRoundGuidePutsStoryFirst() {
+        let guide = CullModePrompts.finalRoundGuide
+        #expect(guide.contains("Story first"))
+        #expect(guide.contains("milestones"))
+        #expect(guide.contains("Variety"))
     }
 }

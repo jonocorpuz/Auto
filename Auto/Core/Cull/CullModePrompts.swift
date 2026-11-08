@@ -1,112 +1,43 @@
 import Foundation
 
-/// The mode-specific half of the cull prompt: one stance per `CullMode` and
-/// the shared "what makes a great photo" guide used by the scoring modes and
-/// the Selects final round. Pure text, no I/O.
+/// The grading guide sent with every cull, whatever the mode: the model only describes
+/// frames, and `CullPolicy` applies the mode. Pure text, no I/O.
 nonisolated enum CullModePrompts {
 
-    /// The stance and task for one mode. Each mode has its own rules; they
-    /// share only the overall shape (who you are, what goes, what stays).
-    static func stance(_ mode: CullMode) -> String {
-        switch mode {
-        case .gentle: gentle
-        case .balanced: balanced
-        case .selective: selective
-        case .strict: strict
-        case .selects: selects
-        }
-    }
+    /// Run section for the first pass. Mode-neutral so it stays cached across runs.
+    static let gradingGuide = """
+        Grade every frame. You only describe frames; the app decides what to keep from your grades and the photographer's chosen strictness. Grade honestly: never raise a grade to save a frame or lower one to lose it.
 
-    private static let gentle = """
-        Stance: safety net. You are only catching frames that are technically broken. Every other frame stays, however ordinary it is.
+        Step 1. Understand the frame before grading it: what is happening, who matters in it, and what part of the event's story it records.
 
-        Reject only:
-        - Black, white or nearly blank frames, lens cap, finger over the lens, shots of the ground or sky fired by accident.
-        - Misfires and frames where the subject is totally out of focus or smeared by motion blur.
-        - Frames where the only subject has both eyes fully closed (not a blink half-way, not a downward glance).
+        role, pick one:
+        - milestone: a key moment of the event: an award or trophy handed over, the winners, a speech or presentation, opening or closing remarks, a performance, a ceremony.
+        - group: people gathered or posed for the camera: a team, the winners, friends.
+        - celebration: cheering, applause, hugging, laughing together, a strong positive reaction.
+        - establishing: a wide view showing the venue, the crowd or the scale of the event.
+        - candid: people doing something: talking, working, listening, networking.
+        - detail: food, decor, signage, swag, products, hands, objects that set the scene.
+        - crew: behind the scenes: another photographer or videographer, someone pointing a camera at the lens, gear, staff setting up.
+        - accidental: the ground, ceiling or sky, a smear, lens cap, a misfire. Nothing was meant to be photographed. Grade it 1 everywhere and move on.
 
-        Keep:
-        - Every duplicate. Near-identical frames of a burst all stay; do not use "keeper".
-        - Mildly soft frames, awkward expressions, imperfect framing and ordinary moments.
-        - Exposure that is off but recoverable from RAW; a crooked horizon that can be straightened; limbs or heads cut at a joint.
-        - Deliberate creative choices: panning or motion blur, silhouettes, low key, intentional shallow focus.
+        Step 2. Grade 1 to 5 (1 very poor, 2 weak, 3 fine, 4 good, 5 excellent).
+        - technical: is the intended subject in focus? Judge the subject, not the whole frame; a soft foreground person in front of a sharp subject is a composition problem, but focus landing on the wrong person is a technical one. Motion blur only counts when unintended. Exposure only counts when it cannot be recovered from RAW. 1 means unusable.
+        - composition: depth (foreground elements, layers, an interesting background), deliberate framing, clean edges, sensible headspace, no large dead areas. A flat frame against a plain wall with nothing else in it is a 2. A busy room is context, not a flaw, when the subject still reads clearly. Feet or limbs cut off in a group or award shot cost one point at most.
+        - subject: how the people who matter look. Smiling, laughing, engaged or attentive is good; bored, sad, blank or awkward is weak. Eyes closed, eating, yawning, mid-word grimace, scratching or picking is a 1. Scale-aware: only prominent faces count; a blink on a small face in a wide crowd shot does not. Use 0 when no person matters in the frame (a detail, an empty venue).
+        - story: how much the frame matters to the event's story and how unique it is. A milestone, or the only frame of a key person or moment, is 5. A group shot of a team is 4. A lively candid with its own moment is 3 to 4. A generic snapshot, or one more frame of something already well covered in this group, is 1 to 2.
 
-        When unsure, keep. Use high confidence only for frames that are unmistakably broken.
+        Step 3. Moments. Label every frame with a moment within this group: "m1", "m2"… Frames share a label only when one would genuinely replace the other: same people, same pose and action, near-identical framing, a fraction of a second apart. A new pose, expression, gesture, framing (horizontal vs vertical, wide vs tight) or subject is a new moment. The app keeps only the best frame of each moment.
+
+        Calibration: grade against professional event coverage. A typical frame is a 3 on every axis. Use the full range.
         """
 
-    private static let balanced = """
-        Stance: one frame per moment. Your job is to collapse bursts down to their best frames and remove obvious failures, nothing more.
-
-        Bursts:
-        1. Sort the frames into distinct moments or poses. A change of pose, expression, gesture, framing or subject is a new moment; a frame a fraction of a second later with the same pose is not.
-        2. Keep the single best frame of each moment. Reject every other frame of that moment as a duplicate, with "keeper" set to the frame you kept.
-        3. Choose the keeper in this order: all eyes open, then sharp focus on the eyes, then the better expression, then the better exposure.
-        4. Every moment keeps exactly one frame, even if all its frames are flawed.
-
-        Singles (a moment with one frame, or a mixed group) are rejected only for clear technical failures: blank or accidental frames, missed focus on the subject, heavy unintended blur, the only subject's eyes fully closed.
-
-        Do not reject for:
-        - Exposure recoverable from RAW.
-        - A crooked horizon, unless straightening it would crop into the subject.
-        - A head or limb cut at a joint, unless another frame of the same moment avoids it (then it simply loses the keeper choice).
-        - Deliberate creative choices: panning or motion blur, silhouettes, low key, intentional shallow focus.
-        """
-
-    private static let selective = """
-        Stance: an editor trimming the set. Bursts collapse to their best frames, and singles must earn their place.
-
-        Bursts:
-        1. Sort the frames into distinct moments or poses. A change of pose, expression, gesture, framing or subject is a new moment.
-        2. Keep the single best frame of each moment; reject the rest as duplicates, with "keeper" set to the frame you kept.
-        3. Choose the keeper in this order: all eyes open, then sharp focus on the eyes, then the better expression, then the better exposure.
-
-        Singles and moment keepers are also rejected when they are weak and add nothing to the set:
-        - Soft focus on the subject, even if not completely missed.
-        - An awkward expression: mid-blink, mid-word, grimace, looking away when the frame needs eye contact.
-        - A cluttered or badly cropped frame: distracting background, objects growing out of heads, the subject jammed against an edge or cut at an awkward joint.
-        - Flat or unflattering light that makes the frame dull.
-        Use criterion "weak" for these. If a weak frame is still the only record of something that matters in the story (a key person, a key moment), keep it.
-
-        Deliberate creative choices (panning or motion blur, silhouettes, low key, intentional shallow focus, unconventional framing that clearly works) are keeps. Exposure recoverable from RAW is not a flaw on its own.
-        """
-
-    private static let strict = """
-        Stance: portfolio editor. You keep only frames the photographer would be proud to deliver or show. Acceptable is not enough.
-
-        - Score every frame with the rubric below, judged against professional work, not against this shoot.
-        - Keep strong frames only (score 6 or more). Reject "mid" frames: technically fine, nothing wrong, but unremarkable, with no real moment, light or composition to carry them. Use criterion "weak" for these.
-        - In a burst, keep at most the best frame of each moment, and only if it is strong; reject the rest with "keeper" set to that frame. An entire burst may go if none of its frames is strong.
-        - Choose between near-identical frames on eyes open, then sharp eyes, then expression, then exposure.
-        - Deliberate creative choices are judged on whether they work, not rejected for being unconventional.
-        - Rejected frames are moved aside, not deleted; do not keep a mid frame out of caution.
-        """
-
-    private static let selects = """
-        Stance: picture editor building the final gallery. Roughly the top 10% of the whole shoot will make it, chosen in a later round that compares candidates across every group. This pass is mainly about scoring.
-
-        - Score every frame on the rubric below. Be harsh and calibrated: most frames of any shoot are a 4 or 5, and the later round relies on scores being comparable across groups.
-        - Reject here only clear failures (blank or accidental frames, missed focus, eyes fully closed on the subject) and obvious duplicates of a better frame in the same moment, with "keeper" set to that frame.
-        - Keep everything else, including mid frames; give them the low score they deserve and let the final round do the ranking.
-        - In a burst, the best frame of each moment should carry the highest score of that moment.
-        - Deliberate creative choices are judged on whether they work.
-        """
-
-    /// What makes a great photo, plus the 1-10 score rubric. Used by Strict,
-    /// Selects and the Selects final round.
-    static let greatPhotoGuide = """
-        What makes a great photo
-        - Moment: the decisive instant. Genuine expression and emotion (a real laugh, a glance, tension, a gesture at its peak) beat a posed or in-between frame.
-        - Light: quality and direction. Soft directional light, rim or back light, light that shapes the face and separates the subject beat flat, harsh-overhead or muddy light.
-        - Composition: a clean background, the subject clearly separated from it, deliberate framing, layering of foreground and background, nothing distracting at the edges, no objects growing out of heads.
-        - Story and uniqueness: the frame says something its neighbours do not. A different angle, moment or emotion is worth more than another good version of the same thing.
-        - Technical execution: critical focus on the nearest eye, motion that is either frozen or blurred on purpose, exposure that serves the mood.
-
-        Score rubric (integer 1-10, relative to professional work)
-        - 1-3: failure. Broken, missed focus, eyes closed, unusable.
-        - 4-5: usable but mid. Nothing wrong, nothing special. An average shoot's median frame is about 5.
-        - 6-7: good. A clear moment or strong light or composition; a client would be happy with it.
-        - 8: strong. Portfolio-worthy; several of moment, light and composition come together.
-        - 9-10: exceptional and rare. A few per shoot at most, often none.
-        Compare frames within the group and use the full range. Avoid score inflation: if every frame scores 7 or more, you are scoring too high.
+    /// Run section for the Selects final round.
+    static let finalRoundGuide = """
+        What makes a select
+        - Story first: milestones (awards, winners, speeches, opening and closing remarks), the group shots of each team, and real celebration carry the gallery. Do not drop them for prettier but generic frames.
+        - Then moment and expression: a real laugh, a reaction, a gesture at its peak beat a posed or in-between frame.
+        - Then composition: depth, foreground and background layers, an interesting background, the subject clearly separated.
+        - Technical execution: the intended subject sharp, motion frozen or blurred on purpose.
+        - Variety: the gallery should cover the whole event: different moments, people, angles and details.
         """
 }

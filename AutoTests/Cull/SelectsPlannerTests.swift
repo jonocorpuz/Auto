@@ -8,9 +8,25 @@ struct SelectsPlannerTests {
         .init(photoID: id, score: score, tiebreak: tie)
     }
 
-    @Test func targetCount() {
-        let expected = [(0, 0), (1, 1), (9, 1), (10, 1), (11, 2), (500, 50)]
+    @Test func targetCountIsAboutFifteenPercent() {
+        let expected = [(0, 0), (1, 1), (9, 1), (10, 2), (11, 2), (500, 75)]
         for (n, t) in expected { #expect(SelectsPlanner.targetCount(photoCount: n) == t) }
+    }
+
+    @Test func softTargetFollowsShootQualityWithinBounds() {
+        // 100 photos: base 15, moves halfway toward the strong count, bounded to 10...20.
+        let expected = [(0, 10), (5, 10), (15, 15), (21, 18), (25, 20), (60, 20)]
+        for (strong, t) in expected {
+            #expect(SelectsPlanner.targetCount(photoCount: 100, strongCount: strong) == t, "strong \(strong)")
+        }
+        #expect(SelectsPlanner.targetCount(photoCount: 0, strongCount: 5) == 0)
+        #expect(SelectsPlanner.targetCount(photoCount: 3, strongCount: 0) == 1)
+    }
+
+    @Test func keyMomentsRankAPointHigher() {
+        var key = cand("k", 6); key.keyMoment = true
+        let pool = SelectsPlanner.pool(from: [cand("a", 6, 0.9), cand("b", 5, 0.9), key], target: 1)
+        #expect(pool.map(\.photoID) == ["k", "a", "b"])
     }
 
     @Test func poolSizeIsTwoAndAHalfTimesTarget() {

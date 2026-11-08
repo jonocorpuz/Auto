@@ -32,6 +32,8 @@ nonisolated enum CullRejectLabel {
             return "Weak shot"
         case "select":
             return "Not a select"
+        case "crew":
+            return "Behind the scenes"
         default:
             return d.keeperID != nil ? "Duplicate" : "Rejected"
         }

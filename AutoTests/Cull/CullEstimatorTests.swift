@@ -52,12 +52,12 @@ struct CullEstimatorTests {
     }
 
     @Test func sonnetHundredPhotosMatchesWrittenAssumptions() {
-        // 100 photos x (1000 + 0.3 x 300) input, 13 calls x 285 effective system tokens,
-        // 4000 output tokens. Point = 112705 x $3/M + 4000 x $15/M = $0.398115.
+        // 100 photos x (1000 + 0.3 x 300) input, 13 calls x 380 effective system tokens,
+        // 5000 output tokens. Point = 113940 x $3/M + 5000 x $15/M = $0.41682.
         let estimate = CullEstimator.estimate(photoCount: 100, model: .sonnet, settings: CullSettings())
         #expect(estimate.calls == 13)
-        #expect(abs(estimate.high - 0.5972) < 0.001)
-        #expect(abs(estimate.low - 0.2787) < 0.001)
+        #expect(abs(estimate.high - 0.62523) < 0.001)
+        #expect(abs(estimate.low - 0.29177) < 0.001)
     }
 
     @Test func disablingFaceStripCriteriaLowersCost() {
@@ -76,7 +76,7 @@ struct CullEstimatorTests {
 
     @Test func modesOrderByCost() {
         #expect(cost(.selects).high > cost(.strict).high)
-        #expect(cost(.strict).high > cost(.balanced).high)
+        #expect(cost(.strict).high == cost(.balanced).high)
         #expect(cost(.gentle).high <= cost(.balanced).high)
         #expect(cost(.selects).calls > cost(.strict).calls)
         #expect(cost(.strict).calls == cost(.balanced).calls)

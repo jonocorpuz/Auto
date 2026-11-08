@@ -12,11 +12,28 @@ nonisolated enum SelectsPlanner {
         let photoID: String
         let score: Int
         let tiebreak: Double
+        /// Milestone, group or celebration: ranked one point higher for the pool and batches.
+        var keyMoment = false
+
+        var rankScore: Int { score + (keyMoment ? 1 : 0) }
     }
 
-    static func targetCount(photoCount: Int) -> Int {
+    /// Score at or above which a frame counts as strong for the soft target.
+    static let strongScore = 7
+    static let minFraction = 0.10
+    static let maxFraction = 0.20
+
+    /// About `keepFraction` of the shoot. With `strongCount` (frames scoring `strongScore`+),
+    /// the target moves halfway toward it, bounded to `minFraction...maxFraction`: a weak shoot
+    /// gives fewer selects, a strong one more.
+    static func targetCount(photoCount: Int, strongCount: Int? = nil) -> Int {
         guard photoCount > 0 else { return 0 }
-        return max(1, Int((keepFraction * Double(photoCount)).rounded(.up)))
+        let n = Double(photoCount)
+        var target = keepFraction * n
+        if let strongCount {
+            target = min(max((target + Double(strongCount)) / 2, minFraction * n), maxFraction * n)
+        }
+        return max(1, Int(target.rounded()))
     }
 
     static func poolSize(target: Int) -> Int {
@@ -25,6 +42,7 @@ nonisolated enum SelectsPlanner {
 
     private static func ranked(_ c: [Candidate]) -> [Candidate] {
         c.sorted {
+            if $0.rankScore != $1.rankScore { return $0.rankScore > $1.rankScore }
             if $0.score != $1.score { return $0.score > $1.score }
             if $0.tiebreak != $1.tiebreak { return $0.tiebreak > $1.tiebreak }
             return $0.photoID < $1.photoID

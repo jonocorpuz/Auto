@@ -120,7 +120,7 @@ nonisolated struct CullRunner: Sendable {
             let triaged = Set(triage.map(\.photoID))
             let remaining = group.photos.filter { !triaged.contains($0.id) }
             if remaining.isEmpty {
-                let decided = CullDecisionValidator.validate(
+                let decided = CullPolicy.decide(
                     group: group, tokens: [:], modelOutput: nil, triage: triage, settings: settings)
                 decisionsByGroup[position] = decided
                 emitRejects(Self.liveRejects(decided, records: records, thumbnailer: thumbnailer))
@@ -162,13 +162,13 @@ nonisolated struct CullRunner: Sendable {
                         let thumbnailer = self.thumbnailer
                         let callIDs = item.callGroup.photos.map(\.id)
                         tg.addTask {
-                            var output: ModelDecisions?
+                            var output: ModelGrades?
                             let started = ContinuousClock.now
                             func ms() -> Int { Int((ContinuousClock.now - started) / .milliseconds(1)) }
                             do {
                                 let response = try await claude.run(req)
                                 tracker.addSpend(response.costUSD ?? 0)
-                                output = try? JSONDecoder().decode(ModelDecisions.self, from: response.structured)
+                                output = try? JSONDecoder().decode(ModelGrades.self, from: response.structured)
                                 callLog.record(kind: "group", label: String(position + 1), photoIDs: callIDs,
                                                response: response, decoded: output != nil, error: nil, durationMS: ms())
                             } catch let error as ClaudeRunnerError {
@@ -183,7 +183,7 @@ nonisolated struct CullRunner: Sendable {
                             } catch {
                                 // Unknown failure: this group falls back to default keeps.
                             }
-                            let decided = CullDecisionValidator.validate(
+                            let decided = CullPolicy.decide(
                                 group: group, tokens: tokens.reverse, modelOutput: output, triage: triage, settings: settings)
                             var previews: [String: PhotoRecord] = [:]
                             for p in group.photos { previews[p.id] = p }
@@ -339,11 +339,16 @@ nonisolated struct CullRunner: Sendable {
         emitRejects: @escaping @Sendable ([CullLiveReject]) -> Void
     ) async -> FinalRoundOutcome {
         typealias Candidate = SelectsPlanner.Candidate
-        let target = SelectsPlanner.targetCount(photoCount: photoCount)
         let candidates = decisions.compactMap { d -> Candidate? in
             guard d.verdict == .keep, let score = d.score else { return nil }
-            return Candidate(photoID: d.photoID, score: score, tiebreak: records[d.photoID].map(PhotoRank.score) ?? 0)
+            return Candidate(photoID: d.photoID, score: score, tiebreak: records[d.photoID].map(PhotoRank.score) ?? 0,
+                             keyMoment: d.grades?.role.isKeyMoment ?? false)
         }
+        let roles = Dictionary(decisions.compactMap { d in d.grades.map { (d.photoID, $0.role.rawValue) } },
+                               uniquingKeysWith: { a, _ in a })
+        let target = SelectsPlanner.targetCount(
+            photoCount: photoCount,
+            strongCount: candidates.filter { $0.score >= SelectsPlanner.strongScore }.count)
         guard candidates.count > target else { return .decided(decisions, byScore: false) }
 
         var decisions = decisions
@@ -406,12 +411,12 @@ nonisolated struct CullRunner: Sendable {
                             }
                             inFlight += 1
                             var tokenToID: [String: String] = [:]
-                            var frames: [(token: String, path: String, score: Int)] = []
+                            var frames: [(token: String, path: String, score: Int, role: String?)] = []
                             for (offset, c) in batch.enumerated() {
                                 let token = "p" + String(format: "%02d", offset + 1)
                                 tokenToID[token] = c.photoID
                                 guard let preview = records[c.photoID]?.preview else { continue }
-                                frames.append((token, prefix + preview.lastPathComponent, c.score))
+                                frames.append((token, prefix + preview.lastPathComponent, c.score, roles[c.photoID]))
                             }
                             let message = CullPromptBuilder.finalRoundUserMessage(
                                 round: round + 1, batch: next, batchCount: batches.count, pick: quota, frames: frames)
@@ -562,7 +567,7 @@ nonisolated struct CullRunner: Sendable {
             systemPrompt: CullPromptBuilder.roleSystemPrompt,
             appendSystemPrompt: runSection,
             userPrompt: message,
-            jsonSchema: CullPromptBuilder.jsonSchema(for: settings.mode),
+            jsonSchema: CullPromptBuilder.jsonSchema,
             workspace: workspaceRoot,
             maxBudgetUSD: budget)
         return (request, TokenMap(forward: tokens))
