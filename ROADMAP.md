@@ -66,6 +66,10 @@ Launch the app and tick each item. These are the UI checks still open.
 - [ ] Cancel a pending folder-drop confirmation when leaving the browser
 - [ ] Shared thumbnail cache for the shoot browser
 
+- [ ] Verify on screen: shoot tile click opens the browser; New Shoot "Separate folders per camera" toggle
+- [ ] Flat layout: re-list names at commit time (commitImport is sync, uses names listed when staging finished)
+- [ ] Card rows and browser tiles still use onTapGesture in a window movable by background; switch to buttons if they miss clicks like the shoot tile did
+
 ## Phase 3: Editing pipeline
 
 - [ ] `PipelineStep` protocol + `Pipeline` runner (ordered, per-step result, re-runnable, cancellable)
@@ -77,7 +81,8 @@ Launch the app and tick each item. These are the UI checks still open.
 
 ## Phase 3b: Photo cull
 
-- [ ] Verify on screen: Cull settings sheet, bottom progress bar during a real cull, Undo Last Cull, result banners
+- [ ] Verify on screen: Cull settings sheet (mode cards, Selects hint, per-mode prompt under Advanced), live rejects grid, bottom progress bar during a real cull, Undo Last Cull, result banners
+- [ ] First real Strict and Selects culls: tune per-mode minConfidence, the Strict score floor (6) and the great-photo rubric against real shoots
 - [ ] First real cull on a small shoot (Haiku) and tune LocalTriage blur/clip thresholds and the eyes-closed ratio (0.18) against real photos
 - [ ] Face-detection test fixture for ImageIOPhotoAnalyzer (eyes closed, edge cut, face strip)
 - [ ] "Review before applying" (toggle exists, does nothing)
@@ -157,5 +162,8 @@ Launch the app and tick each item. These are the UI checks still open.
 | 2026-11-05 | Ingest has priority: culls wait for ingest/sync before analyzing each group and before applying; cull apply, undo, replay and sync share one app-wide lock | Developer preference |
 | 2026-11-05 | Token efficiency: local pre-pass (ImageIO/Vision metrics, burst grouping by time + dHash, local triage) so Claude sees only ~1024px previews + face strips per group, with a cached system prompt and JSON schema output | Cost |
 | 2026-11-05 | Manual import (Add Files sheet + Finder drops) is its own `ImportJob`, not a pseudo-card; it reuses ShootPlanner, CopyEngine, ShootCoverageChecker and the ingest scheduling hooks | Card is tied to volumes; reuse at the seams |
+| 2026-11-07 | Per-shoot layout: camera folders (default) or flat `Video/` + `Photo/`, stored in `.auto-shoot.json`. Flat stem collisions rename the whole RAW+JPEG set ("IMG_1 2"), planned against names already on disk; renamed copies count as backup candidates (checksum decides) | Developer wants an uncategorized dump option without breaking pairing or coverage |
+| 2026-11-07 | Cull strictness slider replaced by five modes (Gentle, Balanced, Selective, Strict, Selects), each with its own prompt; the workspace CLAUDE.md is mode-neutral (no "be conservative"). Default Balanced, budget $10 | Old max was about what the developer wants for the middle |
+| 2026-11-07 | Selects keeps a fixed 10%: pass 1 scores 1-10, then a final round compares the top ~25% across groups in snake-dealt batches; failures and budget fall back to top-by-score | Group-local decisions can't rank a whole shoot |
 | 2026-11-05 | Drops on a shoot/Video/Photo sort by camera via the Add Files sheet; drops on a deeper folder copy exactly there after a confirmation; always copy, never move | Developer preference; no undo in the browser |
 | 2026-11-05 | Import duplicates are matched by checksum anywhere in the primary copy, including `_Rejects` | Culled photos can't come back via a drop |
