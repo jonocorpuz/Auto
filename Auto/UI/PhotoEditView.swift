@@ -166,6 +166,9 @@ private struct CullDetail: View {
             }
             if let run = lastRun {
                 Text(Self.runLine(run)).font(.callout).foregroundStyle(.secondary)
+                if let note = run.note {
+                    Text(note).font(.caption).foregroundStyle(Theme.warning)
+                }
             }
             HStack(spacing: 10) {
                 Button("Start Cull…") { showSettings = true }
