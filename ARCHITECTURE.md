@@ -219,13 +219,19 @@ Auto/                         # repo root
 │   │       └── CullRunner.swift    #   one run: analyze, group, triage, Claude per group, policy, apply
 │   │   └── VideoEdit/              #   video edit (sync + Resolve) engines
 │   │       ├── VideoEditSettings.swift # options + defaults store
-│   │       └── VideoEditReadiness.swift # pre-run checklist (footage, main copy, MCP, Resolve open)
+│   │       ├── VideoEditReadiness.swift # pre-run checklist (footage, main copy, MCP, Resolve open)
+│   │       ├── VideoCatalog.swift  #   AudioSyncSource list: clips + recorder audio under Video/<camera>
+│   │       ├── AudioEnvelope.swift #   EnvelopeBuilder: mono 8 kHz -> 100 Hz log-loudness onset curve (gain-independent)
+│   │       ├── AudioSyncMatcher.swift # FFT cross-correlation: offset, correlation, peak ratio
+│   │       ├── AudioSyncPlanner.swift # events per recording, merges recorders, flags weak matches, assigns tracks
+│   │       └── AudioSyncAnalyzer.swift # catalog -> read -> match -> plan (read-only)
 │   ├── Integrations/         # adapters behind protocols; faked in tests
 │   │   ├── ThumbnailProvider.swift #   protocol: preview image for a media file
 │   │   ├── QLThumbnailProvider.swift # QuickLookThumbnailing adapter
 │   │   ├── QuickLookPreviewer.swift # shared Quick Look panel; takes control via the responder chain (AppDelegate forwards)
 │   │   ├── ClaudeRunner.swift      #   Claude run interface (cull; video edit adds an MCP config + tool allowlist)
 │   │   ├── ResolveMCP.swift        #   reuses the user's `davinci-resolve` MCP entry from ~/.claude.json for headless runs
+│   │   ├── ClipAudioReader.swift   #   ClipAudioReading + AVClipAudioReader (AVAssetReader audio mix -> envelope)
 │   │   ├── ClaudeCLIRunner.swift   #   `claude -p` adapter (posix_spawn in its own process group, cancel/timeout)
 │   │   ├── CullWorkspace.swift     #   app-managed workspace for `claude -p` (own CLAUDE.md, Read-only settings)
 │   │   ├── PhotoAnalyzer.swift     #   photo analysis interface (local metrics + previews)

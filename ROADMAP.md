@@ -95,10 +95,11 @@ Launch the app and tick each item. These are the UI checks still open.
 Main feature: every speech and ceremony synced across cameras and recorders on its own Resolve timeline. Junk clips (accidental records) are left out. Auto gathers evidence locally for free; a Claude session drives Resolve through the user's `davinci-resolve` MCP server and reasons through the cases the evidence can't settle.
 
 - [x] Claude runs can carry an MCP config + tool allowlist; `ResolveMCP` reuses the user-scope `davinci-resolve` entry from `~/.claude.json`
-- [ ] Clip catalog: start time, duration, fps, timecode, camera, audio channels (AVFoundation)
+- [x] Clip catalog: `VideoCatalog` (clips + recorder audio under `Video/<camera>`), `AVClipAudioReader` (duration, fps, mono 8 kHz onset envelope)
 - [ ] Junk-clip check: very short, mostly black, dark + silent + static. Never moved; Rejects bin, off the timelines
-- [ ] Event grouping: overlapping clips across cameras/recorders; per-camera clock offset learned from strong matches
-- [ ] Audio sync candidates: cross-correlation (Accelerate), offset within one frame + confidence; recorder is the backbone when present
+- [x] Audio sync: `AudioSyncMatcher` (FFT cross-correlation of onset curves, sub-frame offset, correlation + peak ratio), `AudioSyncPlanner` (one event per recording, recorders that hear each other merge, best recording per clip, weak matches flagged, camera tracks), `AudioSyncAnalyzer`
+- [ ] Tune `AudioSyncThresholds` (0.30 / 1.5, weak 0.15 / 1.2) on a real shoot with recorder files
+- [ ] Events without a recorder (camera-only speeches): anchor on the longest clip
 - [ ] Edit run: workspace + prompt + JSON report; Claude builds bins, one stacked timeline per event, an "Everything else" timeline, review markers on low-confidence clips; per-run analysis log like the cull
 - [x] Video Edit tab: shoot list, readiness checklist (footage, main copy, MCP, Resolve open), sync/junk options, model; Build button disabled until the engine lands
 - [x] Verify on screen: Video Edit tab (2026-11-08)
