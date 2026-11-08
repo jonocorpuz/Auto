@@ -153,8 +153,8 @@ Auto/                         # repo root
 │   │   ├── ShootTile.swift   #   one shoot in the grid: thumbnail, counts, offline/missing state, sync badge, Copies menu, actions
 │   │   ├── ShootSyncPopover.swift #   per-shoot sync popover: copies, last check, Check Again (⌥ deep), Verify Contents, Sync Now, Stop
 │   │   ├── EditPlaceholderView.swift # empty Video Edit tab
-│   │   ├── PhotoEditView.swift #   Photo Edit tab: photo cull, bottom progress bar, result banners
-│   │   ├── CullSettingsSheet.swift #   cull settings: criteria, aggressiveness, model, budget
+│   │   ├── PhotoEditView.swift #   Photo Edit tab: photo cull, bottom progress bar, result banners, live rejects grid (CullLiveRejectsGrid)
+│   │   ├── CullSettingsSheet.swift #   cull settings: criteria, mode cards, model, Advanced (budget, per-mode prompt)
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
 │   │   ├── CardRow.swift     #   per-card header, phase content and actions, Add to Shoot menu, per-camera day chips; static StatusDot
 │   │   ├── CardBrowserView.swift # read-only Finder-style card browser (icons/list, locations sidebar); opened by clicking a card
@@ -203,7 +203,11 @@ Auto/                         # repo root
 │   │       ├── PhotoCatalog.swift  #   photos on the primary copy's Photo/<cam> folders
 │   │       ├── PhotoGrouper.swift  #   burst grouping by capture time + dHash
 │   │       ├── LocalTriage.swift   #   local pre-pass (blur, clipping, eyes closed) before Claude
-│   │       ├── CullPromptBuilder.swift # cached system prompt, per-group run section, JSON schema
+│   │       ├── CullMode.swift      #   Gentle/Balanced/Selective/Strict/Selects and their thresholds
+│   │       ├── CullModePrompts.swift # per-mode stance text + great-photo guide and score rubric
+│   │       ├── CullPromptBuilder.swift # mode-neutral workspace CLAUDE.md, per-mode run section and schema, final-round prompts
+│   │       ├── SelectsRound.swift  #   Selects final round planning: pool, snake batches, exact quotas, merge
+│   │       ├── CullLiveReject.swift #  streamed reject + short tag label for the live grid
 │   │       ├── CullEstimator.swift #   cull cost estimate
 │   │       ├── CullDecisionValidator.swift # checks Claude's decisions before any move
 │   │       ├── CullJournal.swift   #   write-ahead journal in <shoot>/.auto-cull/ for undo
