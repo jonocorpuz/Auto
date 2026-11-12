@@ -9,9 +9,10 @@ nonisolated protocol CullApplying: Sendable {
 /// Orchestrates one cull: catalog, analyze locally, ask Claude per group, then apply.
 /// Nothing is moved until every group is decided; a stop during apply rolls the moves back.
 ///
-/// Efficiency note: every photo is analyzed once at `PreviewSpec.longEdge` 1024 (grouping needs
-/// metrics first, so a smaller first pass would cost a second decode). Mixed groups therefore
-/// get 1024px previews too, slightly more image tokens than the 768 the plan allows.
+/// Every photo is analyzed once at `previewLongEdge` (grouping needs metrics first, so a smaller
+/// first pass would cost a second decode). Mixed groups therefore get the same previews as bursts.
+///
+/// The steps live in extensions: `CullRunner+FirstPass`, `CullRunner+FinalRound`, `CullRunner+Apply`.
 nonisolated struct CullRunner: Sendable {
     let analyzer: any PhotoAnalyzer
     let claude: any ClaudeRunner
@@ -21,6 +22,8 @@ nonisolated struct CullRunner: Sendable {
 
     static let previewLongEdge = 1024
 
+    typealias ApplyLock = @Sendable (@concurrent @Sendable () async throws -> Void) async throws -> Void
+
     /// `@concurrent`: the applier blocks its thread, so the run must never execute on the caller's (main) actor.
     @concurrent
     func run(
@@ -29,29 +32,35 @@ nonisolated struct CullRunner: Sendable {
         cardVolumes: [URL],
         settings rawSettings: CullSettings,
         gate: @escaping @Sendable () async -> Void,
-        withApplyLock: @escaping @Sendable (@concurrent @Sendable () async throws -> Void) async throws -> Void,
+        withApplyLock: @escaping ApplyLock,
         onProgress: @escaping @MainActor @Sendable (CullProgress) -> Void,
         onRejects: @escaping @MainActor @Sendable ([CullLiveReject]) -> Void = { _ in }
     ) async -> CullOutcome {
-        // Progress flows through an unbounded stream (tiny values, so no phase is ever dropped) consumed on the main actor and awaited before returning.
-        let (stream, yield) = AsyncStream<CullProgress>.makeStream(bufferingPolicy: .unbounded)
-        let consumer = Task { @MainActor in
-            for await p in stream { onProgress(p) }
+        // Progress and live rejects flow through unbounded streams (tiny values, so nothing is ever
+        // dropped), consumed on the main actor and awaited before returning.
+        let (progressStream, progressInput) = AsyncStream<CullProgress>.makeStream(bufferingPolicy: .unbounded)
+        let progressConsumer = Task { @MainActor in
+            for await progress in progressStream { onProgress(progress) }
         }
-        // Live rejects: every batch must arrive, so the stream is unbounded.
-        let (rejectStream, rejectYield) = AsyncStream<[CullLiveReject]>.makeStream(bufferingPolicy: .unbounded)
+        let (rejectStream, rejectInput) = AsyncStream<[CullLiveReject]>.makeStream(bufferingPolicy: .unbounded)
         let rejectConsumer = Task { @MainActor in
             for await batch in rejectStream { onRejects(batch) }
         }
-        let tracker = ProgressTracker { _ = yield.yield($0) }
-        let emitRejects: @Sendable ([CullLiveReject]) -> Void = { batch in
-            if !batch.isEmpty { _ = rejectYield.yield(batch) }
-        }
-        let outcome = await execute(copies: copies, cardVolumes: cardVolumes, settings: rawSettings.clamped(),
-                                    gate: gate, withApplyLock: withApplyLock, tracker: tracker, emitRejects: emitRejects)
-        yield.finish()
-        rejectYield.finish()
-        await consumer.value
+
+        let context = CullRunContext(
+            runID: UUID(),
+            settings: rawSettings.clamped(),
+            gate: gate,
+            tracker: CullProgressTracker { _ = progressInput.yield($0) },
+            callLog: CullCallLog(),
+            emitRejects: { batch in
+                if !batch.isEmpty { _ = rejectInput.yield(batch) }
+            })
+        let outcome = await execute(copies: copies, cardVolumes: cardVolumes, withApplyLock: withApplyLock, context: context)
+
+        progressInput.finish()
+        rejectInput.finish()
+        await progressConsumer.value
         await rejectConsumer.value
         return outcome
     }
@@ -61,16 +70,14 @@ nonisolated struct CullRunner: Sendable {
     private func execute(
         copies: [URL],
         cardVolumes: [URL],
-        settings: CullSettings,
-        gate: @escaping @Sendable () async -> Void,
-        withApplyLock: @escaping @Sendable (@concurrent @Sendable () async throws -> Void) async throws -> Void,
-        tracker: ProgressTracker,
-        emitRejects: @escaping @Sendable ([CullLiveReject]) -> Void
+        withApplyLock: @escaping ApplyLock,
+        context: CullRunContext
     ) async -> CullOutcome {
         guard let primary = copies.first else { return .failed(.noCopiesOnline, nil) }
-        let runID = UUID()
+        let runID = context.runID
+        let settings = context.settings
+        let tracker = context.tracker
         let runDate = Date()
-        let callLog = CullCallLog()
         defer { CullWorkspace.removeRun(workspaceRoot, runID: runID) }
 
         // 1. Catalog.
@@ -85,7 +92,7 @@ nonisolated struct CullRunner: Sendable {
         }
         if Task.isCancelled { return .stopped(nil) }
         guard !scanned.isEmpty else { return .failed(.noPhotos, nil) }
-        tracker.set(.cataloging, 0.02)
+        tracker.set(.cataloging, CullProgressScale.cataloged)
 
         // 2. Workspace.
         let runDir: URL
@@ -97,503 +104,210 @@ nonisolated struct CullRunner: Sendable {
             return .failed(.claudeFailed("Couldn't prepare the cull workspace: \(error.localizedDescription)"), nil)
         }
 
-        // 3. Local analysis, bounded concurrency.
-        let analyzed = await analyzeAll(scanned, primary: primary, runDir: runDir, settings: settings, tracker: tracker)
+        // 3. Local analysis, then grouping.
+        let analyzed = await analyzeAll(scanned, primary: primary, runDir: runDir, context: context)
         if Task.isCancelled { return .stopped(nil) }
-
         let groups = PhotoGrouper.group(analyzed)
-        var records: [String: PhotoRecord] = [:]
-        for r in scanned { records[r.id] = r }
-        for r in analyzed { records[r.id] = r }
+        let records = Self.recordsByID(scanned: scanned, analyzed: analyzed)
 
-        // 4. Triage, and the work list for Claude.
-        struct Work {
-            let position: Int
-            let group: PhotoGroup
-            let callGroup: PhotoGroup
-            let triage: [CullDecision]
-        }
-        var decisionsByGroup: [Int: [CullDecision]] = [:]
-        var work: [Work] = []
-        for (position, group) in groups.enumerated() {
-            let triage = group.photos.compactMap { LocalTriage.decide($0, settings: settings) }
-            let triaged = Set(triage.map(\.photoID))
-            let remaining = group.photos.filter { !triaged.contains($0.id) }
-            if remaining.isEmpty {
-                let decided = CullPolicy.decide(
-                    group: group, tokens: [:], modelOutput: nil, triage: triage, settings: settings)
-                decisionsByGroup[position] = decided
-                emitRejects(Self.liveRejects(decided, records: records, thumbnailer: thumbnailer))
-            } else {
-                let call = PhotoGroup(id: group.id, kind: group.kind, camera: group.camera, photos: remaining)
-                work.append(Work(position: position, group: group, callGroup: call, triage: triage))
-            }
-        }
-        let groupsTotal = groups.count
-        var groupsDone = groups.count - work.count
-        let passOneSpan = settings.mode.hasFinalRound ? 0.50 : 0.65
-        tracker.set(.analyzing(done: groupsDone, total: groupsTotal), analyzingFraction(groupsDone, groupsTotal, passOneSpan))
-
-        // 5. Claude calls, sliding window.
-        let runSection = CullPromptBuilder.runSection(settings: settings)
-        var budgetHit = false
-        var fatal: ClaudeRunnerError?
-        do {
-            try await withThrowingTaskGroup(of: (Int, [CullDecision]).self) { tg in
-                var next = 0
-                var inFlight = 0
-                while next < work.count || inFlight > 0 {
-                    while inFlight < settings.maxConcurrentCalls, next < work.count, !budgetHit {
-                        if Task.isCancelled { throw CancellationError() }
-                        await gate()
-                        if Task.isCancelled { throw CancellationError() }
-                        if tracker.spent >= settings.maxRunBudgetUSD { budgetHit = true; break }
-                        let item = work[next]
-                        next += 1
-                        inFlight += 1
-                        let request = makeRequest(item.callGroup, index: item.position + 1, count: groupsTotal,
-                                                  runID: runID, settings: settings, runSection: runSection)
-                        let triage = item.triage
-                        let group = item.group
-                        let tokens = request.tokens
-                        let claude = self.claude
-                        let req = request.request
-                        let position = item.position
-                        let thumbnailer = self.thumbnailer
-                        let callIDs = item.callGroup.photos.map(\.id)
-                        tg.addTask {
-                            var output: ModelGrades?
-                            let started = ContinuousClock.now
-                            func ms() -> Int { Int((ContinuousClock.now - started) / .milliseconds(1)) }
-                            do {
-                                let response = try await claude.run(req)
-                                tracker.addSpend(response.costUSD ?? 0)
-                                output = try? JSONDecoder().decode(ModelGrades.self, from: response.structured)
-                                callLog.record(kind: "group", label: String(position + 1), photoIDs: callIDs,
-                                               response: response, decoded: output != nil, error: nil, durationMS: ms())
-                            } catch let error as ClaudeRunnerError {
-                                callLog.record(kind: "group", label: String(position + 1), photoIDs: callIDs,
-                                               response: nil, decoded: false, error: error, durationMS: ms())
-                                switch error {
-                                case .notInstalled, .notLoggedIn: throw error
-                                default: break
-                                }
-                            } catch is CancellationError {
-                                throw CancellationError()
-                            } catch {
-                                // Unknown failure: this group falls back to default keeps.
-                            }
-                            let decided = CullPolicy.decide(
-                                group: group, tokens: tokens.reverse, modelOutput: output, triage: triage, settings: settings)
-                            var previews: [String: PhotoRecord] = [:]
-                            for p in group.photos { previews[p.id] = p }
-                            emitRejects(Self.liveRejects(decided, records: previews, thumbnailer: thumbnailer))
-                            return (position, decided)
-                        }
-                    }
-                    guard inFlight > 0 else { break }
-                    if let (position, decided) = try await tg.next() {
-                        inFlight -= 1
-                        decisionsByGroup[position] = decided
-                        groupsDone += 1
-                        tracker.set(.analyzing(done: groupsDone, total: groupsTotal),
-                                    analyzingFraction(groupsDone, groupsTotal, passOneSpan))
-                    }
-                }
-            }
-        } catch let error as ClaudeRunnerError {
-            fatal = error
-        } catch {
-            return .stopped(nil)
-        }
+        // 4. First pass: local triage, then Claude grades whatever triage left undecided.
+        let firstPass = await runFirstPass(groups: groups, records: records, context: context)
+        if case .stopped = firstPass.ending { return .stopped(nil) }
         if Task.isCancelled { return .stopped(nil) }
-        if let fatal {
-            return .failed(fatal == .notInstalled ? .claudeNotInstalled : .claudeNotLoggedIn, nil)
-        }
-        if budgetHit {
+        if case .fatal(let error) = firstPass.ending { return .failed(Self.setupError(error), nil) }
+        if case .finished(budgetReached: true) = firstPass.ending {
             return .failed(.budgetExceeded(tracker.spent), nil)
         }
-
-        var decisions = groups.indices.flatMap { decisionsByGroup[$0] ?? [] }
+        var decisions = groups.indices.flatMap { firstPass.decisionsByGroup[$0] ?? [] }
         var runNote: String?
 
-        // 5b. Selects final round: only the best frames across the whole shoot stay.
+        // 5. Selects final round: only the best frames across the whole shoot stay.
         if settings.mode.hasFinalRound {
-            switch await finalRound(decisions, records: records, photoCount: scanned.count, runID: runID,
-                                    settings: settings, gate: gate, tracker: tracker, callLog: callLog,
-                                    emitRejects: emitRejects) {
-            case .decided(let d, let byScore):
-                decisions = d
+            switch await finalRound(decisions, records: records, photoCount: scanned.count, context: context) {
+            case .decided(let finalDecisions, let byScore):
+                decisions = finalDecisions
                 if byScore { runNote = "Final round finished by score (budget reached)" }
-            case .stopped: return .stopped(nil)
-            case .fatal(let error): return .failed(error == .notInstalled ? .claudeNotInstalled : .claudeNotLoggedIn, nil)
+            case .stopped:
+                return .stopped(nil)
+            case .fatal(let error):
+                return .failed(Self.setupError(error), nil)
             }
             if Task.isCancelled { return .stopped(nil) }
         }
 
         // 6. Plan.
-        let rejectCount = decisions.filter { $0.verdict == .reject }.count
-        var draft = CullPlan(runID: runID, settings: settings, decisions: decisions, records: records, catalogCopy: primary)
-        draft.spentUSD = tracker.spent
-        draft.groupsDone = groupsDone
-        draft.groupsTotal = groupsTotal
-        draft.note = runNote
-        let plan = draft
+        var plan = CullPlan(runID: runID, settings: settings, decisions: decisions, records: records, catalogCopy: primary)
+        plan.spentUSD = tracker.spent
+        plan.groupsDone = firstPass.groupsDone
+        plan.groupsTotal = groups.count
+        plan.note = runNote
+
         // Diagnostic report for prompt tuning; a failed write never stops the cull.
         let report = CullAnalysisReport(
             runID: runID, date: runDate, mode: settings.mode, model: settings.model,
             promptVersion: CullPromptBuilder.promptVersion, criteria: settings.criteria.sorted(),
-            photos: scanned.count, spentUSD: tracker.spent, calls: callLog.records, decisions: decisions)
+            photos: scanned.count, spentUSD: tracker.spent, calls: context.callLog.records, decisions: decisions)
         _ = try? CullAnalysisLog.write(report, in: primary)
-        let groupsDoneFinal = groupsDone
-        let finalNote = runNote
-        let summary: @Sendable (Int, Bool) -> CullRunSummary = { rejected, undone in
-            CullRunSummary(runID: runID, date: Date(), model: settings.model, photos: scanned.count, rejected: rejected,
-                           groupsDone: groupsDoneFinal, groupsTotal: groupsTotal, spentUSD: tracker.spent, undone: undone, note: finalNote)
+
+        let photoCount = scanned.count
+        let groupsDone = firstPass.groupsDone
+        let groupsTotal = groups.count
+        let note = runNote
+        let summary: SummaryMaker = { rejected, undone in
+            CullRunSummary(runID: runID, date: Date(), model: settings.model, photos: photoCount, rejected: rejected,
+                           groupsDone: groupsDone, groupsTotal: groupsTotal, spentUSD: tracker.spent, undone: undone, note: note)
         }
+
+        let rejectCount = decisions.filter { $0.verdict == .reject }.count
         if rejectCount == 0 {
             tracker.set(.applying(done: 0, total: 0), 1)
             return .completed(summary(0, false))
         }
 
         // 7. Apply under the shared lock.
-        let result = ApplyResult()
-        let applier = self.applier
-        do {
-            try await withApplyLock {
-                if Task.isCancelled { result.set(.stopped(nil)); return }
-                tracker.set(.applying(done: 0, total: rejectCount), 0.95)
-                var applyError: Error?
-                var moved = 0
-                do {
-                    moved = try applier.apply(plan, copies: copies, cardVolumes: cardVolumes) { done, total in
-                        tracker.set(.applying(done: done, total: total), 0.95 + 0.05 * ratio(done, total))
-                    }
-                } catch {
-                    applyError = error
-                }
-                let cancelled = Task.isCancelled || applyError is CancellationError
-                if cancelled || applyError != nil {
-                    // Revert must complete, so it runs in a task that is never cancelled.
-                    let revertError: Error? = await Task.detached {
-                        do {
-                            try applier.revert(runID: runID, copies: copies, cardVolumes: cardVolumes) { done, total in
-                                tracker.setRaw(.reverting(done: done, total: total), 0.95 * (1 - ratio(done, total)))
-                            }
-                            return nil
-                        } catch {
-                            return error
-                        }
-                    }.value
-                    if cancelled {
-                        if let revertError, !(revertError is CullError && (revertError as? CullError) == .nothingToUndo) {
-                            result.set(.failed(Self.cullError(revertError), nil))
-                        } else {
-                            result.set(.stopped(summary(rejectCount, true)))
-                        }
-                    } else if let applyError {
-                        result.set(.failed(Self.cullError(applyError), nil))
-                    }
-                    return
-                }
-                tracker.set(.applying(done: moved, total: moved), 1)
-                result.set(.completed(summary(moved, false)))
-            }
-        } catch {
-            if result.value == nil {
-                return Task.isCancelled || error is CancellationError ? .stopped(nil) : .failed(Self.cullError(error), nil)
-            }
-        }
-        return result.value ?? .stopped(nil)
+        return await applyUnderLock(plan, rejectCount: rejectCount, copies: copies, cardVolumes: cardVolumes,
+                                    withApplyLock: withApplyLock, tracker: tracker, summary: summary)
     }
 
-    private static func cullError(_ error: Error) -> CullError {
-        (error as? CullError) ?? .journalWriteFailed(error.localizedDescription)
-    }
-
-    // MARK: - Selects final round
-
-    private enum FinalRoundOutcome {
-        /// `byScore`: the budget ran out and the remaining rounds finished with the score fallback.
-        case decided([CullDecision], byScore: Bool)
-        case stopped
-        case fatal(ClaudeRunnerError)
-    }
-
-    private struct FinalPicks: Decodable {
-        struct Pick: Decodable { let id: String; let reason: String? }
-        let picks: [Pick]
-    }
-
-    /// Cuts the scored keeps down to `SelectsPlanner.targetCount`. Unscored keeps are outside the quota.
-    /// A failed batch falls back to its top scores; only a fatal Claude error, the budget or a stop ends the run.
-    private func finalRound(
-        _ decisions: [CullDecision],
-        records: [String: PhotoRecord],
-        photoCount: Int,
-        runID: UUID,
-        settings: CullSettings,
-        gate: @escaping @Sendable () async -> Void,
-        tracker: ProgressTracker,
-        callLog: CullCallLog,
-        emitRejects: @escaping @Sendable ([CullLiveReject]) -> Void
-    ) async -> FinalRoundOutcome {
-        typealias Candidate = SelectsPlanner.Candidate
-        let candidates = decisions.compactMap { d -> Candidate? in
-            guard d.verdict == .keep, let score = d.score else { return nil }
-            return Candidate(photoID: d.photoID, score: score, tiebreak: records[d.photoID].map(PhotoRank.score) ?? 0,
-                             keyMoment: d.grades?.role.isKeyMoment ?? false)
-        }
-        let roles = Dictionary(decisions.compactMap { d in d.grades.map { (d.photoID, $0.role.rawValue) } },
-                               uniquingKeysWith: { a, _ in a })
-        let target = SelectsPlanner.targetCount(
-            photoCount: photoCount,
-            strongCount: candidates.filter { $0.score >= SelectsPlanner.strongScore }.count)
-        guard candidates.count > target else { return .decided(decisions, byScore: false) }
-
-        var decisions = decisions
-        let candidateIDs = Set(candidates.map(\.photoID))
-        func cut(keeping keep: Set<String>, among ids: Set<String>) -> [CullDecision] {
-            var cuts: [CullDecision] = []
-            for i in decisions.indices where ids.contains(decisions[i].photoID) && !keep.contains(decisions[i].photoID) {
-                decisions[i].verdict = .reject
-                decisions[i].criterion = "select"
-                decisions[i].reason = "not a select"
-                decisions[i].keeperID = nil
-                decisions[i].confidence = 1
-                decisions[i].source = .finalRound
-                cuts.append(decisions[i])
-            }
-            return cuts
-        }
-
-        let pool = SelectsPlanner.pool(from: candidates, target: target)
-        let poolIDs = Set(pool.map(\.photoID))
-        emitRejects(Self.liveRejects(cut(keeping: poolIDs, among: candidateIDs), records: records, thumbnailer: thumbnailer))
-
-        let size = SelectsPlanner.batchSize
-        let plan = SelectsPlanner.roundPlan(poolCount: pool.count, target: target, batchSize: size)
-        let befores = [pool.count] + plan.dropLast()
-        let totalCalls = befores.reduce(0) { $0 + ($1 + size - 1) / size }
-        var done = 0
-        tracker.set(.finalRound(done: 0, total: totalCalls), 0.80)
-
-        let prefix = "runs/\(runID.uuidString)/"
-        var survivors = pool
-        var budgetHit = false
-        for (round, after) in plan.enumerated() {
-            let batches = SelectsPlanner.batches(survivors, size: size)
-            var picked: [Candidate] = []
-            let quotas = SelectsPlanner.quotas(batchSizes: batches.map(\.count), survivorsAfter: after)
-            do {
-                try await withThrowingTaskGroup(of: [Candidate].self) { tg in
-                    var next = 0
-                    var inFlight = 0
-                    while next < batches.count || inFlight > 0 {
-                        while inFlight < settings.maxConcurrentCalls, next < batches.count {
-                            if Task.isCancelled { throw CancellationError() }
-                            if !budgetHit {
-                                await gate()
-                                if Task.isCancelled { throw CancellationError() }
-                                if tracker.spent >= settings.maxRunBudgetUSD { budgetHit = true }
-                            }
-                            let batch = batches[next]
-                            let quota = quotas[next]
-                            next += 1
-                            let hasPreview = batch.contains { records[$0.photoID]?.preview != nil }
-                            if budgetHit || quota == 0 || !hasPreview {
-                                // No call: the batch keeps its top scores.
-                                picked += SelectsPlanner.merge(picks: [], batch: batch, quota: quota)
-                                done += 1
-                                tracker.set(.finalRound(done: done, total: totalCalls),
-                                            0.80 + 0.15 * ratio(done, totalCalls))
-                                continue
-                            }
-                            inFlight += 1
-                            var tokenToID: [String: String] = [:]
-                            var frames: [(token: String, path: String, score: Int, role: String?)] = []
-                            for (offset, c) in batch.enumerated() {
-                                let token = "p" + String(format: "%02d", offset + 1)
-                                tokenToID[token] = c.photoID
-                                guard let preview = records[c.photoID]?.preview else { continue }
-                                frames.append((token, prefix + preview.lastPathComponent, c.score, roles[c.photoID]))
-                            }
-                            let message = CullPromptBuilder.finalRoundUserMessage(
-                                round: round + 1, batch: next, batchCount: batches.count, pick: quota, frames: frames)
-                            let estimate = CullEstimator.estimate(photoCount: batch.count, model: settings.model, settings: settings)
-                            let request = ClaudeRequest(
-                                model: settings.model.rawValue,
-                                systemPrompt: CullPromptBuilder.finalRoundSystemPrompt,
-                                appendSystemPrompt: CullPromptBuilder.finalRoundRunSection(settings: settings),
-                                userPrompt: message,
-                                jsonSchema: CullPromptBuilder.finalRoundSchema,
-                                workspace: workspaceRoot,
-                                maxBudgetUSD: min(max(3 * estimate.high, 0.05), 1.00))
-                            let claude = self.claude
-                            let ids = tokenToID
-                            let label = "r\(round + 1)b\(next)"
-                            let batchIDs = batch.map(\.photoID)
-                            tg.addTask {
-                                var picks: [String] = []
-                                let started = ContinuousClock.now
-                                func ms() -> Int { Int((ContinuousClock.now - started) / .milliseconds(1)) }
-                                do {
-                                    let response = try await claude.run(request)
-                                    tracker.addSpend(response.costUSD ?? 0)
-                                    let out = try? JSONDecoder().decode(FinalPicks.self, from: response.structured)
-                                    if let out { picks = out.picks.compactMap { ids[$0.id] } }
-                                    callLog.record(kind: "final", label: label, photoIDs: batchIDs, response: response,
-                                                   decoded: out != nil, error: nil, durationMS: ms())
-                                } catch let error as ClaudeRunnerError {
-                                    callLog.record(kind: "final", label: label, photoIDs: batchIDs, response: nil,
-                                                   decoded: false, error: error, durationMS: ms())
-                                    switch error {
-                                    case .notInstalled, .notLoggedIn: throw error
-                                    default: break
-                                    }
-                                } catch is CancellationError {
-                                    throw CancellationError()
-                                } catch {
-                                    // Unknown failure: this batch falls back to its top scores.
-                                }
-                                return SelectsPlanner.merge(picks: picks, batch: batch, quota: quota)
-                            }
-                        }
-                        guard inFlight > 0 else { break }
-                        if let merged = try await tg.next() {
-                            inFlight -= 1
-                            picked += merged
-                            done += 1
-                            tracker.set(.finalRound(done: done, total: totalCalls),
-                                        0.80 + 0.15 * ratio(done, totalCalls))
-                        }
-                    }
-                }
-            } catch let error as ClaudeRunnerError {
-                return .fatal(error)
-            } catch {
-                return .stopped
-            }
-            if Task.isCancelled { return .stopped }
-            survivors = SelectsPlanner.trim(picked, to: after)
-        }
-
-        let finalIDs = Set(survivors.map(\.photoID))
-        emitRejects(Self.liveRejects(cut(keeping: finalIDs, among: poolIDs), records: records, thumbnailer: thumbnailer))
-        return .decided(decisions, byScore: budgetHit)
-    }
-
-    // MARK: - Live rejects
-
-    /// Rejects with a thumbnail of their run-dir preview; call before the run dir is removed.
-    private static func liveRejects(
-        _ decisions: [CullDecision], records: [String: PhotoRecord], thumbnailer: any RejectThumbnailer
-    ) -> [CullLiveReject] {
-        decisions.filter { $0.verdict == .reject }.map { d in
-            CullLiveReject(id: d.photoID, label: CullRejectLabel.label(for: d), reason: d.reason,
-                           thumbnailJPEG: records[d.photoID]?.preview.flatMap { thumbnailer.thumbnail(preview: $0) })
-        }
+    /// Every scanned photo by id; the analyzed version (with metrics and preview) wins where there is one.
+    private static func recordsByID(scanned: [PhotoRecord], analyzed: [PhotoRecord]) -> [String: PhotoRecord] {
+        var records: [String: PhotoRecord] = [:]
+        for record in scanned { records[record.id] = record }
+        for record in analyzed { records[record.id] = record }
+        return records
     }
 
     // MARK: - Local analysis
 
+    /// Analyzes every photo, one task per CPU core at a time. Photos that fail to analyze are left out.
     private func analyzeAll(
-        _ records: [PhotoRecord], primary: URL, runDir: URL, settings: CullSettings, tracker: ProgressTracker
+        _ records: [PhotoRecord], primary: URL, runDir: URL, context: CullRunContext
     ) async -> [PhotoRecord] {
-        let faceStrips = settings.criteria.contains(CullCriterion.eyes.id) || settings.criteria.contains(CullCriterion.cropped.id)
-        let spec = PreviewSpec(longEdge: Self.previewLongEdge, faceStrips: faceStrips)
-        let width = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let criteria = context.settings.criteria
+        let wantsFaceStrips = criteria.contains(CullCriterion.eyes.id) || criteria.contains(CullCriterion.cropped.id)
+        let spec = PreviewSpec(longEdge: Self.previewLongEdge, faceStrips: wantsFaceStrips)
+        let maxConcurrent = max(1, ProcessInfo.processInfo.activeProcessorCount)
         let analyzer = self.analyzer
-        var out: [PhotoRecord?] = Array(repeating: nil, count: records.count)
-        var done = 0
+        let tracker = context.tracker
         let total = records.count
-        tracker.set(.preparing(done: 0, total: total), 0.02)
 
-        await withTaskGroup(of: (Int, PhotoRecord?).self) { tg in
+        var analyzed: [PhotoRecord?] = Array(repeating: nil, count: total)
+        var done = 0
+        tracker.set(.preparing(done: 0, total: total), CullProgressScale.cataloged)
+
+        await withTaskGroup(of: (Int, PhotoRecord?).self) { tasks in
             var next = 0
             var inFlight = 0
             while next < total || inFlight > 0 {
-                while inFlight < width, next < total, !Task.isCancelled {
+                while inFlight < maxConcurrent, next < total, !Task.isCancelled {
                     let index = next
                     let record = records[index]
                     next += 1
                     inFlight += 1
-                    tg.addTask {
-                        let name = String(format: "a%05d", index)
+                    tasks.addTask {
+                        let workName = String(format: "a%05d", index)
                         let url = primary.appendingPathComponent(record.representative)
-                        guard let result = try? await analyzer.analyze(url, workName: name, workDir: runDir, spec: spec) else {
+                        guard let result = try? await analyzer.analyze(url, workName: workName, workDir: runDir, spec: spec) else {
                             return (index, nil)
                         }
-                        var r = record
-                        r.metrics = result.0
-                        r.preview = result.preview
-                        r.faceStrip = result.faceStrip
-                        return (index, r)
+                        var analyzedRecord = record
+                        analyzedRecord.metrics = result.0
+                        analyzedRecord.preview = result.preview
+                        analyzedRecord.faceStrip = result.faceStrip
+                        return (index, analyzedRecord)
                     }
                 }
-                guard inFlight > 0, let (index, record) = await tg.next() else { break }
+                guard inFlight > 0, let (index, record) = await tasks.next() else { break }
                 inFlight -= 1
-                out[index] = record
+                analyzed[index] = record
                 done += 1
-                tracker.set(.preparing(done: done, total: total), 0.02 + 0.28 * ratio(done, total))
+                tracker.set(.preparing(done: done, total: total),
+                            CullProgressScale.cataloged + CullProgressScale.analysisSpan * cullRatio(done, total))
             }
         }
-        return out.compactMap { $0 }
+        return analyzed.compactMap { $0 }
     }
 
-    // MARK: - Requests
+    // MARK: - Shared helpers
 
-    /// photoID → token, with the inverse the validator wants.
-    struct TokenMap: Sendable {
-        let forward: [String: String]
-        var reverse: [String: String] { Dictionary(uniqueKeysWithValues: forward.map { ($1, $0) }) }
-    }
-
-    private func makeRequest(
-        _ group: PhotoGroup, index: Int, count: Int, runID: UUID, settings: CullSettings, runSection: String
-    ) -> (request: ClaudeRequest, tokens: TokenMap) {
-        let tokens = CullPromptBuilder.tokens(for: group)
-        var frames: [String: (preview: String, faces: String?)] = [:]
-        let prefix = "runs/\(runID.uuidString)/"
-        for photo in group.photos {
-            guard let preview = photo.preview else { continue }
-            frames[photo.id] = (prefix + preview.lastPathComponent, photo.faceStrip.map { prefix + $0.lastPathComponent })
+    /// Rejects with a thumbnail of their run-dir preview; call before the run dir is removed.
+    func liveRejects(_ decisions: [CullDecision], records: [String: PhotoRecord]) -> [CullLiveReject] {
+        decisions.filter { $0.verdict == .reject }.map { decision in
+            let preview = records[decision.photoID]?.preview
+            return CullLiveReject(id: decision.photoID, label: CullRejectLabel.label(for: decision), reason: decision.reason,
+                                  thumbnailJPEG: preview.flatMap { thumbnailer.thumbnail(preview: $0) })
         }
-        let message = CullPromptBuilder.userMessage(group: group, index: index, count: count, tokens: tokens, frames: frames)
-        let estimate = CullEstimator.estimate(photoCount: group.photos.count, model: settings.model, settings: settings)
-        let budget = min(max(3 * estimate.high, 0.05), 1.00)
-        let request = ClaudeRequest(
-            model: settings.model.rawValue,
-            systemPrompt: CullPromptBuilder.roleSystemPrompt,
-            appendSystemPrompt: runSection,
-            userPrompt: message,
-            jsonSchema: CullPromptBuilder.jsonSchema,
-            workspace: workspaceRoot,
-            maxBudgetUSD: budget)
-        return (request, TokenMap(forward: tokens))
+    }
+
+    /// Spending cap for one Claude call: three times its high estimate, kept between 5 cents and a dollar.
+    static func callBudget(photoCount: Int, settings: CullSettings) -> Double {
+        let estimate = CullEstimator.estimate(photoCount: photoCount, model: settings.model, settings: settings)
+        return min(max(3 * estimate.high, 0.05), 1.00)
+    }
+
+    /// A run-directory file as Claude sees it, relative to the workspace root.
+    static func workspacePath(of file: URL, runID: UUID) -> String {
+        "runs/\(runID.uuidString)/" + file.lastPathComponent
+    }
+
+    /// The only Claude errors that end a run are the two setup problems.
+    static func setupError(_ error: ClaudeRunnerError) -> CullError {
+        error == .notInstalled ? .claudeNotInstalled : .claudeNotLoggedIn
     }
 }
 
-// MARK: - Helpers
+// MARK: - Run state
 
-private nonisolated func ratio(_ done: Int, _ total: Int) -> Double {
+/// What every step of one run shares.
+nonisolated struct CullRunContext: Sendable {
+    let runID: UUID
+    let settings: CullSettings
+    /// Awaited before every Claude call; the app holds it while something else needs the shoot.
+    let gate: @Sendable () async -> Void
+    let tracker: CullProgressTracker
+    let callLog: CullCallLog
+    let emitRejects: @Sendable ([CullLiveReject]) -> Void
+}
+
+/// Where each phase sits on the 0...1 progress bar.
+nonisolated enum CullProgressScale {
+    static let cataloged = 0.02
+    /// Local analysis runs from `cataloged` to `analyzed`.
+    static let analysisSpan = 0.28
+    static let analyzed = 0.30
+    /// The first pass runs from `analyzed` to `applyStart`, or to `finalRoundStart` when a final round follows.
+    static let firstPassSpan = 0.65
+    static let firstPassSpanBeforeFinalRound = 0.50
+    static let finalRoundStart = 0.80
+    static let finalRoundSpan = 0.15
+    static let applyStart = 0.95
+    static let applySpan = 0.05
+}
+
+/// `done / total` capped at 1; an empty total counts as finished.
+nonisolated func cullRatio(_ done: Int, _ total: Int) -> Double {
     total > 0 ? min(1, Double(done) / Double(total)) : 1
 }
 
-/// Pass one spans 0.30 to 0.95, or to 0.80 when a final round follows.
-private nonisolated func analyzingFraction(_ done: Int, _ total: Int, _ span: Double) -> Double {
-    0.30 + span * ratio(done, total)
+/// Times one Claude call for the call log.
+nonisolated struct CullCallTimer: Sendable {
+    private let started = ContinuousClock.now
+
+    var elapsedMS: Int {
+        Int((ContinuousClock.now - started) / .milliseconds(1))
+    }
 }
 
-private nonisolated final class ApplyResult: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _value: CullOutcome?
-    var value: CullOutcome? { lock.withLock { _value } }
-    func set(_ v: CullOutcome) { lock.withLock { _value = v } }
+extension ClaudeRunnerError {
+    /// Claude can't be used at all, so retrying other groups is pointless. Any other error only
+    /// costs the one call, which then falls back to local rules.
+    nonisolated var endsTheRun: Bool {
+        self == .notInstalled || self == .notLoggedIn
+    }
 }
 
-/// Keeps progress monotonic and forwards it to the stream.
-private nonisolated final class ProgressTracker: @unchecked Sendable {
+/// Keeps progress monotonic and forwards it to the stream. Also holds the run's spend.
+nonisolated final class CullProgressTracker: @unchecked Sendable {
     private let lock = NSLock()
     private let emit: @Sendable (CullProgress) -> Void
     private var fraction = 0.0
@@ -603,21 +317,22 @@ private nonisolated final class ProgressTracker: @unchecked Sendable {
 
     var spent: Double { lock.withLock { _spent } }
 
-    func set(_ phase: CullPhase, _ f: Double) {
-        let p: CullProgress = lock.withLock {
-            fraction = max(fraction, min(f, 1))
+    /// Reports `phase`; the bar never moves backwards.
+    func set(_ phase: CullPhase, _ newFraction: Double) {
+        let progress: CullProgress = lock.withLock {
+            fraction = max(fraction, min(newFraction, 1))
             return CullProgress(phase: phase, fraction: fraction, spentUSD: _spent)
         }
-        emit(p)
+        emit(progress)
     }
 
     /// Reverting reports its own fraction and may go down.
-    func setRaw(_ phase: CullPhase, _ f: Double) {
-        let p: CullProgress = lock.withLock {
-            fraction = f
-            return CullProgress(phase: phase, fraction: f, spentUSD: _spent)
+    func setRaw(_ phase: CullPhase, _ newFraction: Double) {
+        let progress: CullProgress = lock.withLock {
+            fraction = newFraction
+            return CullProgress(phase: phase, fraction: newFraction, spentUSD: _spent)
         }
-        emit(p)
+        emit(progress)
     }
 
     func addSpend(_ amount: Double) {
