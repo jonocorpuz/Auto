@@ -2,8 +2,14 @@ import SwiftUI
 
 /// One connected card: name, cameras, counts, state and the actions for its phase.
 struct CardRow: View {
+    /// Day chips shown per camera before the rest collapse into "+N".
+    private static let maxDayChips = 4
+    /// Shoots from other days offered in the Add to Shoot menu.
+    private static let maxOtherShootsInMenu = 10
+
     @Environment(AppModel.self) private var model
     let card: Card
+    @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -15,23 +21,27 @@ struct CardRow: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
-        .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius)
-            .strokeBorder(hovering && canBrowse ? Theme.accent.opacity(0.6) : Theme.border))
+        .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(borderColor))
         .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
         .onTapGesture { if canBrowse { model.browsingCardID = card.id } }
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
     }
 
-    @State private var hovering = false
-
     private var canBrowse: Bool { !card.files.isEmpty }
+
+    private var isQueued: Bool { card.queuedBehind != nil }
+
+    /// The border hints that the row is clickable while the pointer is over it.
+    private var borderColor: Color {
+        hovering && canBrowse ? Theme.accent.opacity(0.6) : Theme.border
+    }
 
     // MARK: Header
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            StatusDot(color: tint)
+            StatusDot(color: Color(nsColor: status.tint))
             VStack(alignment: .leading, spacing: 2) {
                 Text(card.name).font(.headline)
                 Text(summary).font(.callout).foregroundStyle(.secondary)
@@ -51,13 +61,14 @@ struct CardRow: View {
         }
     }
 
-    private var tint: Color {
+    /// The menu bar status this card's phase corresponds to; the dot uses its colour.
+    private var status: AppModel.Status {
         switch card.phase {
-        case .scanning, .verifying, .empty: Color(nsColor: AppModel.Status.idle.tint)
-        case .copying: Color(nsColor: AppModel.Status.copying.tint)
-        case .backed: Color(nsColor: AppModel.Status.backed.tint)
-        case .needsBackup, .ready: Color(nsColor: AppModel.Status.unbacked.tint)
-        case .failed, .unreadable: Color(nsColor: AppModel.Status.error.tint)
+        case .scanning, .verifying, .empty: .idle
+        case .copying: .copying
+        case .backed: .backed
+        case .needsBackup, .ready: .unbacked
+        case .failed, .unreadable: .error
         }
     }
 
@@ -75,6 +86,7 @@ struct CardRow: View {
         }
     }
 
+    /// "12 video · 40 photo · 64 GB", plus how much is not backed up while that still matters.
     private var summary: String {
         guard !card.files.isEmpty else {
             return card.phase == .scanning ? "Counting files…" : "No photos or video on this card."
@@ -83,19 +95,28 @@ struct CardRow: View {
         if card.videoCount > 0 { parts.append("\(card.videoCount) video") }
         if card.photoCount > 0 { parts.append("\(card.photoCount) photo") }
         parts.append(Format.bytes(card.totalBytes))
-        var text = parts.joined(separator: " · ")
-        switch card.phase {
-        case .needsBackup, .ready, .copying, .failed:
-            let backed = card.files.count - card.missing.count
-            if backed > 0 && !card.missing.isEmpty {
-                text += " · \(card.missing.count) not backed up (\(Format.bytes(card.missingBytes))) · \(backed) already backed up"
-            } else if model.workingVolume != nil {
-                text += " · \(card.missing.count) not backed up (\(Format.bytes(card.missingBytes)))"
-            }
-        default: break
-        }
-        return text
+        if let backupSummary { parts.append(backupSummary) }
+        return parts.joined(separator: " · ")
     }
+
+    /// nil once the card is backed up, and while its backup state isn't known yet.
+    private var backupSummary: String? {
+        switch card.phase {
+        case .needsBackup, .ready, .copying, .failed: break
+        default: return nil
+        }
+        let notBackedUp = "\(card.missing.count) not backed up (\(Format.bytes(card.missingBytes)))"
+        let backedUpCount = card.files.count - card.missing.count
+        if backedUpCount > 0 && !card.missing.isEmpty {
+            return "\(notBackedUp) · \(backedUpCount) already backed up"
+        }
+        if model.workingVolume != nil {
+            return notBackedUp
+        }
+        return nil
+    }
+
+    // MARK: Cameras
 
     private var cameraList: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -113,12 +134,13 @@ struct CardRow: View {
     @ViewBuilder private func dayChips(_ days: [ShootDay]) -> some View {
         if !days.isEmpty {
             let calendar = Calendar.current
+            let hiddenDayCount = days.count - Self.maxDayChips
             HStack(spacing: 4) {
-                ForEach(Array(days.prefix(4).enumerated()), id: \.offset) { _, day in
+                ForEach(Array(days.prefix(Self.maxDayChips).enumerated()), id: \.offset) { _, day in
                     DayChip(day: day, calendar: calendar)
                 }
-                if days.count > 4 {
-                    Text("+\(days.count - 4)").font(.caption).foregroundStyle(.secondary)
+                if hiddenDayCount > 0 {
+                    Text("+\(hiddenDayCount)").font(.caption).foregroundStyle(.secondary)
                 }
                 if days.count > 1 {
                     Text("\(days.count) days").font(.caption).foregroundStyle(Theme.accent)
@@ -142,51 +164,46 @@ struct CardRow: View {
         }
     }
 
-    private var isQueued: Bool { card.queuedBehind != nil }
-
     // MARK: Add to shoot
 
-    private var onlineShoots: [ShootItem] {
-        model.shoots.filter { if case .online? = $0.availability { true } else { false } }
-    }
-
+    /// True when the shoot's day is one of the days this card recorded on.
     private func matchesCard(_ item: ShootItem) -> Bool {
         card.shootDays.values.contains { days in
             days.contains { model.calendar.isDate($0.start, inSameDayAs: item.date) }
         }
     }
 
-    private func shootLabel(_ item: ShootItem) -> String {
-        "\(item.record.name) — \(item.date.formatted(date: .abbreviated, time: .omitted))"
+    private func showAddFootageSheet(for item: ShootItem) {
+        model.shootSheet = .add(shootID: item.id, cardID: card.id)
     }
 
+    /// A menu of online shoots (the ones matching the card's days first), plus a one-click button
+    /// for the best match.
     @ViewBuilder private var addToShoot: some View {
-        let online = onlineShoots
+        let online = model.shoots.filter { $0.isConfirmedOnline }
         let matching = online.filter(matchesCard)
-        let others = online.filter { !matchesCard($0) }.prefix(10)
+        let others = online.filter { !matchesCard($0) }.prefix(Self.maxOtherShootsInMenu)
         Menu("Add to Shoot") {
             if online.isEmpty {
                 Text("No shoots yet")
             } else {
                 ForEach(matching) { item in
-                    Button { model.shootSheet = .add(shootID: item.id, cardID: card.id) } label: {
-                        Label(shootLabel(item), systemImage: "calendar.badge.checkmark")
+                    Button { showAddFootageSheet(for: item) } label: {
+                        Label(item.menuLabel, systemImage: "calendar.badge.checkmark")
                     }
                 }
                 if !matching.isEmpty && !others.isEmpty { Divider() }
                 ForEach(Array(others)) { item in
-                    Button(shootLabel(item)) { model.shootSheet = .add(shootID: item.id, cardID: card.id) }
+                    Button(item.menuLabel) { showAddFootageSheet(for: item) }
                 }
             }
         }
         .menuStyle(.button)
         .fixedSize()
         .disabled(online.isEmpty)
-        if card.phase != .copying, let best = matching.first {
-            Button("Add to \(best.record.name)") {
-                model.shootSheet = .add(shootID: best.id, cardID: card.id)
-            }
-            .foregroundStyle(Theme.accent)
+        if card.phase != .copying, let bestMatch = matching.first {
+            Button("Add to \(bestMatch.record.name)") { showAddFootageSheet(for: bestMatch) }
+                .foregroundStyle(Theme.accent)
         }
     }
 
@@ -196,136 +213,166 @@ struct CardRow: View {
         switch card.phase {
         case .scanning:
             ProgressView().controlSize(.small)
-
         case .verifying:
-            let p = card.verifyProgress
-            VStack(alignment: .leading, spacing: 6) {
-                ProgressView(value: p.fraction)
-                HStack {
-                    Text("Checking backup… \(min(p.filesDone + 1, p.filesTotal))/\(p.filesTotal)")
-                        .monospacedDigit()
-                    Spacer()
-                    Text(p.currentFile).lineLimit(1).truncationMode(.middle)
-                }
-                .font(.caption).foregroundStyle(.secondary)
-            }
-            Text("Comparing each file with the copy on \(model.workingDriveName). Don't format yet.")
-                .font(.caption).foregroundStyle(.secondary)
-            HStack { Spacer(); addToShoot }
-
+            verifyingContent
         case .needsBackup:
-            if model.workRoot != nil && model.workingVolume == nil {
-                Text("\(model.workingDriveName) isn't plugged in, so this card can't be checked. Don't format.")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else {
-                Text("Don't format this card yet.").font(.callout).foregroundStyle(.secondary)
-            }
-            HStack {
-                Button("Show in Finder") { model.openInFinder(card) }
-                Spacer()
-                Button("Choose folder…") { model.chooseFolder(for: card) }
-                addToShoot
-                Button("New Shoot…") { model.newShoot(card: card) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.workRoot == nil || model.workingVolume == nil)
-            }
-
+            needsBackupContent
         case .ready:
-            if let plan = card.plan {
-                Text("Copy \(plan.jobs.count) files · \(Format.bytes(plan.bytes)) to \(plan.destinationLabel)")
-                    .font(.callout.weight(.medium))
-                HStack {
-                    Button("Discard") { model.discardPlan(card) }
-                    Button("Show in Finder") { model.openInFinder(card) }
-                    addToShoot
-                    Spacer()
-                    if isQueued {
-                        Button("Stop") { model.stop(card) }
-                    }
-                    Button(isQueued ? "Queued" : "Copy") { model.copy(card) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isQueued)
-                }
-            }
-
+            if let plan = card.plan { readyContent(plan) }
         case .copying:
-            let p = card.progress
-            VStack(alignment: .leading, spacing: 6) {
-                ProgressView(value: p.fraction)
-                HStack {
-                    Text(p.currentFile.isEmpty ? "Starting…" : p.currentFile)
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                    Text("\(min(p.filesDone + 1, p.filesTotal)) of \(p.filesTotal) · \(Format.bytes(p.bytesDone)) of \(Format.bytes(p.bytesTotal))")
-                        .monospacedDigit()
-                }
-                .font(.caption).foregroundStyle(.secondary)
-            }
+            copyingContent
+        case .backed:
+            backedContent
+        case .empty:
+            emptyContent
+        case .unreadable(let message):
+            unreadableContent(message)
+        case .failed(let message):
+            failedContent(message)
+        }
+    }
+
+    private var showInFinderButton: some View {
+        Button("Show in Finder") { model.openInFinder(card) }
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary)
+    }
+
+    private func errorMessage(_ message: String) -> some View {
+        ErrorLabel(message)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var verifyingContent: some View {
+        let progress = card.verifyProgress
+        VStack(alignment: .leading, spacing: 6) {
+            ProgressView(value: progress.fraction)
             HStack {
-                Text("Each file is checked against the card.").font(.caption).foregroundStyle(.secondary)
+                Text("Checking backup… \(progress.currentFileNumber)/\(progress.filesTotal)")
+                    .monospacedDigit()
                 Spacer()
+                Text(progress.currentFile).lineLimit(1).truncationMode(.middle)
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        caption("Comparing each file with the copy on \(model.workingDriveName). Don't format yet.")
+        HStack { Spacer(); addToShoot }
+    }
+
+    @ViewBuilder private var needsBackupContent: some View {
+        let workingDriveIsUnplugged = model.workRoot != nil && model.workingVolume == nil
+        if workingDriveIsUnplugged {
+            Text("\(model.workingDriveName) isn't plugged in, so this card can't be checked. Don't format.")
+                .font(.callout).foregroundStyle(.secondary)
+        } else {
+            Text("Don't format this card yet.").font(.callout).foregroundStyle(.secondary)
+        }
+        HStack {
+            showInFinderButton
+            Spacer()
+            Button("Choose folder…") { model.chooseFolder(for: card) }
+            addToShoot
+            Button("New Shoot…") { model.newShoot(card: card) }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.workRoot == nil || model.workingVolume == nil)
+        }
+    }
+
+    @ViewBuilder private func readyContent(_ plan: CopyPlan) -> some View {
+        Text("Copy \(plan.jobs.count) files · \(Format.bytes(plan.bytes)) to \(plan.destinationLabel)")
+            .font(.callout.weight(.medium))
+        HStack {
+            Button("Discard") { model.discardPlan(card) }
+            showInFinderButton
+            addToShoot
+            Spacer()
+            if isQueued {
                 Button("Stop") { model.stop(card) }
             }
+            Button(isQueued ? "Queued" : "Copy") { model.copy(card) }
+                .buttonStyle(.borderedProminent)
+                .disabled(isQueued)
+        }
+    }
 
-        case .backed:
+    @ViewBuilder private var copyingContent: some View {
+        let progress = card.progress
+        VStack(alignment: .leading, spacing: 6) {
+            ProgressView(value: progress.fraction)
             HStack {
-                if !card.files.isEmpty {
-                    Label("All on \(card.backedTo ?? model.workingDriveName) · Safe to format", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.callout)
-                }
+                Text(progress.currentFile.isEmpty ? "Starting…" : progress.currentFile)
+                    .lineLimit(1).truncationMode(.middle)
                 Spacer()
-                addToShoot
-                Button("Show in Finder") { model.openInFinder(card) }
-                Button(card.ejecting ? "Ejecting…" : "Eject") { model.eject(card) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.canEject(card))
+                Text(progress.filesAndBytesText)
+                    .monospacedDigit()
             }
-            if let ejectError = card.ejectError {
-                Label(ejectError, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red).font(.caption)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        HStack {
+            caption("Each file is checked against the card.")
+            Spacer()
+            Button("Stop") { model.stop(card) }
+        }
+    }
 
-        case .empty:
-            Text("No media found on this card. Check it in Finder before you format it.")
-                .font(.callout).foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("Show in Finder") { model.openInFinder(card) }
+    @ViewBuilder private var backedContent: some View {
+        HStack {
+            if !card.files.isEmpty {
+                Label("All on \(card.backedTo ?? model.workingDriveName) · Safe to format", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.callout)
             }
-
-        case .unreadable(let message):
-            Label(message, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red).font(.callout)
+            Spacer()
+            addToShoot
+            showInFinderButton
+            Button(card.ejecting ? "Ejecting…" : "Eject") { model.eject(card) }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canEject(card))
+        }
+        if let ejectError = card.ejectError {
+            Label(ejectError, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red).font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Auto couldn't read everything on this card, so it can't tell if it's backed up. Don't format.")
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Button("Show in Finder") { model.openInFinder(card) }
-                Spacer()
-                Button("Scan again") { model.rescan(card) }
-                    .buttonStyle(.borderedProminent)
-            }
+        }
+    }
 
-        case .failed(let message):
-            Label(message, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red).font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(card.plan != nil
-                 ? "Nothing on the card was changed. Retry copies the files that didn't verify. Don't format."
-                 : "Nothing on the card was changed. Don't format until it's backed up.")
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                if card.plan != nil { Button("Discard") { model.discardPlan(card) } }
-                Button("Show in Finder") { model.openInFinder(card) }
-                addToShoot
-                Spacer()
-                Button("Choose folder…") { model.chooseFolder(for: card) }
-                Button("Retry") { model.retry(card) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isQueued)
-            }
+    @ViewBuilder private var emptyContent: some View {
+        Text("No media found on this card. Check it in Finder before you format it.")
+            .font(.callout).foregroundStyle(.secondary)
+        HStack {
+            Spacer()
+            showInFinderButton
+        }
+    }
+
+    @ViewBuilder private func unreadableContent(_ message: String) -> some View {
+        errorMessage(message)
+        caption("Auto couldn't read everything on this card, so it can't tell if it's backed up. Don't format.")
+        HStack {
+            showInFinderButton
+            Spacer()
+            Button("Scan again") { model.rescan(card) }
+                .buttonStyle(.borderedProminent)
+        }
+    }
+
+    @ViewBuilder private func failedContent(_ message: String) -> some View {
+        let hasPlan = card.plan != nil
+        errorMessage(message)
+        caption(hasPlan
+                ? "Nothing on the card was changed. Retry copies the files that didn't verify. Don't format."
+                : "Nothing on the card was changed. Don't format until it's backed up.")
+        HStack {
+            if hasPlan { Button("Discard") { model.discardPlan(card) } }
+            showInFinderButton
+            addToShoot
+            Spacer()
+            Button("Choose folder…") { model.chooseFolder(for: card) }
+            Button("Retry") { model.retry(card) }
+                .buttonStyle(.borderedProminent)
+                .disabled(isQueued)
         }
     }
 }
