@@ -36,14 +36,6 @@ struct ShootRegistryTests {
         #expect(r.records == [second])
     }
 
-    @Test func relocateUpdatesPath() {
-        let id = UUID()
-        var r = ShootRegistry()
-        r.add(record(id, path: "/a"))
-        r.relocate(id: id, to: "/z")
-        #expect(r.records[0].path == "/z")
-    }
-
     @Test func mergeDiscoveredKeepsExisting() {
         let id = UUID()
         var r = ShootRegistry()
@@ -319,19 +311,6 @@ struct ShootRegistryTests {
         #expect(r.records[0].path == "/a")
     }
 
-    @Test func legacyRelocateKeepsInvariants() throws {
-        var r = ShootRegistry()
-        let id = UUID()
-        r.add(record(id, path: "/p"))
-        try r.addMirror(id: id, path: "/m")
-        r.relocate(id: id, to: "/m")   // onto its own mirror: refused
-        #expect(r.records[0].copyPaths == ["/p", "/m"])
-        r.setPendingSync(id: id, path: "/p", true)
-        r.relocate(id: id, to: "/q")
-        #expect(r.records[0].copyPaths == ["/q", "/m"])
-        #expect(r.records[0].pendingSync == ["/m", "/q"])
-    }
-
     @Test func removingPrimaryInPendingSyncClearsIt() throws {
         var r = ShootRegistry()
         let id = UUID()
@@ -358,7 +337,6 @@ struct ShootRegistryTests {
         r.add(record(path: "/p"))
         let before = r
         r.setPendingSync(id: UUID(), path: "/p", true)
-        r.relocate(id: UUID(), to: "/x")
         #expect(r == before)
     }
 

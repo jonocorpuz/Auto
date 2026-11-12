@@ -125,12 +125,6 @@ nonisolated struct ShootRegistry: Codable, Sendable, Equatable {
         records.removeAll { $0.id == id }
     }
 
-    /// Relocates the primary copy. Non-throwing wrapper that ignores refusals; prefer the throwing form.
-    mutating func relocate(id: UUID, to path: String) {
-        guard let i = records.firstIndex(where: { $0.id == id }) else { return }
-        try? relocate(id: id, from: records[i].path, to: path)
-    }
-
     /// Replaces one copy path, primary or mirror.
     mutating func relocate(id: UUID, from: String, to: String) throws(RegistryError) {
         guard let i = records.firstIndex(where: { $0.id == id }) else { throw .unknownShoot }
