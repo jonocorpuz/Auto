@@ -64,7 +64,6 @@ nonisolated struct CopyOutcome: Sendable {
     }
 
     var copied: [CopiedFile] = []
-    var copiedKeys: [String] { copied.map(\.file.key) }
     var failures: [Failure] = []
     var cancelled = false
 }

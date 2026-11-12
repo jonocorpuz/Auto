@@ -34,7 +34,7 @@ struct CopyEngineTests {
         let outcome = await CopyEngine().run([CopyJob(file: file, destDir: f.dst)]) { _ in }
 
         #expect(outcome.failures.isEmpty)
-        #expect(outcome.copiedKeys == [file.key])
+        #expect(outcome.copied.map(\.file.key) == [file.key])
         let copy = f.dst.appendingPathComponent("A.MP4")
         #expect(outcome.copied.first?.destination == copy)
         #expect(outcome.copied.first?.preexisting == false)
@@ -73,7 +73,7 @@ struct CopyEngineTests {
         try FileManager.default.copyItem(at: file.url, to: f.dst.appendingPathComponent("A.MP4"))
 
         let outcome = await CopyEngine().run([CopyJob(file: file, destDir: f.dst)]) { _ in }
-        #expect(outcome.copiedKeys == [file.key])
+        #expect(outcome.copied.map(\.file.key) == [file.key])
         #expect(outcome.copied.first?.preexisting == true)
         #expect(outcome.copied.first?.destination == f.dst.appendingPathComponent("A.MP4"))
         #expect(outcome.failures.isEmpty)
@@ -116,7 +116,7 @@ struct CopyEngineTests {
         engine.cancel()
         let outcome = await engine.run([CopyJob(file: file, destDir: f.dst)]) { _ in }
         #expect(outcome.cancelled)
-        #expect(outcome.copiedKeys.isEmpty)
+        #expect(outcome.copied.isEmpty)
         #expect(try FileManager.default.contentsOfDirectory(atPath: f.dst.path).isEmpty)
     }
 
@@ -128,7 +128,7 @@ struct CopyEngineTests {
         engine.onChunkWritten = { [unowned engine] _ in engine.cancel() } // after the first chunk
         let outcome = await engine.run([CopyJob(file: file, destDir: f.dst)]) { _ in }
         #expect(outcome.cancelled)
-        #expect(outcome.copiedKeys.isEmpty)
+        #expect(outcome.copied.isEmpty)
         #expect(try FileManager.default.contentsOfDirectory(atPath: f.dst.path).isEmpty)
     }
 
@@ -139,7 +139,7 @@ struct CopyEngineTests {
         engine.onVerifyChunk = { [unowned engine] _ in engine.cancel() }
         let outcome = await engine.run([CopyJob(file: file, destDir: f.dst)]) { _ in }
         #expect(outcome.cancelled)
-        #expect(outcome.copiedKeys.isEmpty)
+        #expect(outcome.copied.isEmpty)
         #expect(try FileManager.default.contentsOfDirectory(atPath: f.dst.path).isEmpty)
     }
 
