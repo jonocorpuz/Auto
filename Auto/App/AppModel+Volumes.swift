@@ -67,7 +67,7 @@ extension AppModel {
     }
 
     /// Clears the bookkeeping that belongs to a card's pending copy plan (not the plan itself).
-    private func forgetPendingPlan(of card: Card) {
+    func forgetPendingPlan(of card: Card) {
         addTargets[card.id] = nil
         includeDuplicatePlans.remove(card.id)
         dequeue(card)

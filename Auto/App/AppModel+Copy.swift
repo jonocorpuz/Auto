@@ -1,16 +1,30 @@
 import AppKit
 import Foundation
 
+/// Card copies: planning a destination, running the `CopyEngine`, the copy queue and the bookkeeping
+/// that follows a run. Source cards are only ever read here.
 extension AppModel {
-    // MARK: Shoots
+    // MARK: Errors
+
+    struct PhaseError: LocalizedError {
+        var errorDescription: String? { "This card can't start a new shoot right now." }
+    }
+
+    struct EmptySelectionError: LocalizedError {
+        var errorDescription: String? { "Select at least one file to copy." }
+    }
+
+    nonisolated struct NotEnoughSpaceError: LocalizedError {
+        let needed: Int64
+        let free: Int64
+        var errorDescription: String? { "Not enough space: needs \(Format.bytes(needed)), \(Format.bytes(free)) free." }
+    }
+
+    // MARK: Choosing a destination
 
     /// Whether `name` can be used as the shoot folder name.
     func isValidShootName(_ name: String) -> Bool {
         ShootPlanner.safeComponent(name) != nil
-    }
-
-    struct PhaseError: LocalizedError {
-        var errorDescription: String? { "This card can't start a new shoot right now." }
     }
 
     private func canPlan(_ card: Card) -> Bool {
@@ -20,10 +34,7 @@ extension AppModel {
         }
     }
 
-    struct EmptySelectionError: LocalizedError {
-        var errorDescription: String? { "Select at least one file to copy." }
-    }
-
+    /// "Choose Folder": plans a flat copy of the card's missing files into a folder the user picks.
     func chooseFolder(for card: Card) {
         guard canPlan(card) else { return }
         let panel = NSOpenPanel()
@@ -31,26 +42,26 @@ extension AppModel {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = "Copy here"
-        let skipped = card.files.count - card.missing.count
+        let alreadyBackedUpCount = card.files.count - card.missing.count
         var message = "Choose where \(card.name)'s \(card.missing.count) files should go."
-        if skipped > 0 { message += " \(skipped) files already backed up are skipped." }
+        if alreadyBackedUpCount > 0 { message += " \(alreadyBackedUpCount) files already backed up are skipped." }
         panel.message = message
         panel.directoryURL = workRoot
         NSApp.activate()
-        guard panel.runModal() == .OK, let dir = panel.url else { return }
-        if isOnCard(dir) {
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+
+        if isOnCard(folder) {
             let alert = NSAlert()
             alert.messageText = "Can't copy to a camera card"
             alert.informativeText = CardDestinationError().localizedDescription
             alert.runModal()
             return
         }
+        // A copy may have started while the panel was open.
         guard card.engine == nil else { return }
         stopVerifier(card)
-        card.plan = ShootPlanner.flatPlan(missing: card.missing, into: dir)
-        dequeue(card)
-        addTargets[card.id] = nil
-        includeDuplicatePlans.remove(card.id)
+        card.plan = ShootPlanner.flatPlan(missing: card.missing, into: folder)
+        forgetPendingPlan(of: card)
         card.phase = .ready
         cardSettledAfterStop(card)
     }
@@ -81,16 +92,13 @@ extension AppModel {
     func discardPlan(_ card: Card) {
         guard card.engine == nil else { return }
         card.plan = nil
-        dequeue(card)
-        addTargets[card.id] = nil
-        includeDuplicatePlans.remove(card.id)
+        forgetPendingPlan(of: card)
         recompute(card)
     }
 
     func openInFinder(_ card: Card) {
-        var urls = [card.volume]
-        if let dest = card.plan?.destinationRoot { urls.append(dest) }
-        for url in urls { NSWorkspace.shared.open(url) }
+        NSWorkspace.shared.open(card.volume)
+        if let destination = card.plan?.destinationRoot { NSWorkspace.shared.open(destination) }
     }
 
     // MARK: Copying
@@ -101,16 +109,22 @@ extension AppModel {
         // Two engines never write into overlapping folders (e.g. the same shoot) at once: wait for the other
         // one. Checked before the verifier is touched, so a waiting card keeps its state.
         let myRoots = plan.copyRoots
-        if let blocker = cards.first(where: { other in
-            guard other !== card, other.engine != nil, let theirs = other.plan else { return false }
-            return myRoots.contains { mine in theirs.copyRoots.contains { Self.overlap(mine, $0) } }
-        }) {
+        if let blocker = cardCopyingInto(myRoots, otherThan: card) {
             enqueue(card, behind: blocker)
             return
         }
-        if syncBusyOverlapping(myRoots) { enqueueBehindSync(card); return }
-        if cullApplying { enqueueBehindCull(card); return }
-        if importBusyOverlapping(myRoots) { enqueueBehindImport(card); return }
+        if syncBusyOverlapping(myRoots) {
+            enqueueBehindSync(card)
+            return
+        }
+        if cullApplying {
+            enqueueBehindCull(card)
+            return
+        }
+        if importBusyOverlapping(myRoots) {
+            enqueueBehindImport(card)
+            return
+        }
         dequeue(card)
         card.mirrorNote = nil
         stopVerifier(card)
@@ -129,7 +143,9 @@ extension AppModel {
             cardSettledAfterStop(card)
             return
         }
-        let rootChecks: [(root: URL, jobs: [CopyJob])] = usable.map { ($0, Self.jobs(in: plan.jobs, roots: [$0], of: myRoots)) }
+        let rootChecks: [RootCheck] = usable.map { root in
+            RootCheck(root: root, jobs: Self.jobs(in: plan.jobs, roots: [root], of: myRoots))
+        }
         let freeSpaceOf = freeSpaceProvider()
 
         let engine = CopyEngine()
@@ -140,7 +156,7 @@ extension AppModel {
         #endif
         invalidateBrowserMembership(for: card)
         let startJobs = Self.jobs(in: plan.jobs, roots: usable, of: myRoots)
-        card.progress = CopyProgress(filesTotal: startJobs.count, bytesTotal: startJobs.reduce(0) { $0 + $1.file.size })
+        card.progress = Self.initialProgress(for: startJobs)
         card.phase = .copying
         let addShootID = addTargets[card.id]
         let preflightShootID = plan.shootID ?? addShootID
@@ -150,28 +166,23 @@ extension AppModel {
         Task {
             // Off main: every copy folder must still exist, and carry the shoot's id for an add-footage plan,
             // before a single byte is written. A copy that fails is left out while another passes.
-            let checks: [(root: URL, error: String?)] = await Task.detached {
-                rootChecks.map { entry in
-                    do {
-                        for dir in ShootPlanner.directories(for: entry.jobs) {
-                            try ShootPlanner.checkDestination(dir, root: entry.root, cardVolumes: volumes)
-                        }
-                        let needed = entry.jobs.reduce(Int64(0)) { $0 + $1.file.size }
-                        if let free = freeSpaceOf(entry.root), free < needed {
-                            throw NotEnoughSpaceError(needed: needed, free: free)
-                        }
-                        try Self.preflight(workRoot: entry.root, shootID: preflightShootID)
-                        return (entry.root, nil)
-                    } catch { return (entry.root, error.localizedDescription) }
+            let checks = await Task.detached {
+                rootChecks.map { check in
+                    let error = Self.destinationError(for: check, cardVolumes: volumes, freeSpaceOf: freeSpaceOf,
+                                                      shootID: preflightShootID)
+                    return (root: check.root, error: error)
                 }
             }.value
             guard card.engine === engine else { return }
             // The shoot's copies may have changed while the preflight ran.
             let stillCopies = Set(currentRoots(of: plan).map(VolumeClassifier.normalizedPath))
-            let runRoots = checks.filter { $0.error == nil && stillCopies.contains(VolumeClassifier.normalizedPath($0.root)) }.map(\.root)
+            let runRoots = checks
+                .filter { $0.error == nil && stillCopies.contains(VolumeClassifier.normalizedPath($0.root)) }
+                .map(\.root)
             guard !runRoots.isEmpty else {
+                let firstError = checks.first(where: { $0.error != nil })?.error
                 card.engine = nil
-                card.phase = .failed(checks.first(where: { $0.error != nil })?.error ?? "No copy folder is available.")
+                card.phase = .failed(firstError ?? "No copy folder is available.")
                 refreshBrowserMembership(force: true)
                 releaseQueuedCopies()
                 return
@@ -202,94 +213,165 @@ extension AppModel {
                         card.phase = .needsBackup
                         recompute(card)
                         releaseQueuedCopies()
-                        if prunedMarked { await saveRegistry(); await refreshShoots() }
+                        if prunedMarked {
+                            await saveRegistry()
+                            await refreshShoots()
+                        }
                         return
                     }
                 }
             }
             let runJobs = Self.jobs(in: card.plan?.jobs ?? plan.jobs, roots: runRoots, of: myRoots)
-            card.progress = CopyProgress(filesTotal: runJobs.count, bytesTotal: runJobs.reduce(0) { $0 + $1.file.size })
+            card.progress = Self.initialProgress(for: runJobs)
             ingestRunCount += 1
             let outcome = await engine.run(runJobs) { progress in card.progress = progress }
             card.engine = nil
             ingestRunCount -= 1
             releaseQueuedCopies()
-            // A file with a failed checksum on any copy, or copies that disagree, is not done: its jobs stay.
-            let blocked = Self.integrityBlocked(outcome)
-            let landedFiles = outcome.copied.filter { !blocked.contains($0.file.url) }
-            // Seed the checksum cache from the verified copies, off main and without waiting for it.
-            let store = checksums
-            Task.detached {
-                for copied in landedFiles { store.record(copied) }
-                await store.saveIfDirty()
-            }
-            sessionCopies.append(contentsOf: landedFiles)
-            verifications.record(landedFiles)
+            await finishCopy(of: card, plan: plan, runRoots: runRoots, outcome: outcome, prunedMarked: prunedMarked)
+        }
+    }
 
-            // A file is done once it reached at least one copy; the others are marked for sync.
-            let done = Set(landedFiles.map(\.file.url))
-            let marked = markUnreachedCopies(of: card, plan: plan, runRoots: runRoots, outcome: outcome, done: done, blocked: blocked)
-                || prunedMarked
-            card.plan?.jobs.removeAll { done.contains($0.file.url) }
-            // Just-copied files must not be selectable again while they re-verify.
-            card.missing.removeAll { done.contains($0.url) }
-            if card.plan?.jobs.isEmpty == true { card.plan = nil }
-            // The add target lives as long as the plan does (partial failures retry into the same shoot).
-            if card.plan == nil { addTargets[card.id] = nil; includeDuplicatePlans.remove(card.id) }
-            let reachedLabels = Self.unique(runRoots.filter { root in outcome.copied.contains { ShootPlanner.isInside($0.destination, root: root) } }
-                .map { Self.copyLabel($0.path) })
-            if myRoots.count > 1, !reachedLabels.isEmpty {
-                card.backedTo = reachedLabels.joined(separator: " and ")
-            } else {
-                card.backedTo = plan.destinationRoot.path.hasPrefix(workingVolume?.path ?? "\u{0}") ? workingDriveName : plan.destinationLabel
-            }
-            // Flat plans into a folder inside a shoot copy leave that shoot's other copies short.
-            let flatMarked = plan.shootID == nil && markShootsContaining(plan.destinationRoot, card: card, done: done)
+    /// Bookkeeping after the engine returns: records what landed, marks copies that are now short,
+    /// settles the card's phase and schedules the follow-up checks.
+    private func finishCopy(of card: Card, plan: CopyPlan, runRoots: [URL], outcome: CopyOutcome, prunedMarked: Bool) async {
+        // A file with a failed checksum on any copy, or copies that disagree, is not done: its jobs stay.
+        let blocked = Self.integrityBlocked(outcome)
+        let landedFiles = outcome.copied.filter { !blocked.contains($0.file.url) }
+        // Seed the checksum cache from the verified copies, off main and without waiting for it.
+        let store = checksums
+        Task.detached {
+            for copied in landedFiles { store.record(copied) }
+            await store.saveIfDirty()
+        }
+        sessionCopies.append(contentsOf: landedFiles)
+        verifications.record(landedFiles)
 
-            // Failures of files that reached no copy fail the card. A mirror failing for a file that did land is a sync matter.
-            var blocking = outcome.failures.filter { !done.contains($0.file) }
-            for url in blocked where !blocking.contains(where: { $0.file == url }) {
-                blocking.append(.init(name: url.lastPathComponent, reason: "Its copies didn't match each other", file: url, root: nil, kind: .integrity))
+        // A file is done once it reached at least one copy; the others are marked for sync.
+        let done = Set(landedFiles.map(\.file.url))
+        let marked = markUnreachedCopies(of: card, plan: plan, runRoots: runRoots, outcome: outcome, done: done, blocked: blocked)
+            || prunedMarked
+        card.plan?.jobs.removeAll { done.contains($0.file.url) }
+        // Just-copied files must not be selectable again while they re-verify.
+        card.missing.removeAll { done.contains($0.url) }
+        if card.plan?.jobs.isEmpty == true { card.plan = nil }
+        // The add target lives as long as the plan does (partial failures retry into the same shoot).
+        if card.plan == nil {
+            addTargets[card.id] = nil
+            includeDuplicatePlans.remove(card.id)
+        }
+        card.backedTo = backedToLabel(plan: plan, runRoots: runRoots, outcome: outcome)
+        // Flat plans into a folder inside a shoot copy leave that shoot's other copies short.
+        let flatMarked = plan.shootID == nil && markShootsContaining(plan.destinationRoot, card: card, done: done)
+
+        // Failures of files that reached no copy fail the card. A mirror failing for a file that did land is a sync matter.
+        var blocking = outcome.failures.filter { !done.contains($0.file) }
+        for url in blocked where !blocking.contains(where: { $0.file == url }) {
+            blocking.append(.init(name: url.lastPathComponent, reason: "Its copies didn't match each other",
+                                  file: url, root: nil, kind: .integrity))
+        }
+        if let first = blocking.first {
+            let otherFailureCount = blocking.count - 1
+            let more = otherFailureCount > 0 ? " (+\(otherFailureCount) more)" : ""
+            card.phase = .failed("\(first.name): \(first.reason)\(more)")
+        } else {
+            card.phase = .needsBackup
+        }
+        // A failed card stays failed on screen (Retry copies again); a re-verify would turn it back into "ready".
+        if blocking.isEmpty { recompute(card) }
+
+        // This copy may make other cards' files duplicates (or fully backed): re-verify idle cards.
+        let copiedKeys = Set(outcome.copied.map(\.file.key))
+        for other in cards where other !== card && !copyQueue.contains(other.id) && needsRecompute(other, afterCopyOf: copiedKeys) {
+            recomputeOnceIdle(other)
+        }
+        releaseQueuedCopies()
+
+        // Anything that landed inside a registered shoot changes that shoot's coverage.
+        let landed = shoots.filter { item in
+            guard case .online(let shoot)? = item.availability else { return false }
+            return shoot.copies.contains { ShootPlanner.relativeComponents(plan.destinationRoot, to: $0) != nil }
+        }
+        for item in landed { checkCoverage(shootID: item.id, cardID: card.id) }
+        // Another card's copy landing in a shoot changes the browsed card's membership too.
+        if !landed.isEmpty, card.id != browsingCardID { refreshBrowserMembership(force: true) }
+        if marked || flatMarked { await saveRegistry() }
+        if !landed.isEmpty || marked || flatMarked { await refreshShoots() }
+
+        // The copies of a shoot that just received files may now differ: check them (forced).
+        var toCheck = Set(landed.map(\.id))
+        if !outcome.copied.isEmpty {
+            // Includes flat Choose Folder plans whose root is inside any copy (not only the primary).
+            let written = plan.copyRoots + [plan.destinationRoot]
+            for item in shoots {
+                guard case .online(let shoot)? = item.availability else { continue }
+                let wasWrittenInto = shoot.copies.contains { copy in written.contains { Self.overlap($0, copy) } }
+                if wasWrittenInto { toCheck.insert(item.id) }
             }
-            if let first = blocking.first {
-                let more = blocking.count > 1 ? " (+\(blocking.count - 1) more)" : ""
-                card.phase = .failed("\(first.name): \(first.reason)\(more)")
-            } else {
-                card.phase = .needsBackup
+        }
+        if !outcome.copied.isEmpty, let shootID = plan.shootID { toCheck.insert(shootID) }
+        if !toCheck.isEmpty { scheduleSyncCheck(toCheck, force: true) }
+        if !outcome.cancelled { openMainWindow() }
+    }
+
+    // MARK: Copy helpers
+
+    /// One copy folder of a plan and the jobs that write into it.
+    private struct RootCheck: Sendable {
+        let root: URL
+        let jobs: [CopyJob]
+    }
+
+    /// Another card whose running copy writes into a folder overlapping `roots`.
+    private func cardCopyingInto(_ roots: [URL], otherThan card: Card) -> Card? {
+        cards.first { other in
+            guard other !== card, other.engine != nil, let theirPlan = other.plan else { return false }
+            return roots.contains { mine in theirPlan.copyRoots.contains { Self.overlap(mine, $0) } }
+        }
+    }
+
+    private static func initialProgress(for jobs: [CopyJob]) -> CopyProgress {
+        CopyProgress(filesTotal: jobs.count, bytesTotal: jobs.reduce(0) { $0 + $1.file.size })
+    }
+
+    /// Why this copy folder can't take its jobs (nil: it can). Touches the disk, so call it off main.
+    nonisolated private static func destinationError(for check: RootCheck, cardVolumes: [URL],
+                                                     freeSpaceOf: (URL) -> Int64?, shootID: UUID?) -> String? {
+        do {
+            for directory in ShootPlanner.directories(for: check.jobs) {
+                try ShootPlanner.checkDestination(directory, root: check.root, cardVolumes: cardVolumes)
             }
-            // A failed card stays failed on screen (Retry copies again); a re-verify would turn it back into "ready".
-            if blocking.isEmpty { recompute(card) }
-            // This copy may make other cards' files duplicates (or fully backed): re-verify idle cards.
-            let copiedKeys = Set(outcome.copied.map(\.file.key))
-            for other in cards where other !== card && !copyQueue.contains(other.id) && needsRecompute(other, afterCopyOf: copiedKeys) {
-                if addInFlight.contains(other.id) { recomputeAfterAdd.insert(other.id) } else { recompute(other) }
+            let needed = check.jobs.reduce(Int64(0)) { $0 + $1.file.size }
+            if let free = freeSpaceOf(check.root), free < needed {
+                throw NotEnoughSpaceError(needed: needed, free: free)
             }
-            releaseQueuedCopies()
-            // Anything that landed inside a registered shoot changes that shoot's coverage.
-            let landed = shoots.filter { item in
-                if case .online(let shoot)? = item.availability {
-                    return shoot.copies.contains { ShootPlanner.relativeComponents(plan.destinationRoot, to: $0) != nil }
-                }
-                return false
-            }
-            for item in landed { checkCoverage(shootID: item.id, cardID: card.id) }
-            // Another card's copy landing in a shoot changes the browsed card's membership too.
-            if !landed.isEmpty, card.id != browsingCardID { refreshBrowserMembership(force: true) }
-            if marked || flatMarked { await saveRegistry() }
-            if !landed.isEmpty || marked || flatMarked { await refreshShoots() }
-            // The copies of a shoot that just received files may now differ: check them (forced).
-            var toCheck = Set(landed.map(\.id))
-            if !outcome.copied.isEmpty {
-                // Includes flat Choose Folder plans whose root is inside any copy (not only the primary).
-                let written = plan.copyRoots + [plan.destinationRoot]
-                for item in shoots {
-                    guard case .online(let shoot)? = item.availability else { continue }
-                    if shoot.copies.contains(where: { copy in written.contains { Self.overlap($0, copy) } }) { toCheck.insert(item.id) }
-                }
-            }
-            if !outcome.copied.isEmpty, let shootID = plan.shootID { toCheck.insert(shootID) }
-            if !toCheck.isEmpty { scheduleSyncCheck(toCheck, force: true) }
-            if !outcome.cancelled { openMainWindow() }
+            try preflight(workRoot: check.root, shootID: shootID)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Where the card's files now live, for the "All on …" line.
+    private func backedToLabel(plan: CopyPlan, runRoots: [URL], outcome: CopyOutcome) -> String {
+        let reachedRoots = runRoots.filter { root in
+            outcome.copied.contains { ShootPlanner.isInside($0.destination, root: root) }
+        }
+        let reachedLabels = Self.unique(reachedRoots.map { Self.copyLabel($0.path) })
+        if plan.copyRoots.count > 1, !reachedLabels.isEmpty {
+            return reachedLabels.joined(separator: " and ")
+        }
+        // "\u{0}" never prefixes a path, so no working volume means "not on the working drive".
+        let isOnWorkingDrive = plan.destinationRoot.path.hasPrefix(workingVolume?.path ?? "\u{0}")
+        return isOnWorkingDrive ? workingDriveName : plan.destinationLabel
+    }
+
+    /// Re-verifies a card now, or right after its in-flight addFootage/addFiles call ends.
+    private func recomputeOnceIdle(_ card: Card) {
+        if addInFlight.contains(card.id) {
+            recomputeAfterAdd.insert(card.id)
+        } else {
+            recompute(card)
         }
     }
 
@@ -315,17 +397,16 @@ extension AppModel {
         flushDeferredSyncChecks()
         startQueuedImports()
         for id in copyQueue {
-            guard let queued = cards.first(where: { $0.id == id }) else { copyQueue.removeAll { $0 == id }; continue }
+            guard let queued = cards.first(where: { $0.id == id }) else {
+                copyQueue.removeAll { $0 == id }
+                continue
+            }
             guard queued.engine == nil else { continue }
-            if addInFlight.contains(id) { recomputeAfterAdd.insert(id) } else { recompute(queued) }
+            recomputeOnceIdle(queued)
         }
     }
 
-    nonisolated struct NotEnoughSpaceError: LocalizedError {
-        let needed: Int64
-        let free: Int64
-        var errorDescription: String? { "Not enough space: needs \(Format.bytes(needed)), \(Format.bytes(free)) free." }
-    }
+    // MARK: Roots, labels and space
 
     static func overlap(_ a: URL, _ b: URL) -> Bool {
         a.standardizedFileURL == b.standardizedFileURL || ShootPlanner.isInside(a, root: b) || ShootPlanner.isInside(b, root: a)
@@ -334,10 +415,14 @@ extension AppModel {
     /// The jobs that write to `roots`. A single-root plan (flat folder, legacy) uses all jobs.
     private static func jobs(in jobs: [CopyJob], roots: [URL], of all: [URL]) -> [CopyJob] {
         guard all.count > 1 else { return jobs }
-        let keys = Set(roots.map(VolumeClassifier.normalizedPath))
-        return jobs.filter { job in job.root.map { keys.contains(VolumeClassifier.normalizedPath($0)) } ?? false }
+        let wantedRoots = Set(roots.map(VolumeClassifier.normalizedPath))
+        return jobs.filter { job in
+            guard let jobRoot = job.root else { return false }
+            return wantedRoots.contains(VolumeClassifier.normalizedPath(jobRoot))
+        }
     }
 
+    /// Short name for where a copy lives: the external drive's name, or "This Mac".
     nonisolated static func copyLabel(_ path: String) -> String {
         let parts = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
         return parts.count > 2 && parts[1] == "Volumes" ? parts[2] : "This Mac"
@@ -348,7 +433,8 @@ extension AppModel {
     /// whether the registry changed (the caller saves it).
     private func markUnreachedCopies(of card: Card, plan: CopyPlan, runRoots: [URL], outcome: CopyOutcome,
                                      done: Set<URL>, blocked: Set<URL>) -> Bool {
-        guard let marks = pendingSync(shootID: plan.shootID, runRoots: runRoots, outcome: outcome, done: done, blocked: blocked) else { return false }
+        guard let marks = pendingSync(shootID: plan.shootID, runRoots: runRoots, outcome: outcome,
+                                      done: done, blocked: blocked) else { return false }
         card.mirrorNote = marks.note
         return true
     }
@@ -361,15 +447,27 @@ extension AppModel {
         var short = record.copyPaths.filter { !ran.contains(VolumeClassifier.normalizedPath(URL(fileURLWithPath: $0))) }
         var reached: [String] = []
         for root in runRoots {
-            let landed = Set(outcome.copied.filter { !blocked.contains($0.file.url) && ShootPlanner.isInside($0.destination, root: root) }.map(\.file.url))
-            if done.isSubset(of: landed) { reached.append(Self.copyLabel(root.path)) } else { short.append(root.path) }
+            let landedInRoot = outcome.copied.filter { copied in
+                !blocked.contains(copied.file.url) && ShootPlanner.isInside(copied.destination, root: root)
+            }
+            let landedFiles = Set(landedInRoot.map(\.file.url))
+            if done.isSubset(of: landedFiles) {
+                reached.append(Self.copyLabel(root.path))
+            } else {
+                short.append(root.path)
+            }
         }
         guard !short.isEmpty else { return nil }
         for path in short { registry.setPendingSync(id: shootID, path: path, true) }
-        let missing = Self.unique(short.map(Self.copyLabel)).joined(separator: " and ")
-        let note = reached.isEmpty
-            ? "\(missing) didn't get every file; sync the shoot when it's connected."
-            : "Copied to \(Self.unique(reached).joined(separator: " and ")). \(missing) wasn't updated; sync the shoot when it's connected."
+
+        let shortNames = Self.unique(short.map(Self.copyLabel)).joined(separator: " and ")
+        let note: String
+        if reached.isEmpty {
+            note = "\(shortNames) didn't get every file; sync the shoot when it's connected."
+        } else {
+            let reachedNames = Self.unique(reached).joined(separator: " and ")
+            note = "Copied to \(reachedNames). \(shortNames) wasn't updated; sync the shoot when it's connected."
+        }
         return (note, reached)
     }
 
@@ -381,14 +479,19 @@ extension AppModel {
     /// Files that must stay in the plan: a checksum/size failure on any copy, or copies whose source checksums differ.
     nonisolated static func integrityBlocked(_ outcome: CopyOutcome) -> Set<URL> {
         var blocked = Set(outcome.failures.filter { $0.kind == .integrity }.map(\.file))
-        var seen: [URL: Data] = [:]
+        var checksumBySource: [URL: Data] = [:]
         for copied in outcome.copied {
-            guard let sum = copied.checksum else { continue }
-            if let earlier = seen[copied.file.url], earlier != sum { blocked.insert(copied.file.url) } else { seen[copied.file.url] = sum }
+            guard let checksum = copied.checksum else { continue }
+            if let earlier = checksumBySource[copied.file.url], earlier != checksum {
+                blocked.insert(copied.file.url)
+            } else {
+                checksumBySource[copied.file.url] = checksum
+            }
         }
         return blocked
     }
 
+    /// Path key for comparing copy folders: normalized, and insensitive to case and Unicode form.
     private func cmpKey(_ path: String) -> String {
         VolumeClassifier.normalizedPath(URL(fileURLWithPath: path)).precomposedStringWithCanonicalMapping.lowercased()
     }
@@ -402,14 +505,11 @@ extension AppModel {
         return plan.copyRoots.filter { current.contains(cmpKey($0.path)) }
     }
 
-    /// Free bytes on the volume holding `url` (nil: unknown). Injectable for tests.
-    /// The free-space lookup to use off main (the test fake in DEBUG builds).
+    /// The free-space lookup to use off main: free bytes on the volume holding a URL (nil: unknown).
+    /// Tests can substitute `_testFreeSpace`.
     func freeSpaceProvider() -> @Sendable (URL) -> Int64? {
         #if DEBUG
-        if let fake = _testFreeSpace {
-            nonisolated(unsafe) let hook = fake // test-only closure; tests pass pure functions
-            return { hook($0) }
-        }
+        if let fake = _testFreeSpace { return fake }
         #endif
         return { Self.diskFreeSpace($0) }
     }
@@ -427,7 +527,10 @@ extension AppModel {
         for file in dropped {
             guard let copy = backups[file.url] else { continue }
             let path = VolumeClassifier.normalizedPath(copy)
-            guard let holder = roots.first(where: { path.hasPrefix(VolumeClassifier.normalizedPath(URL(fileURLWithPath: $0)) + "/") }) else { continue }
+            let holder = roots.first { root in
+                path.hasPrefix(VolumeClassifier.normalizedPath(URL(fileURLWithPath: root)) + "/")
+            }
+            guard let holder else { continue }
             for other in roots where cmpKey(other) != cmpKey(holder) { short.insert(other) }
         }
         guard !short.isEmpty else { return false }
@@ -463,15 +566,14 @@ extension AppModel {
         cards.first { $0.engine != nil && addTargets[$0.id] == shootID }
     }
 
-    /// A card is copying into, or queued to copy into, `shootID`, or Sync Now is running for it: its copies can't be
-    /// removed or moved.
-    private func hasActiveCopy(into shootID: UUID) -> Bool {
-        syncActive.contains(shootID) || hasActiveIngest(into: shootID)
-    }
-
+    /// Whether an Add Files run or a card is copying into, or queued to copy into, `shootID`.
     func hasActiveIngest(into shootID: UUID) -> Bool {
-        hasActiveImport(into: shootID)
-            || cards.contains { ($0.engine != nil || $0.queuedBehind != nil) && ($0.plan?.shootID == shootID || addTargets[$0.id] == shootID) }
+        if hasActiveImport(into: shootID) { return true }
+        return cards.contains { card in
+            let isCopyingOrQueued = card.engine != nil || card.queuedBehind != nil
+            let targetsShoot = card.plan?.shootID == shootID || addTargets[card.id] == shootID
+            return isCopyingOrQueued && targetsShoot
+        }
     }
 
     /// Why the copies of `shootID` can't be removed or moved right now (nil: they can).
@@ -494,6 +596,7 @@ extension AppModel {
         return card.missing.contains { copiedKeys.contains($0.key) }
     }
 
+    /// Last check before writing: the folder must still exist and, for a shoot, still carry that shoot's id.
     nonisolated static func preflight(workRoot: URL?, shootID: UUID?) throws {
         guard let root = workRoot else { return }
         var isDir: ObjCBool = false
@@ -534,7 +637,12 @@ extension AppModel {
         let volume = card.volume
         Task {
             let error = await Task.detached { () -> Error? in
-                do { try NSWorkspace.shared.unmountAndEjectDevice(at: volume); return nil } catch { return error }
+                do {
+                    try NSWorkspace.shared.unmountAndEjectDevice(at: volume)
+                    return nil
+                } catch {
+                    return error
+                }
             }.value
             card.ejecting = false
             // Shown beside the card; never replaces whatever phase the card is in now.
