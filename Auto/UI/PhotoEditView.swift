@@ -34,12 +34,12 @@ struct PhotoEditView: View {
             } else {
                 HStack(spacing: 0) {
                     list.frame(width: 260)
-                    Divider().overlay(Theme.border)
+                    ThemedDivider()
                     detail.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             if !activeIDs.isEmpty {
-                Divider().overlay(Theme.border)
+                ThemedDivider()
                 VStack(spacing: 10) {
                     ForEach(activeIDs, id: \.self) { id in CullProgressRow(shootID: id) }
                 }

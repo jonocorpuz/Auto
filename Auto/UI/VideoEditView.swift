@@ -19,7 +19,7 @@ struct VideoEditView: View {
             } else {
                 HStack(spacing: 0) {
                     list.frame(width: 260)
-                    Divider().overlay(Theme.border)
+                    ThemedDivider()
                     detail.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }

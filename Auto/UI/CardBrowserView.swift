@@ -94,15 +94,15 @@ struct CardBrowserView: View {
     private func layout(groups: [CardBrowser.Group], shown: [CardBrowser.Group]) -> some View {
         VStack(spacing: 0) {
             toolbar(groups: groups)
-            Divider().overlay(Theme.border)
+            ThemedDivider()
             HStack(spacing: 0) {
                 locations(groups)
                     .frame(width: 200)
-                Divider().overlay(Theme.border)
+                ThemedDivider()
                 VStack(spacing: 0) {
                     content(shown)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    Divider().overlay(Theme.border)
+                    ThemedDivider()
                     statusBar(shown)
                 }
             }

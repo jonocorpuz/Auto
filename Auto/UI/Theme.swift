@@ -97,3 +97,38 @@ struct PrimaryPillButtonStyle: ButtonStyle {
             .contentShape(Capsule())
     }
 }
+
+/// A separator line in the theme's border colour.
+struct ThemedDivider: View {
+    var body: some View {
+        Divider().overlay(Theme.border)
+    }
+}
+
+/// Title and one-line subtitle at the top of a sheet.
+struct SheetHeader: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.system(size: 20, weight: .semibold))
+            Text(subtitle).font(.callout).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// A red warning-triangle line for something that went wrong.
+struct ErrorLabel: View {
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var body: some View {
+        Label(message, systemImage: "exclamationmark.triangle.fill")
+            .foregroundStyle(.red)
+            .font(.callout)
+    }
+}

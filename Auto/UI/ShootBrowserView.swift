@@ -56,7 +56,7 @@ struct ShootBrowserView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            Divider().overlay(Theme.border)
+            ThemedDivider()
             if let root {
                 browser(root: root)
             } else {
@@ -117,7 +117,7 @@ struct ShootBrowserView: View {
                 }
                 .padding(12)
             }
-            Divider().overlay(Theme.border)
+            ThemedDivider()
             statusBar
         }
         // A new identity per folder, so scroll position and focus start fresh.

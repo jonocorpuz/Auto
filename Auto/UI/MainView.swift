@@ -10,7 +10,7 @@ struct MainView: View {
             Sidebar()
             VStack(spacing: 0) {
                 header
-                Divider().overlay(Theme.border)
+                ThemedDivider()
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
