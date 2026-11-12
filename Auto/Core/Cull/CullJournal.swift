@@ -175,8 +175,4 @@ nonisolated enum CullJournal {
         }
         return out
     }
-
-    static func moves(runID: UUID, in copy: URL) throws -> [(from: String, to: String)] {
-        try moveEntries(runID: runID, in: copy).map { ($0.from, $0.to) }
-    }
 }

@@ -11,11 +11,9 @@ nonisolated final class FakeCullApplier: CullApplying, @unchecked Sendable {
     private var _revertWasCancelled: [Bool] = []
     private var _applyOnMain: [Bool] = []
     private let waitForCancelInApply: Bool
-    private let applyError: Error?
 
-    init(waitForCancelInApply: Bool = false, applyError: Error? = nil) {
+    init(waitForCancelInApply: Bool = false) {
         self.waitForCancelInApply = waitForCancelInApply
-        self.applyError = applyError
     }
 
     var plans: [CullPlan] { lock.withLock { _plans } }
@@ -27,7 +25,6 @@ nonisolated final class FakeCullApplier: CullApplying, @unchecked Sendable {
 
     func apply(_ plan: CullPlan, copies: [URL], cardVolumes: [URL], onMoved: @escaping @Sendable (Int, Int) -> Void) throws -> Int {
         lock.withLock { _plans.append(plan); _applyStarted = true; _applyOnMain.append(Thread.isMainThread) }
-        if let applyError { throw applyError }
         if waitForCancelInApply {
             let deadline = Date().addingTimeInterval(10)
             while !Task.isCancelled, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }

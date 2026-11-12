@@ -86,17 +86,6 @@ nonisolated struct CullSettings: Sendable, Codable, Equatable {
         self = clamped()
     }
 
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(criteria, forKey: .criteria)
-        try c.encode(mode, forKey: .mode)
-        try c.encode(model, forKey: .model)
-        try c.encode(customPrompts, forKey: .customPrompts)
-        try c.encode(reviewBeforeApplying, forKey: .reviewBeforeApplying)
-        try c.encode(maxConcurrentCalls, forKey: .maxConcurrentCalls)
-        try c.encode(maxRunBudgetUSD, forKey: .maxRunBudgetUSD)
-    }
-
     /// Returns a copy with numeric fields pulled into their supported ranges.
     func clamped() -> CullSettings {
         var s = self
@@ -262,13 +251,10 @@ nonisolated enum CullError: LocalizedError, Equatable {
     case onCard
     case outsideShoot(String)
     case noPhotos
-    case busy(String)
     case claudeNotInstalled
     case claudeNotLoggedIn
     case claudeFailed(String)
     case budgetExceeded(Double)
-    case sourceChanged(String)
-    case crossVolume(String)
     case journalWriteFailed(String)
     case nothingToUndo
     case rollbackFailed(String)
@@ -285,8 +271,6 @@ nonisolated enum CullError: LocalizedError, Equatable {
             return "\(path) is outside the shoot folder."
         case .noPhotos:
             return "There are no photos to cull in this shoot."
-        case .busy(let reason):
-            return "The cull can't start yet: \(reason)."
         case .claudeNotInstalled:
             return "The Claude Code CLI isn't installed. Install it, then try again."
         case .claudeNotLoggedIn:
@@ -295,10 +279,6 @@ nonisolated enum CullError: LocalizedError, Equatable {
             return "Claude failed: \(message)"
         case .budgetExceeded(let amount):
             return String(format: "The cull reached its $%.2f budget. Nothing was moved.", amount)
-        case .sourceChanged(let path):
-            return "\(path) changed since it was scanned, so it was left alone."
-        case .crossVolume(let path):
-            return "\(path) is on a different volume, so it can't be moved safely."
         case .journalWriteFailed(let message):
             return "Couldn't write the cull journal: \(message)"
         case .nothingToUndo:

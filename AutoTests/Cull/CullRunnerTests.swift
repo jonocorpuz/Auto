@@ -142,6 +142,17 @@ import Testing
             onRejects: { rejects.add($0) })
     }
 
+    /// Every analysis report written under the copy, oldest first.
+    private static func analysisReports(in copy: URL) -> [CullAnalysisReport] {
+        let dir = CullAnalysisLog.directory(in: copy)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return names.filter { $0.hasSuffix(".json") }.sorted().compactMap {
+            try? decoder.decode(CullAnalysisReport.self, from: Data(contentsOf: dir.appendingPathComponent($0)))
+        }
+    }
+
     private func cleanup(_ env: Env) {
         env.shoot.cleanup()
         try? FileManager.default.removeItem(at: env.workspace)
@@ -171,7 +182,7 @@ import Testing
         let env = Self.makeEnv()
         defer { cleanup(env) }
         guard case .completed = await go(env) else { Issue.record("expected completed"); return }
-        let reports = CullAnalysisLog.reports(in: env.copy)
+        let reports = Self.analysisReports(in: env.copy)
         #expect(reports.count == 1)
         guard let r = reports.first else { return }
         #expect(r.decisions.count == 24)
@@ -192,7 +203,7 @@ import Testing
         }
         defer { cleanup(env) }
         _ = await go(env)
-        let calls = CullAnalysisLog.reports(in: env.copy).first?.calls ?? []
+        let calls = Self.analysisReports(in: env.copy).first?.calls ?? []
         #expect(calls.count == 3)
         #expect(calls.allSatisfy { $0.outcome == "unreadable" && $0.inputTokens == 100 })
     }

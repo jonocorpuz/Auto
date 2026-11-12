@@ -70,7 +70,7 @@ import Testing
         #expect(read(copy, "Photo/CamA/_Rejects/1.JPG") == "one")
         #expect(!exists(copy, "Photo/CamA/1.JPG"))
         #expect(read(copy, "Photo/CamA/2.JPG") == "two")
-        let moves = try CullJournal.moves(runID: p.runID, in: copy)
+        let moves = try CullJournal.moveEntries(runID: p.runID, in: copy)
         #expect(moves.count == 1)
         #expect(moves[0].from == "Photo/CamA/1.JPG" && moves[0].to == "Photo/CamA/_Rejects/1.JPG")
         let events = try CullJournal.events(in: copy)
@@ -106,7 +106,7 @@ import Testing
         #expect(try apply(p, [copy]) == 1)
         #expect(read(copy, "Photo/CamA/_Rejects/1.JPG") == "j")
         #expect(read(copy, "Photo/CamA/_Rejects/1.CR3") == "r")
-        #expect(try CullJournal.moves(runID: p.runID, in: copy).count == 2)
+        #expect(try CullJournal.moveEntries(runID: p.runID, in: copy).count == 2)
     }
 
     @Test func existingDestinationNeverTouchedAndSuffixShared() throws {
@@ -289,7 +289,7 @@ import Testing
         #expect(true)
         #expect(exists(copy, "Photo/CamA/_Rejects/2.JPG"))
         #expect(read(copy, "Photo/CamA/3.JPG") == "x3")
-        #expect(try CullJournal.moves(runID: p.runID, in: copy).count == 2)
+        #expect(try CullJournal.moveEntries(runID: p.runID, in: copy).count == 2)
         let events = try CullJournal.events(in: copy)
         if case .finished(_, let s) = events.last { #expect(s.rejected == 2 && s.status == "cancelled") } else { Issue.record("not finished") }
     }
@@ -336,7 +336,7 @@ extension CullApplierTests {
         #expect(try applyIO(p, [copy], io: io) == 0)
         #expect(read(copy, "Photo/CamA/1.JPG") == "j" && read(copy, "Photo/CamA/1.CR3") == "raw")
         #expect(!exists(copy, "Photo/CamA/_Rejects/1.JPG"))
-        #expect(try CullJournal.moves(runID: p.runID, in: copy).isEmpty)
+        #expect(try CullJournal.moveEntries(runID: p.runID, in: copy).isEmpty)
     }
 
     @Test func rollbackFailureStaysJournaledAndThrows() throws {
@@ -424,7 +424,7 @@ extension CullApplierTests {
         let p = plan([r])
         #expect(try applyIO(p, [copy], io: io) == 0)
         #expect(read(copy, "Photo/CamA/1.JPG") == "j")
-        #expect(try CullJournal.moves(runID: p.runID, in: copy).isEmpty)
+        #expect(try CullJournal.moveEntries(runID: p.runID, in: copy).isEmpty)
         if case .finished(_, let s) = try CullJournal.events(in: copy).last {
             #expect(s.skippedCrossVolume == 1 && s.rejected == 0)
         } else { Issue.record("not finished") }

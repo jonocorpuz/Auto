@@ -68,7 +68,7 @@ import Testing
         #expect(read(b, "Photo/CamA/_Rejects/d/1.JPG") == "jj" && read(b, "Photo/CamA/_Rejects/d/1.CR3") == "rrr")
         #expect(read(b, "Photo/CamA/d/2.JPG") == "keep")
         #expect(try CullJournal.runs(in: b).first?.runID == id)
-        #expect(try CullJournal.moves(runID: id, in: b).count == 2)
+        #expect(try CullJournal.moveEntries(runID: id, in: b).count == 2)
     }
 
     @Test func idempotent() throws {

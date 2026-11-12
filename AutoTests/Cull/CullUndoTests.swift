@@ -61,7 +61,7 @@ import Testing
             #expect(read(c, "Photo/CamA/d/1.JPG") == "j" && read(c, "Photo/CamA/d/1.CR3") == "r")
             #expect(!exists(c, "Photo/CamA/_Rejects"))
             #expect(try CullJournal.runs(in: c).first?.undone == true)
-            #expect(try CullJournal.moves(runID: id, in: c).isEmpty)
+            #expect(try CullJournal.moveEntries(runID: id, in: c).isEmpty)
         }
     }
 

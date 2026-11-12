@@ -89,7 +89,7 @@ import Testing
         h.write(Data(#"{"moved":{"runID":"#.utf8))
         try h.close()
         #expect(try CullJournal.events(in: copy).count == 2)
-        #expect(try CullJournal.moves(runID: id, in: copy).count == 1)
+        #expect(try CullJournal.moveEntries(runID: id, in: copy).count == 1)
         #expect(try CullJournal.runs(in: copy).count == 1)
     }
 
@@ -100,7 +100,7 @@ import Testing
         try CullJournal.append(moved(id, "Photo/A/1.JPG"), runID: id, in: copy)
         try CullJournal.append(moved(id, "Photo/A/2.JPG"), runID: id, in: copy)
         try CullJournal.append(.restored(runID: id, from: "Photo/A/1.JPG", to: "Photo/A/1.JPG"), runID: id, in: copy)
-        let moves = try CullJournal.moves(runID: id, in: copy)
+        let moves = try CullJournal.moveEntries(runID: id, in: copy)
         #expect(moves.map(\.from) == ["Photo/A/2.JPG"])
         #expect(moves.first?.to == "Photo/A/_Rejects/2.JPG")
     }
@@ -118,7 +118,7 @@ import Testing
         try h.seekToEnd(); h.write(Data(#"{"moved":{"runID":"#.utf8)); try h.close()
         try CullJournal.append(moved(id, "Photo/A/1.JPG"), runID: id, in: copy)
         #expect(try CullJournal.events(in: copy).count == 2)
-        #expect(try CullJournal.moves(runID: id, in: copy).count == 1)
+        #expect(try CullJournal.moveEntries(runID: id, in: copy).count == 1)
     }
 
     @Test func intentsFoldIntoMovedPairAndRestored() throws {
@@ -138,7 +138,7 @@ import Testing
         #expect(e.count == 2 && e.allSatisfy { !$0.intentOnly })
         try CullJournal.append(intent("Photo/A/2.JPG"), runID: id, in: copy)
         try CullJournal.append(.restored(runID: id, from: "Photo/A/2.JPG", to: "Photo/A/2.JPG"), runID: id, in: copy)
-        #expect(try CullJournal.moves(runID: id, in: copy).count == 2)
+        #expect(try CullJournal.moveEntries(runID: id, in: copy).count == 2)
     }
 
     @Test func finishedStatusRoundTripsAndOldSummaryDecodes() throws {

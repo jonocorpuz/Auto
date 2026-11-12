@@ -93,13 +93,6 @@ nonisolated enum SelectsPlanner {
         return plan
     }
 
-    /// Proportional share of the survivors for one batch, at least 1.
-    static func quota(batch: Int, survivorsBefore: Int, survivorsAfter: Int) -> Int {
-        guard survivorsBefore > 0 else { return 1 }
-        let share = Double(batch) * Double(survivorsAfter) / Double(survivorsBefore)
-        return max(1, Int(share.rounded(.up)))
-    }
-
     /// Per-batch quotas that sum exactly to `after` (when it fits): floor of the proportional share,
     /// then the remainder one each in batch order (batches arrive best-first), capped at batch size.
     static func quotas(batchSizes: [Int], survivorsAfter after: Int) -> [Int] {

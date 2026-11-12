@@ -44,8 +44,4 @@ nonisolated struct CullCriterion: Sendable, Hashable, Identifiable {
     )
 
     static let all: [CullCriterion] = [exposure, duplicates, unusable, horizon, cropped, eyes]
-
-    static func byID(_ id: String) -> CullCriterion? {
-        all.first { $0.id == id }
-    }
 }

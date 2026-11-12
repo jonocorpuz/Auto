@@ -58,8 +58,6 @@ struct CullModelsTests {
         #expect(CullCriterion.all.count == 6)
         #expect(Set(ids).count == ids.count)
         #expect(ids == ["exposure", "duplicates", "unusable", "horizon", "cropped", "eyes"])
-        #expect(CullCriterion.byID("horizon")?.title == "Horizon")
-        #expect(CullCriterion.byID("nope") == nil)
     }
 
     @Test func journalRunEventRoundTrips() throws {

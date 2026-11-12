@@ -13,8 +13,6 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
     static let eyeClosedThreshold = 0.18
     static let metricsLongEdge = 512
 
-    init() {}
-
     func analyze(_ url: URL, workName: String, workDir: URL, spec: PreviewSpec) async throws
         -> (PhotoMetrics, preview: URL, faceStrip: URL?)
     {

@@ -58,16 +58,6 @@ nonisolated enum CullAnalysisLog {
         try e.encode(report).write(to: url, options: [.withoutOverwriting])
         return url
     }
-
-    static func reports(in copy: URL) -> [CullAnalysisReport] {
-        let dir = directory(in: copy)
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        return names.filter { $0.hasSuffix(".json") }.sorted().compactMap {
-            try? d.decode(CullAnalysisReport.self, from: Data(contentsOf: dir.appendingPathComponent($0)))
-        }
-    }
 }
 
 /// Thread-safe collector of call records during a run.

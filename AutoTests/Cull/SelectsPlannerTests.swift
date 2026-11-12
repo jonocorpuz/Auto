@@ -72,11 +72,6 @@ struct SelectsPlannerTests {
         }
     }
 
-    @Test func quotaIsProportionalCeilAtLeastOne() {
-        #expect(SelectsPlanner.quota(batch: 10, survivorsBefore: 25, survivorsAfter: 10) == 4)
-        #expect(SelectsPlanner.quota(batch: 1, survivorsBefore: 100, survivorsAfter: 1) == 1)
-    }
-
     @Test func mergeHandlesBadPicks() {
         let batch = [cand("a", 9), cand("b", 7), cand("c", 5), cand("d", 3)]
         #expect(SelectsPlanner.merge(picks: ["c", "zzz", "c", "a"], batch: batch, quota: 2).map(\.photoID) == ["c", "a"])
