@@ -46,7 +46,6 @@ nonisolated enum ShootPlanner {
     static let photoFolder = "Photo"
 
     enum PathError: LocalizedError, Equatable {
-        case invalidName
         case outsideWorkFolder
         case notAFolder(String)
         case onCard
@@ -54,7 +53,6 @@ nonisolated enum ShootPlanner {
 
         var errorDescription: String? {
             switch self {
-            case .invalidName: "Enter a shoot name that works as a folder name."
             case .outsideWorkFolder: "That shoot folder would land outside your work folder."
             case .notAFolder(let name): "\u{201C}\(name)\u{201D} already exists as a file, so Auto can't make a folder there."
             case .onCard: CardDestinationError().localizedDescription
@@ -158,14 +156,6 @@ nonisolated enum ShootPlanner {
                 if !exists(current) { try fm.createDirectory(at: current, withIntermediateDirectories: false) }
             }
         }
-    }
-
-    /// Shoot folder: root/<name>. Throws if the name isn't usable or the result would escape `root`.
-    static func shootURL(root: URL, name: String) throws -> URL {
-        guard let folder = safeComponent(name) else { throw PathError.invalidName }
-        let shoot = root.appendingPathComponent(folder, isDirectory: true)
-        guard isInside(shoot, root: root) else { throw PathError.outsideWorkFolder }
-        return shoot
     }
 
     /// Unique destination directories of the jobs, sorted by path.

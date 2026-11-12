@@ -11,26 +11,6 @@ struct ShootPlannerTests {
         MediaFile(url: URL(fileURLWithPath: "/card/\(name)"), size: size, date: Date(), kind: kind, cameraID: camera)
     }
 
-    @Test func traversalShootNameStaysInsideTheWorkRoot() throws {
-        let root = URL(fileURLWithPath: "/Volumes/T7/Work")
-        let shoot = try ShootPlanner.shootURL(root: root, name: "../../CARD/DCIM")
-        #expect(shoot.path == "/Volumes/T7/Work/..-..-CARD-DCIM")
-        #expect(ShootPlanner.isInside(shoot, root: root))
-    }
-
-    @Test func shootURLIsNameDirectlyUnderRoot() throws {
-        let root = URL(fileURLWithPath: "/w")
-        #expect(try ShootPlanner.shootURL(root: root, name: " Brand film ").path == "/w/Brand film")
-        #expect(try ShootPlanner.shootURL(root: root, name: "a/b:c").path == "/w/a-b-c")
-    }
-
-    @Test(arguments: ["", "   ", ".", "..", " .. ", "\n"])
-    func unusableShootNamesThrow(_ name: String) {
-        #expect(throws: ShootPlanner.PathError.invalidName) {
-            try ShootPlanner.shootURL(root: URL(fileURLWithPath: "/w"), name: name)
-        }
-    }
-
     @Test func safeComponentAndContainment() {
         #expect(ShootPlanner.safeComponent(" Acme / Co ") == "Acme - Co")
         #expect(ShootPlanner.safeComponent("..") == nil)
@@ -157,7 +137,7 @@ struct ShootPlannerTests {
         #expect(CardPhase.afterScan(fileCount: 3, error: nil) == nil)
     }
 
-    @Test func shootURLUnderPrivateTmpRoot() throws {
+    @Test func jobsStayUnderPrivateTmpRoot() throws {
         let fm = FileManager.default
         let base = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
         let root = fm.isWritableFile(atPath: base.path)
@@ -165,7 +145,7 @@ struct ShootPlannerTests {
             : fm.temporaryDirectory.appendingPathComponent("AutoRoot-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: root) }
-        let shoot = try ShootPlanner.shootURL(root: root, name: "New Shoot")
+        let shoot = root.appendingPathComponent("New Shoot", isDirectory: true)
         #expect(ShootPlanner.isInside(shoot, root: root))
         let jobs = ShootPlanner.jobs(missing: [file("a.MP4", kind: .video, camera: "a")], shoot: shoot, cameras: [], fallback: "Card")
         #expect(jobs.allSatisfy { ShootPlanner.isInside($0.destDir, root: root) })

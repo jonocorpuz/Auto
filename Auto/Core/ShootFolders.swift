@@ -142,7 +142,6 @@ nonisolated enum ShootFolders {
             // A symlink (dangling or leading elsewhere) at the name: same answer classify gives.
             case .outsideWorkFolder: throw ShootError.notAFolder(name)
             case .workFolderMissing: throw ShootError.parentMissing
-            case .invalidName: throw ShootError.invalidName
             }
         }
     }
