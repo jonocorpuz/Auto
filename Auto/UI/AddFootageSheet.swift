@@ -13,34 +13,36 @@ struct AddFootageSheet: View {
     @State private var working = false
     @State private var copyDuplicates = false
 
+    // MARK: Derived state
+
     private var item: ShootItem? { model.shoots.first { $0.id == shootID } }
     private var card: Card? { model.cards.first { $0.id == cardID } }
-    private var key: CoverageKey? { cardID.map { CoverageKey(shootID: shootID, cardID: $0) } }
-    private var state: CoverageState? { key.flatMap { model.coverage[$0] } }
-    private var done: ShootCoverage? {
-        if case .done(let c)? = state { return c }
-        return nil
-    }
     private var shootName: String { item?.record.name ?? "this shoot" }
     private var dateText: String { (item?.date ?? Date()).formatted(.dateTime.month(.abbreviated).day().year()) }
 
-    private func mutate(_ change: (inout ShootSelection) -> Void) {
-        guard var sel = selection else { return }
-        change(&sel)
-        selection = sel
+    /// The check of the chosen card against the shoot; nil when no card is chosen or it hasn't started.
+    private var coverageState: CoverageState? {
+        guard let cardID else { return nil }
+        return model.coverage[CoverageKey(shootID: shootID, cardID: cardID)]
+    }
+
+    /// The finished coverage check, once there is one.
+    private var coverage: ShootCoverage? {
+        if case .done(let coverage)? = coverageState { return coverage }
+        return nil
     }
 
     /// Days per camera group, from what is not yet in the shoot once known, else from every card file.
     private var days: [String: [ShootDay]] {
         guard let card else { return [:] }
-        let files = done?.notInShoot ?? card.files
+        let files = coverage?.notInShoot ?? card.files
         return ShootSelection.days(missing: files, cameras: cameras, calendar: model.calendar)
     }
 
     /// Selected files not yet in the shoot.
     private var selectedFiles: [MediaFile] {
-        guard let done, let selection else { return [] }
-        return selection.filter(done.notInShoot)
+        guard let coverage, let selection else { return [] }
+        return selection.filter(coverage.notInShoot)
     }
 
     /// Duplicates among the current selection (provisional until coverage is done).
@@ -49,17 +51,23 @@ struct AddFootageSheet: View {
         return model.duplicates(shootID: shootID, cardID: cardID, candidates: selectedFiles)
     }
 
+    /// How many files the Add button will copy.
     private var addCount: Int {
-        let selected = selectedFiles.count
-        return copyDuplicates ? selected : max(0, selected - duplicates.count)
+        let selectedCount = selectedFiles.count
+        if copyDuplicates { return selectedCount }
+        return max(0, selectedCount - duplicates.count)
     }
+
+    /// Files on the card that fit no camera.
+    private var otherFilesDays: [ShootDay] {
+        days[ShootSelection.otherID] ?? []
+    }
+
+    // MARK: Body
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Add Footage").font(.system(size: 20, weight: .semibold))
-                Text("\(shootName) · \(dateText)").font(.callout).foregroundStyle(.secondary)
-            }
+            SheetHeader(title: "Add Footage", subtitle: "\(shootName) · \(dateText)")
 
             cardPicker
 
@@ -69,7 +77,7 @@ struct AddFootageSheet: View {
                 duplicatesBlock
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        if !cameras.isEmpty || !(days[ShootSelection.otherID] ?? []).isEmpty { camerasSection }
+                        if !cameras.isEmpty || !otherFilesDays.isEmpty { camerasSection }
                     }
                 }
                 .scrollBounceBehavior(.basedOnSize)
@@ -77,20 +85,10 @@ struct AddFootageSheet: View {
             }
 
             if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
+                ErrorLabel(error)
             }
 
-            HStack {
-                Spacer()
-                Button("Cancel") { model.shootSheet = nil }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut(.cancelAction)
-                Button(addCount == 0 ? "Add Files" : "Add \(Format.count(addCount, "file", "files"))") { add() }
-                    .buttonStyle(PrimaryPillButtonStyle())
-                    .frame(width: 160)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(addCount == 0 || working)
-            }
+            buttons
         }
         .padding(24)
         .frame(width: 500)
@@ -101,17 +99,37 @@ struct AddFootageSheet: View {
         }
         .onChange(of: cardID) { load() }
         .onChange(of: model.cards.map(\.id)) {
+            // The chosen card was unplugged (or none was chosen): fall back to the first one.
             if cardID == nil || card == nil { cardID = model.cards.first?.id }
         }
     }
 
+    private var buttons: some View {
+        HStack {
+            Spacer()
+            Button("Cancel") { model.shootSheet = nil }
+                .buttonStyle(.bordered)
+                .keyboardShortcut(.cancelAction)
+            Button(addCount == 0 ? "Add Files" : "Add \(Format.count(addCount, "file", "files"))") { add() }
+                .buttonStyle(PrimaryPillButtonStyle())
+                .frame(width: 160)
+                .keyboardShortcut(.defaultAction)
+                .disabled(addCount == 0 || working)
+        }
+    }
+
+    /// Resets the sheet for the chosen card and starts checking it against the shoot.
     private func load() {
         error = nil
         copyDuplicates = false
-        guard let card, let id = cardID else { cameras = []; selection = nil; return }
+        guard let card, let cardID else {
+            cameras = []
+            selection = nil
+            return
+        }
         cameras = card.cameras
-        selection = model.shootSheetDefaults(shootID: shootID, cardID: id)
-        model.checkCoverage(shootID: shootID, cardID: id)
+        selection = model.shootSheetDefaults(shootID: shootID, cardID: cardID)
+        model.checkCoverage(shootID: shootID, cardID: cardID)
     }
 
     // MARK: Card
@@ -141,58 +159,76 @@ struct AddFootageSheet: View {
     // MARK: Completeness
 
     @ViewBuilder private var banner: some View {
-        switch state {
-        case .checking(let p)?:
+        switch coverageState {
+        case .checking(let progress)?:
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
-                Text("Checking card against \(shootName)… \(p.filesDone)/\(p.filesTotal)")
+                Text("Checking card against \(shootName)… \(progress.filesDone)/\(progress.filesTotal)")
                     .font(.callout).monospacedDigit()
                 Spacer()
             }
-        case .done(let c)?:
-            VStack(alignment: .leading, spacing: 4) {
-                if c.dayTotal == 0 {
-                    Label("No files from \(dateText) on this card", systemImage: "exclamationmark.circle.fill")
-                        .foregroundStyle(.orange)
-                } else if c.isComplete {
-                    Label("Complete — all \(Format.count(c.dayTotal, "file", "files")) from \(dateText) are in this shoot",
-                          systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                } else {
-                    Label("\(c.dayTotal - c.dayInShoot) of \(Format.count(c.dayTotal, "file", "files")) from \(dateText) are not in this shoot yet",
-                          systemImage: "exclamationmark.circle.fill").foregroundStyle(.orange)
-                }
-                let other = otherDayCount(c)
-                if other > 0 {
-                    Text("+\(Format.count(other, "file", "files")) from other days on this card")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .font(.callout)
+        case .done(let coverage)?:
+            coverageSummary(coverage)
         case .failed(let reason)?:
-            Label(reason, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
+            ErrorLabel(reason)
         case nil:
             EmptyView()
         }
     }
 
+    private func coverageSummary(_ coverage: ShootCoverage) -> some View {
+        let dayFiles = Format.count(coverage.dayTotal, "file", "files")
+        let otherDayCount = otherDayCount(coverage)
+        return VStack(alignment: .leading, spacing: 4) {
+            if coverage.dayTotal == 0 {
+                Label("No files from \(dateText) on this card", systemImage: "exclamationmark.circle.fill")
+                    .foregroundStyle(.orange)
+            } else if coverage.isComplete {
+                Label("Complete — all \(dayFiles) from \(dateText) are in this shoot",
+                      systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            } else {
+                Label("\(coverage.dayTotal - coverage.dayInShoot) of \(dayFiles) from \(dateText) are not in this shoot yet",
+                      systemImage: "exclamationmark.circle.fill").foregroundStyle(.orange)
+            }
+            if otherDayCount > 0 {
+                Text("+\(Format.count(otherDayCount, "file", "files")) from other days on this card")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .font(.callout)
+    }
+
+    /// Files not in the shoot that were recorded on a different day than the shoot's.
+    private func otherDayCount(_ coverage: ShootCoverage) -> Int {
+        coverage.notInShoot.filter { model.calendar.startOfDay(for: $0.date) != coverage.day }.count
+    }
+
+    // MARK: Notices
+
+    /// Another card that is copying into this shoot right now, if any.
+    private var otherCardCopyingIntoShoot: Card? {
+        guard let copyingCard = model.isCopyingInto(shootID: shootID) else { return nil }
+        return copyingCard.id == cardID ? nil : copyingCard
+    }
+
     @ViewBuilder private var shootNotices: some View {
-        let busy = model.isCopyingInto(shootID: shootID).flatMap { $0.id == cardID ? nil : $0 }
+        let busyCard = otherCardCopyingIntoShoot
         let copies = item?.copies ?? []
         let online = copies.filter { $0.availability == .online }
         let offline = copies.filter { $0.availability == .offline }
-        if busy != nil || copies.count > 1 {
+        if busyCard != nil || copies.count > 1 {
             VStack(alignment: .leading, spacing: 6) {
-                if let busy {
-                    Label("\(busy.name) is copying into this shoot. Files it brings will be skipped when this copy starts.",
+                if let busyCard {
+                    Label("\(busyCard.name) is copying into this shoot. Files it brings will be skipped when this copy starts.",
                           systemImage: "clock")
                         .foregroundStyle(.secondary)
                 }
                 if copies.count > 1, !online.isEmpty {
-                    Label("Copies to \(Self.list(online.map(\.volumeName)))", systemImage: "externaldrive")
+                    Label("Copies to \(Self.sentenceList(online.map(\.volumeName)))", systemImage: "externaldrive")
                         .foregroundStyle(.secondary)
                 }
                 if !offline.isEmpty {
-                    let names = Self.list(offline.map(\.volumeName))
+                    let names = Self.sentenceList(offline.map(\.volumeName))
                     Label("\(names) \(offline.count == 1 ? "isn't" : "aren't") connected; it'll be marked to sync.",
                           systemImage: "externaldrive.badge.exclamationmark")
                         .foregroundStyle(Theme.warning)
@@ -203,19 +239,20 @@ struct AddFootageSheet: View {
         }
     }
 
-    private static func list(_ names: [String]) -> String {
+    /// "A", "A and B", "A, B and C", with repeated names dropped.
+    private static func sentenceList(_ names: [String]) -> String {
         var seen = Set<String>()
         let unique = names.filter { seen.insert($0).inserted }
-        switch unique.count {
-        case 0: return ""
-        case 1: return unique[0]
-        default: return unique.dropLast().joined(separator: ", ") + " and " + unique[unique.count - 1]
-        }
+        guard let last = unique.last else { return "" }
+        if unique.count == 1 { return last }
+        return unique.dropLast().joined(separator: ", ") + " and " + last
     }
+
+    // MARK: Duplicates
 
     @ViewBuilder private var duplicatesBlock: some View {
         let report = duplicates
-        if done != nil, !report.isEmpty {
+        if coverage != nil, !report.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(report.byDrive, id: \.drive) { drive in
                     Label("\(Format.count(drive.count, "duplicate", "duplicates")) already on \(drive.drive) (\(Format.bytes(drive.bytes)))",
@@ -238,39 +275,35 @@ struct AddFootageSheet: View {
         }
     }
 
-    private func otherDayCount(_ c: ShootCoverage) -> Int {
-        c.notInShoot.filter { model.calendar.startOfDay(for: $0.date) != c.day }.count
-    }
-
     // MARK: Cameras
 
     private var camerasSection: some View {
-        let sel = selection ?? ShootSelection(missing: [], cameras: [], calendar: model.calendar)
-        let allDays = days
+        let shownSelection = selection ?? ShootSelection(missing: [], cameras: [], calendar: model.calendar)
+        let daysByGroup = days
         return VStack(alignment: .leading, spacing: 8) {
             SectionHeader(title: "Cameras") {
                 Text(Format.count(addCount, "file", "files") + " selected").font(.caption).foregroundStyle(.secondary)
             }
             SurfaceCard(padding: 12) {
                 VStack(spacing: 0) {
-                    ForEach(Array($cameras.enumerated()), id: \.element.id) { index, $cam in
-                        if index > 0 { divider }
-                        groupBlock(id: cam.id, sel: sel, days: allDays[cam.id] ?? []) {
+                    ForEach(Array($cameras.enumerated()), id: \.element.id) { index, $camera in
+                        if index > 0 { rowDivider }
+                        groupBlock(id: camera.id, selection: shownSelection, days: daysByGroup[camera.id] ?? []) {
                             Image(systemName: "video")
                         } title: {
-                            Text(cam.label)
+                            Text(camera.label)
                         } trailing: {
-                            TextField("Folder", text: $cam.folderName)
+                            TextField("Folder", text: $camera.folderName)
                                 .labelsHidden()
                                 .textFieldStyle(.plain)
                                 .inputStyle(focused: false)
                                 .frame(width: 160)
-                                .disabled(!sel.isIncluded(camera: cam.id))
+                                .disabled(!shownSelection.isIncluded(camera: camera.id))
                         }
                     }
-                    if let other = allDays[ShootSelection.otherID], !other.isEmpty {
-                        if !cameras.isEmpty { divider }
-                        groupBlock(id: ShootSelection.otherID, sel: sel, days: other) {
+                    if let otherDays = daysByGroup[ShootSelection.otherID], !otherDays.isEmpty {
+                        if !cameras.isEmpty { rowDivider }
+                        groupBlock(id: ShootSelection.otherID, selection: shownSelection, days: otherDays) {
                             Image(systemName: "doc")
                         } title: {
                             Text("Other files")
@@ -283,27 +316,21 @@ struct AddFootageSheet: View {
         }
     }
 
-    private var divider: some View {
+    private var rowDivider: some View {
         Rectangle().fill(Theme.border).frame(height: 1).padding(.vertical, 10)
     }
 
+    /// One camera (or "Other files"): a checkbox row, then a checkbox per recording day while it is on.
     private func groupBlock<Icon: View, Title: View, Trailing: View>(
-        id: String, sel: ShootSelection, days groupDays: [ShootDay],
+        id groupID: String, selection shownSelection: ShootSelection, days groupDays: [ShootDay],
         @ViewBuilder icon: () -> Icon, @ViewBuilder title: () -> Title, @ViewBuilder trailing: () -> Trailing
     ) -> some View {
-        let on = sel.isIncluded(camera: id)
+        let isIncluded = shownSelection.isIncluded(camera: groupID)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Toggle("", isOn: Binding(
-                    get: { on },
-                    set: { value in
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            mutate { $0.setCamera(id, included: value, days: groupDays.map(\.start)) }
-                        }
-                    }
-                ))
-                .toggleStyle(.checkbox)
-                .labelsHidden()
+                checkbox(isOn: isIncluded) { included in
+                    updateSelection { $0.setCamera(groupID, included: included, days: groupDays.map(\.start)) }
+                }
                 icon()
                     .foregroundStyle(.secondary)
                     .frame(width: 28, height: 28)
@@ -312,22 +339,15 @@ struct AddFootageSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 trailing()
             }
-            .opacity(on ? 1 : 0.5)
+            .opacity(isIncluded ? 1 : 0.5)
 
-            if on {
+            if isIncluded {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(groupDays, id: \.start) { day in
                         HStack(spacing: 8) {
-                            Toggle("", isOn: Binding(
-                                get: { sel.isIncluded(camera: id, day: day.start) },
-                                set: { value in
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        mutate { $0.set(camera: id, day: day.start, included: value) }
-                                    }
-                                }
-                            ))
-                            .toggleStyle(.checkbox)
-                            .labelsHidden()
+                            checkbox(isOn: shownSelection.isIncluded(camera: groupID, day: day.start)) { included in
+                                updateSelection { $0.set(camera: groupID, day: day.start, included: included) }
+                            }
                             DayChip(day: day, calendar: model.calendar)
                             Spacer()
                         }
@@ -339,16 +359,36 @@ struct AddFootageSheet: View {
         .clipped()
     }
 
+    /// An unlabelled checkbox whose change is animated, so day rows slide in and out.
+    private func checkbox(isOn: Bool, onChange: @escaping (Bool) -> Void) -> some View {
+        Toggle("", isOn: Binding(
+            get: { isOn },
+            set: { included in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    onChange(included)
+                }
+            }
+        ))
+        .toggleStyle(.checkbox)
+        .labelsHidden()
+    }
+
+    private func updateSelection(_ change: (inout ShootSelection) -> Void) {
+        guard var updated = selection else { return }
+        change(&updated)
+        selection = updated
+    }
+
     // MARK: Add
 
     private func add() {
         guard let card, let selection, let cardID else { return }
         working = true
         error = nil
-        let cams = cameras
+        let chosenCameras = cameras
         Task {
             do {
-                try await model.addFootage(shootID: shootID, cardID: cardID, cameras: cams, selection: selection,
+                try await model.addFootage(shootID: shootID, cardID: cardID, cameras: chosenCameras, selection: selection,
                                            includeDuplicates: copyDuplicates)
                 model.copy(card)
                 model.shootSheet = nil
