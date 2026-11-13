@@ -42,64 +42,98 @@ nonisolated enum CullReplay {
         var undone: Date?
     }
 
+    /// What the target's journal already records about a run.
+    private struct TargetRunState {
+        var hasRun = false
+        var hasFinished = false
+        var hasUndone = false
+    }
+
+    // MARK: - Replay
+
     static func replay(from source: URL, to target: URL, cardVolumes: [URL], io: CullIO = .live) throws -> CullReplayResult {
         guard source.standardizedFileURL.path != target.standardizedFileURL.path else { return CullReplayResult() }
         let online = try CullApplier.checkCopies([target], cardVolumes: cardVolumes)
         guard let target = online.first else { throw CullError.noCopiesOnline }
 
-        var order: [UUID] = []
-        var runs: [UUID: SourceRun] = [:]
-        func touch(_ id: UUID) { if runs[id] == nil { runs[id] = SourceRun(); order.append(id) } }
-        for e in try CullJournal.events(in: source) {
-            switch e {
-            case .run(let id, _, _, _):
-                touch(id); runs[id]?.run = e
-            case .moved(let id, let from, let to, let reason, let criterion, let keeper, let photoID):
-                touch(id)
-                runs[id]?.pairs.append(SourcePair(members: [CullMovedMember(from: from, to: to)], reason: reason,
-                                                  criterion: criterion, keeper: keeper, photoID: photoID))
-            case .movedPair(let id, let members, let reason, let criterion, let keeper, let photoID):
-                touch(id)
-                runs[id]?.pairs.append(SourcePair(members: members, reason: reason, criterion: criterion,
-                                                  keeper: keeper, photoID: photoID))
-            case .intent(let id, _, _, _, _):
-                touch(id)   // not completed on the source: nothing to replay
-            case .restored(let id, let from, _):
-                touch(id); runs[id]?.restoredFroms.insert(from)
-            case .restoreSkipped(let id, _, _):
-                touch(id)
-            case .finished(let id, let summary):
-                touch(id); runs[id]?.finished = summary
-            case .undone(let id, let date):
-                touch(id); runs[id]?.undone = date
-            }
-        }
-
-        var targetState: [UUID: (run: Bool, finished: Bool, undone: Bool)] = [:]
-        for e in try CullJournal.events(in: target) {
-            switch e {
-            case .run(let id, _, _, _): targetState[id, default: (false, false, false)].run = true
-            case .finished(let id, _): targetState[id, default: (false, false, false)].finished = true
-            case .undone(let id, _): targetState[id, default: (false, false, false)].undone = true
-            default: break
-            }
-        }
+        let (runOrder, sourceRuns) = try readSourceRuns(from: source)
+        let targetStates = try readTargetStates(from: target)
 
         var result = CullReplayResult()
-        for id in order {
-            guard let sr = runs[id] else { continue }
-            let t = targetState[id] ?? (false, false, false)
-            let needed = !t.run || (sr.finished != nil && !t.finished) || (sr.undone != nil && !t.undone)
-            guard needed, !t.undone else { continue }
-            guard sr.finished?.status == "completed" else {
+        for id in runOrder {
+            guard let sourceRun = sourceRuns[id] else { continue }
+            let targetState = targetStates[id] ?? TargetRunState()
+            guard needsReplay(sourceRun, targetState) else { continue }
+            guard sourceRun.finished?.status == "completed" else {
                 result.ignoredRuns.append(id)
                 continue
             }
             result.runsReplayed += 1
-            try replayRun(id, sr, source: source, targetHasRun: t.run, targetFinished: t.finished, target: target, io: io, result: &result)
+            try replayRun(id, sourceRun, source: source, targetHasRun: targetState.hasRun,
+                          targetFinished: targetState.hasFinished, target: target, io: io, result: &result)
         }
         return result
     }
+
+    /// A run needs replaying when the target is missing its start, its finish or its undo, and hasn't
+    /// been undone on the target already.
+    private static func needsReplay(_ sourceRun: SourceRun, _ targetState: TargetRunState) -> Bool {
+        let missingStart = !targetState.hasRun
+        let missingFinish = sourceRun.finished != nil && !targetState.hasFinished
+        let missingUndo = sourceRun.undone != nil && !targetState.hasUndone
+        return (missingStart || missingFinish || missingUndo) && !targetState.hasUndone
+    }
+
+    /// The source's runs, keyed by ID, plus the order they first appear in its journal.
+    private static func readSourceRuns(from source: URL) throws -> (order: [UUID], runs: [UUID: SourceRun]) {
+        var order: [UUID] = []
+        var runs: [UUID: SourceRun] = [:]
+        func track(_ id: UUID) {
+            guard runs[id] == nil else { return }
+            runs[id] = SourceRun()
+            order.append(id)
+        }
+        for event in try CullJournal.events(in: source) {
+            switch event {
+            case .run(let id, _, _, _):
+                track(id); runs[id]?.run = event
+            case .moved(let id, let from, let to, let reason, let criterion, let keeper, let photoID):
+                track(id)
+                runs[id]?.pairs.append(SourcePair(members: [CullMovedMember(from: from, to: to)], reason: reason,
+                                                  criterion: criterion, keeper: keeper, photoID: photoID))
+            case .movedPair(let id, let members, let reason, let criterion, let keeper, let photoID):
+                track(id)
+                runs[id]?.pairs.append(SourcePair(members: members, reason: reason, criterion: criterion,
+                                                  keeper: keeper, photoID: photoID))
+            case .intent(let id, _, _, _, _):
+                track(id)   // not completed on the source: nothing to replay
+            case .restored(let id, let from, _):
+                track(id); runs[id]?.restoredFroms.insert(from)
+            case .restoreSkipped(let id, _, _):
+                track(id)
+            case .finished(let id, let summary):
+                track(id); runs[id]?.finished = summary
+            case .undone(let id, let date):
+                track(id); runs[id]?.undone = date
+            }
+        }
+        return (order, runs)
+    }
+
+    private static func readTargetStates(from target: URL) throws -> [UUID: TargetRunState] {
+        var states: [UUID: TargetRunState] = [:]
+        for event in try CullJournal.events(in: target) {
+            switch event {
+            case .run(let id, _, _, _): states[id, default: TargetRunState()].hasRun = true
+            case .finished(let id, _): states[id, default: TargetRunState()].hasFinished = true
+            case .undone(let id, _): states[id, default: TargetRunState()].hasUndone = true
+            default: break
+            }
+        }
+        return states
+    }
+
+    // MARK: - Journal helpers
 
     private static func append(_ e: CullJournalEvent, _ id: UUID, _ target: URL) throws {
         do { try CullJournal.append(e, runID: id, in: target) }
@@ -111,6 +145,8 @@ nonisolated enum CullReplay {
             if case .restoreSkipped(let r, _, _) = $0 { return r == id } else { return false }
         }.count
     }
+
+    // MARK: - Replaying one run
 
     private static func replayRun(_ id: UUID, _ sr: SourceRun, source: URL, targetHasRun: Bool, targetFinished: Bool,
                                   target: URL, io: CullIO, result: inout CullReplayResult) throws {
