@@ -136,7 +136,16 @@ Auto/                         # repo root
 │   │   ├── AutoApp.swift     #   @main; placeholder Settings scene (Cmd-comma goes to AppDelegate)
 │   │   ├── AppDelegate.swift #   NSStatusItem (left click: window, right click: menu); main window (Settings is a tab)
 │   │   ├── AppTab.swift      #   sidebar tabs + light/dark AppearanceMode
-│   │   ├── AppModel.swift    #   @Observable state; orchestrates Core (shoots, coverage, addFootage, manual import, browser membership, mirrors, ingest fan-out, copy queue, sync scheduler, Sync Now)
+│   │   ├── Format.swift      #   shared count and byte-size wording
+│   │   ├── AppModel.swift    #   @Observable state and init only; orchestration lives in the AppModel+*.swift extensions
+│   │   ├── AppModel+AddFootage.swift #   add footage: coverage checks for a card against a shoot
+│   │   ├── AppModel+Browser.swift #   card browser: file groups, thumbnail cache, read-only file actions
+│   │   ├── AppModel+BrowserMembership.swift #   card browser membership: which shoots hold the card's verified copies
+│   │   ├── AppModel+Copy.swift #   card copies: destination planning, CopyEngine runs, copy queue, errors
+│   │   ├── AppModel+Cull.swift #   photo cull: start, stop, undo, and the app-wide apply lock
+│   │   ├── AppModel+Shoots.swift #   shoot registry: load, discover, create, adopt, manage copies
+│   │   ├── AppModel+Sync.swift #   mirror checks and Sync Now on one serial app-wide worker
+│   │   ├── AppModel+Volumes.swift #   volume mount handling: card and drive changes, startup loads
 │   │   ├── AppModel+Import.swift #   manual import scheduling: fan-out to every online copy, pendingSync, queued with card ingests, cull lock
 │   │   ├── AppModel+AddFiles.swift #   Add Files sheet and Finder drop entry points
 │   │   ├── AppModel+VideoEdit.swift #  Video Edit readiness: MCP registration, Resolve running
@@ -157,11 +166,20 @@ Auto/                         # repo root
 │   │   ├── PhotoEditView.swift #   Photo Edit tab: photo cull, bottom progress bar, result banners, live rejects grid (CullLiveRejectsGrid)
 │   │   ├── CullSettingsSheet.swift #   cull settings: criteria, mode cards, model, Advanced (budget, per-mode prompt)
 │   │   ├── Theme.swift       #   adaptive color tokens, SurfaceCard, PrimaryPillButtonStyle
+│   │   ├── BrowserChrome.swift #   pieces shared by the card and shoot browsers
 │   │   ├── CardRow.swift     #   per-card header, phase content and actions, Add to Shoot menu, per-camera day chips; static StatusDot
 │   │   ├── CardBrowserView.swift # read-only Finder-style card browser (icons/list, locations sidebar); opened by clicking a card
+│   │   ├── CardBrowserView+AddToShoot.swift #   file menu and Add to Shoot flow with duplicate check
+│   │   ├── CardBrowserView+Files.swift #   icon grid and list table for the card browser
+│   │   ├── CardBrowserPieces.swift #   small views the card browser is built from
 │   │   ├── ImportProgressRow.swift # one import job's progress row
+│   │   ├── CopyProgress+Display.swift # progress wording shared by copy and import rows
 │   │   ├── DayChip.swift     #   recording-day chip, shared by CardRow and the New Shoot sheet
 │   │   ├── ShootBrowserView.swift #   shoot browser: grid/list, breadcrumb, Quick Look, Finder drops
+│   │   ├── ShootBrowserView+Dropping.swift #   Finder drops onto the shoot browser, copies only
+│   │   ├── ShootBrowserView+Files.swift #   icon grid and list table for the shoot browser
+│   │   ├── ShootBrowserPieces.swift #   small views the shoot browser is built from
+│   │   ├── ShootItem+Display.swift #   availability checks and menu labels for shoot items
 │   │   ├── NewShootView.swift#   sheet: create mode (name, date, location) or add-footage mode
 │   │   ├── AddFootageSheet.swift #   add a card's footage to a shoot: card picker, completeness banner, Add N files
 │   │   ├── AddFilesSheet.swift #   add files or folders to a shoot: camera sort, duplicates, staging
@@ -178,11 +196,15 @@ Auto/                         # repo root
 │   │   ├── CopyEngine.swift        #   verified copy with cancel, collision skip, expected-checksum guard, copy-root containment
 │   │   ├── ShootDays.swift         #   recording days per camera (ShootDays.byCamera)
 │   │   ├── ShootSelection.swift    #   (camera, day) include-set for a shoot; unselected files stay on the card
-│   │   ├── ShootPlanner.swift      #   shoot folder naming, planned folder rows, copy jobs, destination checks (checkDestination/createDirectories), CardPhase, StatusAggregator
+│   │   ├── ShootPlanner.swift      #   shoot folder naming, planned folder rows, copy jobs, destination checks (checkDestination/createDirectories)
+│   │   ├── ShootPlanner+FlatNames.swift #   flat-layout file naming: stem sets and collision-free names
+│   │   ├── CardPhase.swift         #   card phase after scan and verification, plus cross-card status
 │   │   ├── Shoot.swift             #   Shoot model (id, name, day, folder)
 │   │   ├── ShootSidecar.swift      #   `.auto-shoot.json` codec, versioned (v1)
 │   │   ├── ShootFolders.swift      #   classify names/folders, create shoots (exclusive mkdir, sidecar write), adopt
-│   │   ├── ShootRegistry.swift     #   registry records (path, mirrors, pendingSync), ShootStore (load/save/quarantine), per-copy availability, discovery
+│   │   ├── ShootRegistry.swift     #   registry records (path, mirrors, pendingSync), merge rules, per-copy resolution, discovery
+│   │   ├── ShootStore.swift        #   load/save of the shoot registry, plus availability types
+│   │   ├── CorruptFileQuarantine.swift #   sets aside unreadable Auto-written files by renaming, never deleting
 │   │   ├── ShootCoverage.swift     #   checksum coverage of a card's day inside a shoot folder (cancellable, off main)
 │   │   ├── ShootMembership.swift   #   per-shoot verified copies for the card browser (sequential, read-only, excludes nested shoots, never reports partial results)
 │   │   ├── CardBrowser.swift #   groups card files: Not Backed Up / one group per shoot holding a verified copy / Backed Up Elsewhere
@@ -199,7 +221,10 @@ Auto/                         # repo root
 │   │   └── ShootSyncPlan.swift     #   ShootSyncPlanner: Sync Now plan (copy missing files from a good copy); never deletes or overwrites
 │   │   ├── MainThreadProbe.swift   #   records whether instrumented engines ran on main (tests assert it)
 │   │   └── Cull/                   #   photo cull engines (pure Swift)
-│   │       ├── CullModels.swift    #   CullSettings, CullModel, PhotoRecord, PhotoMetrics, FaceInfo, FileStamp
+│   │       ├── CullModels.swift    #   PhotoRecord, PhotoMetrics, FaceInfo, FileStamp
+│   │       ├── CullError.swift     #   cull error cases with user-facing messages
+│   │       ├── CullJournalEvent.swift #   journal event codec for cull runs, moves and undo
+│   │       ├── CullSettings.swift  #   CullModel and CullSettings: model alias and run options
 │   │       ├── CullCriterion.swift #   cull criteria: exposure, duplicates, unusable, horizon, cropped, eyes
 │   │       ├── PhotoCatalog.swift  #   photos on the primary copy's Photo/<cam> folders
 │   │       ├── PhotoGrouper.swift  #   burst grouping by capture time + dHash
@@ -214,9 +239,14 @@ Auto/                         # repo root
 │   │       ├── CullPolicy.swift    #   grades -> one decision per photo, per mode
 │   │       ├── CullJournal.swift   #   write-ahead journal in <shoot>/.auto-cull/ for undo
 │   │       ├── CullApplier.swift   #   moves rejects (dir-fd renames, RENAME_EXCL, rollback, undo)
+│   │       ├── CullApplier+Apply.swift #   apply: move rejects via dir-fd renames with rollback
+│   │       ├── CullApplier+Undo.swift #   undo: restore a run's moves, newest first, on each copy
 │   │       ├── LiveCullApplier.swift #   live file-system implementation of the applier
 │   │       ├── CullReplay.swift    #   replays completed cull runs onto other copies
-│   │       └── CullRunner.swift    #   one run: analyze, group, triage, Claude per group, policy, apply
+│   │       ├── CullRunner.swift    #   one run: analyze, group, triage, Claude per group, policy, apply
+│   │       ├── CullRunner+Apply.swift #   last step: move rejects, or restore them on stop or failure
+│   │       ├── CullRunner+FinalRound.swift #   Selects final round: elimination rounds over the best keeps
+│   │       └── CullRunner+FirstPass.swift #   first pass: local triage, then Claude grades each group
 │   │   └── VideoEdit/              #   video edit (sync + Resolve) engines
 │   │       ├── VideoEditSettings.swift # options + defaults store
 │   │       ├── VideoEditReadiness.swift # pre-run checklist (footage, main copy, MCP, Resolve open)
