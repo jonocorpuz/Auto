@@ -59,6 +59,8 @@ nonisolated struct AudioSyncThresholds: Sendable, Equatable {
 /// Turns probes and audio matches into events. Each recording anchors an event; recordings that
 /// match each other merge into one. Pure.
 nonisolated enum AudioSyncPlanner {
+    /// Recordings that hear each other: the base (longest) and every member's start relative to it.
+    private typealias RecordingGroup = (base: String, position: [String: Double])
 
     /// `matches[anchorID][sourceID]`: where `sourceID` sits inside the recording `anchorID`.
     static func plan(probes: [AudioSyncProbe], matches: [String: [String: AudioSyncMatch]],
@@ -66,7 +68,23 @@ nonisolated enum AudioSyncPlanner {
         let byID = Dictionary(probes.map { ($0.source.id, $0) }, uniquingKeysWith: { a, _ in a })
         let anchors = probes.filter { $0.source.kind == .audio && $0.hasAudio }.map(\.source.id).sorted()
 
-        // 1. Recordings that hear each other form one group; positions relative to the group's longest.
+        let (groups, groupOf) = groupRecordings(anchors, byID: byID, matches: matches, thresholds: thresholds)
+        let (placed, unsynced) = placeClips(probes, anchors: anchors, groups: groups, groupOf: groupOf,
+                                            matches: matches, thresholds: thresholds)
+        let (events, unmatchedAudio) = buildEvents(groups, placed: placed, byID: byID, matches: matches)
+        return AudioSyncPlan(events: events, unsynced: unsynced, unmatchedAudio: unmatchedAudio.sorted())
+    }
+
+    // MARK: - Steps
+
+    /// 1. Recordings that hear each other form one group; positions relative to the group's longest.
+    /// Returns the groups and each recording's group index.
+    private static func groupRecordings(
+        _ anchors: [String],
+        byID: [String: AudioSyncProbe],
+        matches: [String: [String: AudioSyncMatch]],
+        thresholds: AudioSyncThresholds
+    ) -> (groups: [RecordingGroup], groupOf: [String: Int]) {
         var edges: [String: [(String, Double)]] = [:]   // a -> (b, start of b minus start of a)
         for a in anchors {
             for b in anchors where a != b {
@@ -76,9 +94,10 @@ nonisolated enum AudioSyncPlanner {
             }
         }
         var groupOf: [String: Int] = [:]
-        var groups: [(base: String, position: [String: Double])] = []
+        var groups: [RecordingGroup] = []
         let byLength = anchors.sorted { (byID[$0]?.duration ?? 0, $1) > (byID[$1]?.duration ?? 0, $0) }
         for start in byLength where groupOf[start] == nil {
+            // Breadth-first walk from the longest unvisited recording.
             var position = [start: 0.0]
             var queue = [start]
             groupOf[start] = groups.count
@@ -92,13 +111,25 @@ nonisolated enum AudioSyncPlanner {
             }
             groups.append((start, position))
         }
+        return (groups, groupOf)
+    }
 
-        // 2. Each clip goes to its best recording.
+    /// 2. Each clip goes to its best recording. Returns the clips placed per group index, and the
+    /// clips that matched nothing well enough.
+    private static func placeClips(
+        _ probes: [AudioSyncProbe],
+        anchors: [String],
+        groups: [RecordingGroup],
+        groupOf: [String: Int],
+        matches: [String: [String: AudioSyncMatch]],
+        thresholds: AudioSyncThresholds
+    ) -> (placed: [Int: [AudioSyncItem]], unsynced: [String]) {
         var placed: [Int: [AudioSyncItem]] = [:]
         var unsynced: [String] = []
         let videos = probes.filter { $0.source.kind == .video }.sorted { $0.source.id < $1.source.id }
         for v in videos {
             let candidates = anchors.compactMap { a in matches[a]?[v.source.id].map { (a, $0) } }
+            // Confident matches beat weak ones; then the higher correlation wins.
             let best = candidates.max { lhs, rhs in
                 (thresholds.isConfident(lhs.1) ? 1 : 0, lhs.1.correlation) < (thresholds.isConfident(rhs.1) ? 1 : 0, rhs.1.correlation)
             }
@@ -112,8 +143,17 @@ nonisolated enum AudioSyncPlanner {
                 start: anchorStart + m.offset, duration: v.duration, match: m,
                 needsReview: !thresholds.isConfident(m)))
         }
+        return (placed, unsynced)
+    }
 
-        // 3. Build events with at least one clip; shift so the earliest item starts at 0.
+    /// 3. Builds events with at least one clip, shifted so the earliest item starts at 0, then names
+    /// them in base-file order. Groups without clips come back as unmatched recordings.
+    private static func buildEvents(
+        _ groups: [RecordingGroup],
+        placed: [Int: [AudioSyncItem]],
+        byID: [String: AudioSyncProbe],
+        matches: [String: [String: AudioSyncMatch]]
+    ) -> (events: [AudioSyncEvent], unmatchedAudio: [String]) {
         var events: [AudioSyncEvent] = []
         var unmatchedAudio: [String] = []
         for (g, group) in groups.enumerated() {
@@ -142,16 +182,21 @@ nonisolated enum AudioSyncPlanner {
 
         // Recording order isn't known across recorders, so events go in base-file order.
         events.sort { $0.baseID < $1.baseID }
-        events = events.enumerated().map { i, e in
+        let named = events.enumerated().map { i, e in
             let stem = ((e.baseID as NSString).lastPathComponent as NSString).deletingPathExtension
             return AudioSyncEvent(name: "Sync \(i + 1) – \(stem)", baseID: e.baseID, fps: e.fps,
                              duration: e.duration, video: e.video, audio: e.audio)
         }
-        return AudioSyncPlan(events: events, unsynced: unsynced, unmatchedAudio: unmatchedAudio.sorted())
+        return (named, unmatchedAudio)
     }
+
+    // MARK: - Tracks and frame rate
 
     /// One block of tracks per camera (cameras by name); within a camera, a clip takes the first of
     /// that camera's tracks it doesn't overlap, opening a new one if needed.
+    /// Seconds; a clip starting this close after another ends may share its track.
+    private static let touchingTolerance = 1e-6
+
     static func assignVideoTracks(_ items: inout [AudioSyncItem]) {
         var next = 1
         for camera in Set(items.map(\.camera)).sorted() {
@@ -159,7 +204,7 @@ nonisolated enum AudioSyncPlanner {
             let indices = items.indices.filter { items[$0].camera == camera }
                 .sorted { (items[$0].start, items[$0].id) < (items[$1].start, items[$1].id) }
             for i in indices {
-                if let t = trackEnds.firstIndex(where: { $0 <= items[i].start + 1e-6 }) {
+                if let t = trackEnds.firstIndex(where: { $0 <= items[i].start + touchingTolerance }) {
                     trackEnds[t] = items[i].start + items[i].duration
                     items[i].track = next + t
                 } else {
@@ -171,6 +216,7 @@ nonisolated enum AudioSyncPlanner {
         }
     }
 
+    /// The most common clip frame rate (to 3 dp); ties go to the lower rate.
     private static func commonFPS(_ video: [AudioSyncItem], _ byID: [String: AudioSyncProbe]) -> Double? {
         var counts: [Double: Int] = [:]
         for v in video { if let f = byID[v.id]?.fps { counts[(f * 1000).rounded() / 1000, default: 0] += 1 } }
