@@ -13,8 +13,8 @@ nonisolated struct ShootSummary: Sendable, Equatable {
 extension ShootSummary {
     @concurrent static func scan(_ folder: URL) async -> ShootSummary {
         let (videos, photos, audio) = walk(folder)
-        let rep = photos.min { $0.path < $1.path } ?? videos.min { $0.path < $1.path }
-        return ShootSummary(videoCount: videos.count, photoCount: photos.count, audioCount: audio, representative: rep)
+        let representative = photos.min { $0.path < $1.path } ?? videos.min { $0.path < $1.path }
+        return ShootSummary(videoCount: videos.count, photoCount: photos.count, audioCount: audio, representative: representative)
     }
 
     /// Synchronous walk (directory enumerators can't be iterated from an async context).
