@@ -7,8 +7,8 @@ struct VideoEditView: View {
 
     private var ordered: [ShootItem] {
         let withVideo = model.shoots.filter { ($0.summary?.videoCount ?? 1) > 0 }
-        let online = withVideo.filter { PhotoEditView.isOnline($0) }
-        let rest = withVideo.filter { !PhotoEditView.isOnline($0) }
+        let online = withVideo.filter { $0.isOnlineOrUnresolved }
+        let rest = withVideo.filter { !$0.isOnlineOrUnresolved }
         return online + rest
     }
 
@@ -55,7 +55,7 @@ struct VideoEditView: View {
                 ForEach(ordered) { item in
                     Button { selectedID = item.id } label: {
                         VideoShootRow(item: item, selected: selectedID == item.id)
-                            .opacity(PhotoEditView.isOnline(item) ? 1 : 0.5)
+                            .opacity(item.isOnlineOrUnresolved ? 1 : 0.5)
                     }
                     .buttonStyle(.plain)
                 }

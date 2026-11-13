@@ -8,13 +8,6 @@ struct ShootTile: View {
     @State private var copyToRemove: ShootCopyState?
     @State private var removeError: String?
 
-    private var isOnline: Bool {
-        switch item.availability {
-        case nil, .online: true
-        default: false
-        }
-    }
-
     private var isOffline: Bool { item.availability == .offline }
 
     private var isMissing: Bool {
@@ -22,11 +15,6 @@ struct ShootTile: View {
         case .missing, .mismatch: true
         default: false
         }
-    }
-
-    private var canAdd: Bool {
-        if case .online = item.availability { return true }
-        return false
     }
 
     var body: some View {
@@ -72,41 +60,41 @@ struct ShootTile: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
         .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.border))
-        .opacity(isOnline ? 1 : 0.55)
+        .opacity(item.isOnlineOrUnresolved ? 1 : 0.55)
         .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
     }
 
     @ViewBuilder private var menu: some View {
-            Button("Add footage") { model.addFootage(to: item.id) }
-                .disabled(!canAdd)
-            Button("Add Files…") { model.addFiles(to: item.id) }
-                .disabled(!canAdd)
-            Button("Locate…") { model.locateShoot(id: item.id) }
-            Divider()
-            Button("Add Mirror…") { model.addMirror(shootID: item.id) }
-            Button("Check Sync") { model.checkSync(shootID: item.id) }
-                .disabled(item.copies.count < 2)
-            Button("Sync Now") { model.syncNow(shootID: item.id) }
-                .disabled(!model.canSyncNow(shootID: item.id))
-            if !item.copies.isEmpty {
-                Menu("Copies") {
-                    ForEach(item.copies) { copy in
-                        Menu(copy.volumeName + (copy.isPrimary ? " (main)" : "")) {
-                            Button("Show in Finder") {
-                                model.revealInFinder([URL(fileURLWithPath: copy.path, isDirectory: true)])
-                            }
-                            if copy.availability == .missing || copy.availability == .mismatch {
-                                Button("Locate…") { model.locateCopy(shootID: item.id, path: copy.path) }
-                            }
-                            Divider()
-                            Button("Remove Copy from Auto…") { copyToRemove = copy }
+        Button("Add footage") { model.addFootage(to: item.id) }
+            .disabled(!item.isConfirmedOnline)
+        Button("Add Files…") { model.addFiles(to: item.id) }
+            .disabled(!item.isConfirmedOnline)
+        Button("Locate…") { model.locateShoot(id: item.id) }
+        Divider()
+        Button("Add Mirror…") { model.addMirror(shootID: item.id) }
+        Button("Check Sync") { model.checkSync(shootID: item.id) }
+            .disabled(item.copies.count < 2)
+        Button("Sync Now") { model.syncNow(shootID: item.id) }
+            .disabled(!model.canSyncNow(shootID: item.id))
+        if !item.copies.isEmpty {
+            Menu("Copies") {
+                ForEach(item.copies) { copy in
+                    Menu(copy.volumeName + (copy.isPrimary ? " (main)" : "")) {
+                        Button("Show in Finder") {
+                            model.revealInFinder([URL(fileURLWithPath: copy.path, isDirectory: true)])
                         }
+                        if copy.availability == .missing || copy.availability == .mismatch {
+                            Button("Locate…") { model.locateCopy(shootID: item.id, path: copy.path) }
+                        }
+                        Divider()
+                        Button("Remove Copy from Auto…") { copyToRemove = copy }
                     }
                 }
             }
-            Divider()
-            Button("Remove from Auto") { Task { await model.forgetShoot(id: item.id) } }
-                .help("Removes the shoot from Auto's list. Files on disk are not deleted.")
+        }
+        Divider()
+        Button("Remove from Auto") { Task { await model.forgetShoot(id: item.id) } }
+            .help("Removes the shoot from Auto's list. Files on disk are not deleted.")
     }
 
     private var removeErrorShown: Binding<Bool> {
@@ -215,7 +203,7 @@ struct ShootTile: View {
             .buttonStyle(.borderless)
             .controlSize(.small)
             .foregroundStyle(Theme.accent)
-            .disabled(!canAdd)
+            .disabled(!item.isConfirmedOnline)
         }
     }
 

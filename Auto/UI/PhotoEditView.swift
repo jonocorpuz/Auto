@@ -6,8 +6,8 @@ struct PhotoEditView: View {
     @State private var selectedID: UUID?
 
     private var ordered: [ShootItem] {
-        let online = model.shoots.filter { Self.isOnline($0) }
-        let rest = model.shoots.filter { !Self.isOnline($0) }
+        let online = model.shoots.filter { $0.isOnlineOrUnresolved }
+        let rest = model.shoots.filter { !$0.isOnlineOrUnresolved }
         return online + rest
     }
 
@@ -17,13 +17,6 @@ struct PhotoEditView: View {
             case .waiting?, .running?: true
             default: false
             }
-        }
-    }
-
-    static func isOnline(_ item: ShootItem) -> Bool {
-        switch item.availability {
-        case nil, .online?: true
-        default: false
         }
     }
 
@@ -69,7 +62,7 @@ struct PhotoEditView: View {
         ScrollView {
             LazyVStack(spacing: 4) {
                 ForEach(ordered) { item in
-                    let online = Self.isOnline(item)
+                    let online = item.isOnlineOrUnresolved
                     Button { selectedID = item.id } label: {
                         ShootCullRow(item: item, selected: selectedID == item.id)
                             .opacity(online ? 1 : 0.5)
