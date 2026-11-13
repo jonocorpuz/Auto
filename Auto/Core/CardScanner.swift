@@ -12,7 +12,14 @@ nonisolated enum CardScanner {
         var error: String? = nil
     }
 
-    private final class ErrorBox: @unchecked Sendable { var first: String? }
+    /// Keeps the first read error from the walk (the enumerator reports through a callback).
+    private final class ErrorBox: @unchecked Sendable {
+        var first: String?
+
+        func note(_ url: URL, _ error: Error) {
+            if first == nil { first = "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)" }
+        }
+    }
 
     /// `@concurrent` so the walk never runs on the caller's (main) actor.
     @concurrent static func scan(_ volume: URL, volumeName: String) async -> Result {
@@ -22,7 +29,7 @@ nonisolated enum CardScanner {
         guard let walker = FileManager.default.enumerator(
             at: volume, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants],
             errorHandler: { url, error in
-                if errors.first == nil { errors.first = "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)" }
+                errors.note(url, error)
                 return true
             }) else {
             return Result(files: [], cameras: [], shootDate: nil, error: "Couldn't read \(volume.lastPathComponent).")
@@ -30,13 +37,16 @@ nonisolated enum CardScanner {
 
         let cardID = VolumeIdentity.of(volume)
         var files: [MediaFile] = []
-        var camerasByDir: [String: Camera] = [:]
-        var cameras: [String: Camera] = [:]
+        /// Camera detection reads metadata, so it runs once per folder: a card folder is one camera.
+        var cameraByFolder: [String: Camera] = [:]
+        var firstCameraByID: [String: Camera] = [:]
 
         while let url = walker.nextObject() as? URL {
             let values: URLResourceValues
-            do { values = try url.resourceValues(forKeys: Set(keys)) } catch {
-                if errors.first == nil { errors.first = "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)" }
+            do {
+                values = try url.resourceValues(forKeys: Set(keys))
+            } catch {
+                errors.note(url, error)
                 continue
             }
             if values.isDirectory == true {
@@ -45,22 +55,22 @@ nonisolated enum CardScanner {
             }
             guard values.isRegularFile == true, let kind = MediaTypes.kind(for: url) else { continue }
 
-            let dir = url.deletingLastPathComponent().path
+            let folder = url.deletingLastPathComponent().path
             let camera: Camera
-            if let known = camerasByDir[dir] {
+            if let known = cameraByFolder[folder] {
                 camera = known
             } else {
                 camera = await detectCamera(url, kind: kind, fallback: volumeName)
-                camerasByDir[dir] = camera
+                cameraByFolder[folder] = camera
             }
-            cameras[camera.id] = cameras[camera.id] ?? camera
+            if firstCameraByID[camera.id] == nil { firstCameraByID[camera.id] = camera }
 
             let date = values.contentModificationDate ?? values.creationDate ?? Date()
             files.append(MediaFile(url: url, size: Int64(values.fileSize ?? 0), date: date, kind: kind, cameraID: camera.id, cardID: cardID))
         }
 
         let shootDate = files.map(\.date).min()
-        let sortedCameras = Camera.disambiguated(cameras.values.sorted { ($0.model, $0.id) < ($1.model, $1.id) })
+        let sortedCameras = Camera.disambiguated(firstCameraByID.values.sorted { ($0.model, $0.id) < ($1.model, $1.id) })
         return Result(files: files.sorted { $0.url.path < $1.url.path }, cameras: sortedCameras, shootDate: shootDate, error: errors.first)
     }
 
@@ -104,10 +114,10 @@ nonisolated enum CardScanner {
 
     private static func exifCamera(_ url: URL) -> (String?, String?) {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return (nil, nil) }
-        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
-        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
-        let aux = props[kCGImagePropertyExifAuxDictionary] as? [CFString: Any]
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return (nil, nil) }
+        let tiff = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let aux = properties[kCGImagePropertyExifAuxDictionary] as? [CFString: Any]
         let model = tiff?[kCGImagePropertyTIFFModel] as? String
         let serial = (exif?[kCGImagePropertyExifBodySerialNumber] as? String) ?? (aux?[kCGImagePropertyExifAuxSerialNumber] as? String)
         return (model, serial)
@@ -125,8 +135,10 @@ nonisolated enum CardScanner {
     /// "ILME-FX3" → "FX3", "ILCE-7SM3" → "A7SM3", "Canon EOS R5" → "R5".
     static func friendlyName(_ raw: String) -> String {
         var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if name.hasPrefix("ILME-") { name = String(name.dropFirst(5)) }
-        if name.hasPrefix("ILCE-") { name = "A" + name.dropFirst(5) }
+        let sonyCinemaPrefix = "ILME-"
+        let sonyAlphaPrefix = "ILCE-"
+        if name.hasPrefix(sonyCinemaPrefix) { name = String(name.dropFirst(sonyCinemaPrefix.count)) }
+        if name.hasPrefix(sonyAlphaPrefix) { name = "A" + name.dropFirst(sonyAlphaPrefix.count) }
         for prefix in ["Canon EOS ", "NIKON ", "Nikon "] where name.hasPrefix(prefix) {
             name = String(name.dropFirst(prefix.count))
         }
