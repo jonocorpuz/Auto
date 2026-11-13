@@ -27,6 +27,7 @@ nonisolated struct VolumeClassification: Equatable, Sendable {
 
 /// Ported from Backed's AppModel.refreshVolumes.
 nonisolated enum VolumeClassifier {
+    /// Folders (relative to the volume root) that only camera cards have.
     static let cardMarkers = ["DCIM", "PRIVATE/M4ROOT", "PRIVATE/AVCHD", "PRIVATE/XDROOT", "XDROOT", "CLIP", "CONTENTS/VIDEO"]
 
     static func hasCardLayout(at url: URL) -> Bool {
@@ -35,9 +36,9 @@ nonisolated enum VolumeClassifier {
 
     /// Standardized path with no trailing slash, so `file:///Volumes/X/` equals `/Volumes/X`.
     static func normalizedPath(_ url: URL) -> String {
-        var p = url.standardizedFileURL.path
-        while p.count > 1 && p.hasSuffix("/") { p.removeLast() }
-        return p
+        var path = url.standardizedFileURL.path
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        return path
     }
 
     /// Lowercased, symlink-resolved, normalized path (card file systems are usually case-insensitive).
@@ -47,10 +48,10 @@ nonisolated enum VolumeClassifier {
 
     /// True when `url` is a card root or anything inside one. Pure path check (symlinks resolved).
     static func isInside(_ url: URL, anyOf roots: [URL]) -> Bool {
-        let p = comparablePath(url)
+        let path = comparablePath(url)
         return roots.contains { root in
-            let r = comparablePath(root)
-            return p == r || p.hasPrefix(r == "/" ? "/" : r + "/")
+            let rootPath = comparablePath(root)
+            return path == rootPath || path.hasPrefix(rootPath == "/" ? "/" : rootPath + "/")
         }
     }
 
@@ -61,35 +62,44 @@ nonisolated enum VolumeClassifier {
         let keys: Set<URLResourceKey> = [.volumeURLKey, .volumeIdentifierKey]
         // Walk up to the nearest existing ancestor so a not-yet-created folder still resolves.
         var probe = destination.standardizedFileURL
-        while !FileManager.default.fileExists(atPath: probe.path) && probe.path != "/" { probe.deleteLastPathComponent() }
-        guard let dest = try? URL(fileURLWithPath: probe.path).resourceValues(forKeys: keys),
-              let destID = dest.volumeIdentifier else { return false }
+        while !FileManager.default.fileExists(atPath: probe.path) && probe.path != "/" {
+            probe.deleteLastPathComponent()
+        }
+        guard let destinationValues = try? URL(fileURLWithPath: probe.path).resourceValues(forKeys: keys),
+              let destinationVolumeID = destinationValues.volumeIdentifier else { return false }
         for card in cards {
-            guard let values = try? URL(fileURLWithPath: card.path).resourceValues(forKeys: keys),
-                  let root = values.volume, normalizedPath(root) == normalizedPath(card),
-                  let cardID = values.volumeIdentifier else { continue }
-            if destID.isEqual(cardID) { return true }
+            guard let cardValues = try? URL(fileURLWithPath: card.path).resourceValues(forKeys: keys),
+                  let cardVolumeRoot = cardValues.volume,
+                  normalizedPath(cardVolumeRoot) == normalizedPath(card),
+                  let cardVolumeID = cardValues.volumeIdentifier else { continue }
+            if destinationVolumeID.isEqual(cardVolumeID) { return true }
         }
         return false
     }
 
     static func classify(_ volumes: [VolumeDescriptor], workingVolume: URL?) -> VolumeClassification {
         let working = workingVolume.map(normalizedPath)
+        func isWorking(_ url: URL) -> Bool { working != nil && normalizedPath(url) == working }
+
         var cards: [URL] = []
         var drives: [DriveVolume] = []
-        for v in volumes {
-            guard !v.isRootFileSystem, v.isLocal, v.url.path.hasPrefix("/Volumes/"), !v.isDiskImage else { continue }
-            let isWorking = working != nil && normalizedPath(v.url) == working
-            if !isWorking && (v.hasCardLayout || v.isRemovable) {
-                cards.append(v.url)
-            } else if !v.isInternal || isWorking {
-                drives.append(DriveVolume(url: v.url, name: v.name))
+        for volume in volumes {
+            let isCandidate = !volume.isRootFileSystem && volume.isLocal
+                && volume.url.path.hasPrefix("/Volumes/") && !volume.isDiskImage
+            guard isCandidate else { continue }
+            let isWorkingVolume = isWorking(volume.url)
+            if !isWorkingVolume && (volume.hasCardLayout || volume.isRemovable) {
+                cards.append(volume.url)
+            } else if !volume.isInternal || isWorkingVolume {
+                drives.append(DriveVolume(url: volume.url, name: volume.name))
             }
         }
+        // The working volume first, then by name.
         drives.sort { a, b in
-            let aw = working != nil && normalizedPath(a.url) == working
-            let bw = working != nil && normalizedPath(b.url) == working
-            return aw != bw ? aw : a.name < b.name
+            let aIsWorking = isWorking(a.url)
+            let bIsWorking = isWorking(b.url)
+            if aIsWorking != bIsWorking { return aIsWorking }
+            return a.name < b.name
         }
         return VolumeClassification(cards: cards, drives: drives)
     }
