@@ -8,13 +8,16 @@ nonisolated enum DriveIndex {
     @concurrent static func build(_ root: URL) async -> [String: [URL]] {
         MainThreadProbe.shared.mark("DriveIndex.build")
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
-        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [:] }
+        guard let walker = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [:] }
         var index: [String: [URL]] = [:]
         while let url = walker.nextObject() as? URL {
             guard MediaTypes.all.contains(url.pathExtension.lowercased()),
                   let values = try? url.resourceValues(forKeys: Set(keys)),
                   values.isRegularFile == true else { continue }
-            index[MediaFile.key(name: url.lastPathComponent, size: Int64(values.fileSize ?? 0)), default: []].append(url)
+            let key = MediaFile.key(name: url.lastPathComponent, size: Int64(values.fileSize ?? 0))
+            index[key, default: []].append(url)
         }
         return index
     }
@@ -23,28 +26,29 @@ nonisolated enum DriveIndex {
     /// "img_1.cr3|10", so a copy renamed to dodge a collision (CopyEngine's unique name, or a flat-layout
     /// stem rename) is still found on a later run. Only widens nominations: a checksum still decides.
     static func renamedAliases(_ index: [String: [URL]]) -> [String: [URL]] {
-        var out: [String: [URL]] = [:]
+        var aliases: [String: [URL]] = [:]
         for (key, urls) in index {
             guard let bar = key.lastIndex(of: "|") else { continue }
+            let sizePart = key[bar...]  // "|<size>"
             // Peel every suffix: a renamed name that was itself taken becomes "IMG_1 2 2.CR3".
             var name = String(key[..<bar])
             while let original = originalName(name) {
-                out[original + key[bar...], default: []].append(contentsOf: urls)
+                aliases[original + sizePart, default: []].append(contentsOf: urls)
                 name = original
             }
         }
-        return out
+        return aliases
     }
 
     /// "<stem> <n>.<ext>" (n >= 2, the CopyEngine / flat-layout rename) -> "<stem>.<ext>"; nil otherwise.
     static func originalName(_ name: String) -> String? {
-        let ns = name as NSString
-        let stem = ns.deletingPathExtension, ext = ns.pathExtension
+        let stem = (name as NSString).deletingPathExtension
+        let ext = (name as NSString).pathExtension
         guard let space = stem.lastIndex(of: " ") else { return nil }
         let digits = stem[stem.index(after: space)...]
         let base = stem[..<space]
         guard !base.isEmpty, !digits.isEmpty, digits.allSatisfy(\.isASCII), digits.allSatisfy(\.isNumber),
-              digits.first != "0", let n = Int(digits), n >= 2 else { return nil }
+              digits.first != "0", let number = Int(digits), number >= 2 else { return nil }
         return ext.isEmpty ? String(base) : "\(base).\(ext)"
     }
 }

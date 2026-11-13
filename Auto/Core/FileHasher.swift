@@ -37,15 +37,15 @@ nonisolated final class FileHasher: @unchecked Sendable {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         _ = fcntl(handle.fileDescriptor, F_NOCACHE, 1)
-        var read: Int64 = 0
+        var bytesRead: Int64 = 0
         while true {
             if isCancelled { throw Cancelled() }
             let data: Data? = try autoreleasepool { try handle.read(upToCount: Self.chunk) }
             guard let data, !data.isEmpty else { break }
             md5.update(data: data)
-            read += Int64(data.count)
-            onBytes(read)
-            onChunkHashed?(read)
+            bytesRead += Int64(data.count)
+            onBytes(bytesRead)
+            onChunkHashed?(bytesRead)
         }
         let digest = Data(md5.finalize())
         onFileHashed?(url)
