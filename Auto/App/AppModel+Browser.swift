@@ -1,8 +1,13 @@
 import AppKit
 import Foundation
 
+/// Card browser: grouping the browsed card's files, and the read-only file actions on them.
 extension AppModel {
-    // MARK: Card browser
+    private static let thumbnailMaxPixels: CGFloat = 320
+    /// The preview cache is emptied once it holds this many images.
+    private static let thumbnailCacheLimit = 300
+
+    // MARK: Groups
 
     /// The browsed card's files grouped into "Not Backed Up", then by the shoot holding their copy.
     /// Memoized on its inputs, so selection clicks and copy-progress ticks don't regroup the card.
@@ -57,6 +62,8 @@ extension AppModel {
         return files.compactMap { card.backups[$0.url] }
     }
 
+    // MARK: File actions
+
     /// Shows files in Finder (read-only).
     func revealInFinder(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
@@ -82,12 +89,14 @@ extension AppModel {
         if missingThumbnails.contains(key) { return nil }
         let image: CGImage
         do {
-            image = try await thumbnails.thumbnail(for: file.url, maxPixels: 320)
+            image = try await thumbnails.thumbnail(for: file.url, maxPixels: Self.thumbnailMaxPixels)
         } catch {
-            if !(error is CancellationError) && !Task.isCancelled { missingThumbnails.insert(key) }
+            // A cancelled request says nothing about the file: let it be retried.
+            let wasCancelled = error is CancellationError || Task.isCancelled
+            if !wasCancelled { missingThumbnails.insert(key) }
             return nil
         }
-        if fileThumbnails.count >= 300 { fileThumbnails.removeAll() }
+        if fileThumbnails.count >= Self.thumbnailCacheLimit { fileThumbnails.removeAll() }
         fileThumbnails[key] = image
         return image
     }

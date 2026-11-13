@@ -1,9 +1,9 @@
-import AppKit
 import Foundation
 
+/// Card browser membership: which shoots hold a verified copy of the browsed card's files.
+/// Read-only hashing that only runs while that card's browser is on screen.
 extension AppModel {
-    // MARK: Browser membership
-
+    /// Everything a membership check depends on; an unchanged value means the last run is still valid.
     struct MembershipInputs: Equatable {
         let cardID: Card.ID
         let files: [MediaFile]
@@ -28,10 +28,8 @@ extension AppModel {
 
     private func onlineMembershipTargets() -> [ShootMembership.Target] {
         shoots.compactMap { item in
-            if case .online(let shoot)? = item.availability {
-                return ShootMembership.Target(id: item.id, folder: shoot.folder.standardizedFileURL)
-            }
-            return nil
+            guard case .online(let shoot)? = item.availability else { return nil }
+            return ShootMembership.Target(id: item.id, folder: shoot.folder.standardizedFileURL)
         }
     }
 
@@ -42,8 +40,34 @@ extension AppModel {
         membershipInputs = nil
     }
 
+    private func clearMembership() {
+        stopMembership()
+        if !browserMembership.isEmpty { browserMembership = [:] }
+    }
+
     private func markMembershipChecking(_ targets: [ShootMembership.Target]) {
-        browserMembership = Dictionary(targets.map { ($0.id, BrowserMembershipState.checking) }) { $1 }
+        var checking: [UUID: BrowserMembershipState] = [:]
+        for target in targets { checking[target.id] = .checking }
+        browserMembership = checking
+    }
+
+    /// Whether the card's backup verdict is final, so membership can be computed from it.
+    private func hasSettledVerdict(_ card: Card) -> Bool {
+        switch card.phase {
+        case .needsBackup, .ready, .backed, .failed:
+            card.engine == nil && card.verifier == nil && !recomputePending.contains(card.id)
+        default:
+            false
+        }
+    }
+
+    private func membershipFinished(for targets: [ShootMembership.Target]) -> Bool {
+        targets.allSatisfy { target in
+            switch browserMembership[target.id] {
+            case .done?, .failed?: true
+            default: false
+            }
+        }
     }
 
     /// The card is about to change under the browser: drop the running check and show "checking".
@@ -57,67 +81,65 @@ extension AppModel {
     /// Read-only; results are stored only when complete and still current.
     func refreshBrowserMembership(force: Bool = false) {
         guard mainWindowVisible, let card = browsingCard, browserOnScreen == card.id else {
-            stopMembership()
-            if !browserMembership.isEmpty { browserMembership = [:] }
+            clearMembership()
             return
         }
         switch card.phase {
         case .empty, .unreadable:
-            stopMembership()
-            if !browserMembership.isEmpty { browserMembership = [:] }
+            clearMembership()
             return
-        default: break
+        default:
+            break
         }
+
         let targets = onlineMembershipTargets()
-        let settled: Bool
-        switch card.phase {
-        case .needsBackup, .ready, .backed, .failed:
-            settled = card.engine == nil && card.verifier == nil && !recomputePending.contains(card.id)
-        default: settled = false
-        }
-        guard settled else {
+        guard hasSettledVerdict(card) else {
             stopMembership()
             markMembershipChecking(targets)
             return
         }
+
         let inputs = MembershipInputs(cardID: card.id, files: card.files, targets: targets, backups: card.backups,
                                       missing: Set(card.missing.map(\.url)), sessionCopies: sessionCopies.map(\.destination))
         if !force, membershipInputs == inputs {
-            let finished = targets.allSatisfy { target in
-                switch browserMembership[target.id] {
-                case .done?, .failed?: true
-                default: false
-                }
-            }
-            if membershipTask != nil || finished { return }
+            // Same inputs: the run in flight, or the results already stored, are still right.
+            let isRunning = membershipTask != nil
+            if isRunning || membershipFinished(for: targets) { return }
         }
 
         membershipTask?.cancel()
         membershipGeneration += 1
-        let generation = membershipGeneration
         membershipInputs = inputs
         markMembershipChecking(targets)
-        guard !targets.isEmpty else { membershipTask = nil; return }
+        guard !targets.isEmpty else {
+            membershipTask = nil
+            return
+        }
+        membershipTask = startMembershipRun(card: card, targets: targets, generation: membershipGeneration)
+    }
+
+    private func startMembershipRun(card: Card, targets: [ShootMembership.Target], generation: Int) -> Task<Void, Never> {
         let cardID = card.id
         let files = card.files
         let copies = sessionCopies
         let cache = verifications
         let volumes = cardVolumes()
         #if DEBUG
-        let runner = _testMembershipRunner
+        let testRunner = _testMembershipRunner
         #endif
-        membershipTask = Task {
+        return Task {
+            let deliver: @MainActor @Sendable (UUID, ShootMembership.Outcome) -> Void = { [self] id, outcome in
+                deliverMembership(id, outcome, generation: generation, cardID: cardID)
+            }
             #if DEBUG
-            if let runner {
-                await runner(files, targets) { [self] id, outcome in deliverMembership(id, outcome, generation: generation, cardID: cardID) }
+            if let testRunner {
+                await testRunner(files, targets, deliver)
                 if generation == membershipGeneration { membershipTask = nil }
                 return
             }
             #endif
             await ShootMembership.run(files: files, targets: targets, sessionCopies: copies, cache: cache,
-                                      cardVolumes: volumes) { [self] id, outcome in
-                deliverMembership(id, outcome, generation: generation, cardID: cardID)
-            }
+                                      cardVolumes: volumes, onResult: deliver)
             if generation == membershipGeneration { membershipTask = nil }
         }
     }
@@ -130,6 +152,8 @@ extension AppModel {
         case .failed(let reason): browserMembership[id] = .failed(reason)
         }
     }
+
+    // MARK: Test seams
 
     #if DEBUG
     /// Test seam: replaces `ShootMembership.run`, so a test can deliver a result after supersession.
