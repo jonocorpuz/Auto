@@ -46,25 +46,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// The menu bar mark: an "a" with a status-coloured dot.
     private func updateIcon() {
-        let title = NSMutableAttributedString(
-            string: "a",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 16, weight: .heavy),
-                .foregroundColor: NSColor.labelColor,
-                .baselineOffset: 1,
-            ]
-        )
-        title.append(NSAttributedString(
-            string: ".",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 18, weight: .black),
-                .foregroundColor: model.status.tint,
-                .baselineOffset: 1,
-            ]
-        ))
+        let title = NSMutableAttributedString(string: "a", attributes: Self.iconAttributes(
+            size: 16, weight: .heavy, color: .labelColor))
+        title.append(NSAttributedString(string: ".", attributes: Self.iconAttributes(
+            size: 18, weight: .black, color: model.status.tint)))
         statusItem.button?.attributedTitle = title
         statusItem.button?.toolTip = "Auto: \(model.status.label)"
+    }
+
+    private static func iconAttributes(size: CGFloat, weight: NSFont.Weight, color: NSColor) -> [NSAttributedString.Key: Any] {
+        [.font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color, .baselineOffset: 1]
     }
 
     @objc private func statusItemClicked() {
@@ -90,28 +83,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: Windows
 
+    private static let mainWindowMinSize = NSSize(width: 820, height: 540)
+    private static let mainWindowDefaultSize = NSSize(width: 1100, height: 720)
+
     @objc func openMainWindow() {
-        if mainWindow == nil {
-            let window = NSWindow(contentViewController: NSHostingController(
-                rootView: MainView().environment(model)
-            ))
-            window.title = "Auto"
-            window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.isMovableByWindowBackground = true
-            window.contentMinSize = NSSize(width: 820, height: 540)
-            window.setContentSize(NSSize(width: 1100, height: 720))
-            window.setFrameAutosaveName("MainWindow")
-            window.isReleasedWhenClosed = false
-            window.delegate = self
-            window.center()
-            mainWindow = window
-        }
+        if mainWindow == nil { mainWindow = makeMainWindow() }
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         mainWindow?.makeKeyAndOrderFront(nil)
         model.mainWindowVisible = true
+    }
+
+    private func makeMainWindow() -> NSWindow {
+        let window = NSWindow(contentViewController: NSHostingController(rootView: MainView().environment(model)))
+        window.title = "Auto"
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        window.contentMinSize = Self.mainWindowMinSize
+        window.setContentSize(Self.mainWindowDefaultSize)
+        window.setFrameAutosaveName("MainWindow")
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
+        return window
     }
 
     /// Settings is a tab in the main window. Owned here (not SwiftUI's `openSettings`), which is unreliable
@@ -137,6 +133,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
         QuickLookPreviewer.shared.endControl(of: panel)
     }
+
+    // MARK: Main window lifecycle
 
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow, closing === mainWindow else { return }
