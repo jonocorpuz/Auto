@@ -112,28 +112,15 @@ nonisolated enum ClaudeCLI {
         let resultText = obj["result"] as? String
         let subtype = obj["subtype"] as? String ?? ""
 
-        if obj["is_error"] as? Bool == true {
-            if subtype.localizedCaseInsensitiveContains("budget") { throw ClaudeRunnerError.budgetExceeded }
-            let text = ([resultText] + ((obj["errors"] as? [String]) ?? []).map { Optional($0) })
-                .compactMap { $0 }.joined(separator: " ")
-            let lower = text.lowercased()
-            if ["login", "log in", "auth", "credential", "invalid api key", "unauthorized"].contains(where: lower.contains) {
-                throw ClaudeRunnerError.notLoggedIn
-            }
-            throw ClaudeRunnerError.malformed(text.isEmpty ? (subtype.isEmpty ? "error result" : subtype) : text)
-        }
-        if subtype.localizedCaseInsensitiveContains("budget") { throw ClaudeRunnerError.budgetExceeded }
+        let hitBudget = subtype.localizedCaseInsensitiveContains("budget")
 
-        let structured: Data
-        if let s = obj["structured_output"], s is [String: Any] || s is [Any],
-           let data = try? JSONSerialization.data(withJSONObject: s, options: [.sortedKeys]) {
-            structured = data
-        } else if let text = resultText,
-                  let data = text.data(using: .utf8),
-                  let parsed = try? JSONSerialization.jsonObject(with: data),
-                  parsed is [String: Any] || parsed is [Any] {
-            structured = data
-        } else {
+        if obj["is_error"] as? Bool == true {
+            if hitBudget { throw ClaudeRunnerError.budgetExceeded }
+            throw errorForFailedResult(resultText: resultText, errors: obj["errors"] as? [String] ?? [], subtype: subtype)
+        }
+        if hitBudget { throw ClaudeRunnerError.budgetExceeded }
+
+        guard let structured = structuredOutput(obj["structured_output"], resultText: resultText) else {
             throw ClaudeRunnerError.malformed("no structured output")
         }
 
@@ -148,5 +135,28 @@ nonisolated enum ClaudeCLI {
             cacheWriteTokens: int("cache_creation_input_tokens"),
             durationMS: (obj["duration_ms"] as? NSNumber)?.intValue
         )
+    }
+
+    private static let loginErrorHints = ["login", "log in", "auth", "credential", "invalid api key", "unauthorized"]
+
+    /// notLoggedIn when the error text looks like an auth problem, otherwise malformed with the text.
+    private static func errorForFailedResult(resultText: String?, errors: [String], subtype: String) -> ClaudeRunnerError {
+        let text = ([resultText].compactMap { $0 } + errors).joined(separator: " ")
+        let lower = text.lowercased()
+        if loginErrorHints.contains(where: lower.contains) { return .notLoggedIn }
+        if !text.isEmpty { return .malformed(text) }
+        return .malformed(subtype.isEmpty ? "error result" : subtype)
+    }
+
+    /// JSON bytes of the reply: `structured_output` when present, else `result` if it is itself JSON.
+    private static func structuredOutput(_ structuredField: Any?, resultText: String?) -> Data? {
+        if let field = structuredField, field is [String: Any] || field is [Any],
+           let data = try? JSONSerialization.data(withJSONObject: field, options: [.sortedKeys]) {
+            return data
+        }
+        guard let text = resultText, let data = text.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data),
+              parsed is [String: Any] || parsed is [Any] else { return nil }
+        return data
     }
 }

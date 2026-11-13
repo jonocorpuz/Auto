@@ -17,17 +17,7 @@ nonisolated final class ClaudeCLIRunner: ClaudeRunner, Sendable {
         guard let exe = await resolveExecutable() else { throw ClaudeRunnerError.notInstalled }
         try Task.checkCancellation()
 
-        var env = environment
-        for key in env.keys where key.hasPrefix("ANTHROPIC_") || key.hasPrefix("CLAUDE_") || key == "CLAUDECODE" {
-            env.removeValue(forKey: key)
-        }
-        let extra = "/opt/homebrew/bin:/usr/local/bin"
-        if let path = env["PATH"], !path.isEmpty {
-            env["PATH"] = path.contains("/opt/homebrew/bin") ? path : extra + ":" + path
-        } else {
-            env["PATH"] = extra + ":/usr/bin:/bin"
-        }
-
+        let env = childEnvironment()
         let job = Job()
         let timeoutTask = Task {
             try await Task.sleep(for: r.timeout)
@@ -50,9 +40,29 @@ nonisolated final class ClaudeCLIRunner: ClaudeRunner, Sendable {
         try Task.checkCancellation()
 
         if result.status == 0 { return try ClaudeCLI.parse(stdout: result.stdout) }
+        // A non-zero exit can still carry a usable (or more specific) JSON reply.
         if let parsed = try? ClaudeCLI.parse(stdout: result.stdout) { return parsed }
-        let err = String(decoding: result.stderr, as: UTF8.self)
-        throw ClaudeRunnerError.exit(result.status, String(err.suffix(500)))
+        let stderr = String(decoding: result.stderr, as: UTF8.self)
+        throw ClaudeRunnerError.exit(result.status, String(stderr.suffix(Self.stderrExcerptLength)))
+    }
+
+    /// Characters of stderr kept in an exit error.
+    private static let stderrExcerptLength = 500
+
+    /// The app's environment minus anything that would point the CLI at other credentials or a parent
+    /// Claude session, with Homebrew and /usr/local on PATH (GUI apps get a minimal PATH).
+    private func childEnvironment() -> [String: String] {
+        var env = environment
+        for key in env.keys where key.hasPrefix("ANTHROPIC_") || key.hasPrefix("CLAUDE_") || key == "CLAUDECODE" {
+            env.removeValue(forKey: key)
+        }
+        let extraPath = "/opt/homebrew/bin:/usr/local/bin"
+        if let path = env["PATH"], !path.isEmpty {
+            env["PATH"] = path.contains("/opt/homebrew/bin") ? path : extraPath + ":" + path
+        } else {
+            env["PATH"] = extraPath + ":/usr/bin:/bin"
+        }
+        return env
     }
 
     // MARK: - Executable lookup
@@ -83,6 +93,9 @@ nonisolated final class ClaudeCLIRunner: ClaudeRunner, Sendable {
         return found
     }
 
+    private static let loginShellTimeoutSeconds: Double = 5
+
+    /// Asks a login shell where `claude` is, for installs only the user's shell profile knows about.
     private static func runLookup() -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -94,7 +107,7 @@ nonisolated final class ClaudeCLIRunner: ClaudeRunner, Sendable {
         let done = DispatchSemaphore(value: 0)
         p.terminationHandler = { _ in done.signal() }
         do { try p.run() } catch { return nil }
-        if done.wait(timeout: .now() + 5) == .timedOut {
+        if done.wait(timeout: .now() + loginShellTimeoutSeconds) == .timedOut {
             p.terminate()
             return nil
         }
@@ -148,6 +161,8 @@ private nonisolated final class Job: @unchecked Sendable {
         }
         finish(.success(JobResult(status: -1, stdout: Data(), stderr: Data())))
     }
+
+    // MARK: Lifecycle
 
     /// Resume-once: only the first call resumes the continuation.
     private func finish(_ result: Result<JobResult, Error>) {
@@ -234,17 +249,29 @@ private nonisolated final class Job: @unchecked Sendable {
                 _ = killpg(child, SIGKILL)
                 _ = group.wait(timeout: .now() + 1)
             }
-            let status: Int32 = (raw & 0x7f) == 0 ? (raw >> 8) & 0xff : raw & 0x7f
+            let status = Self.exitStatus(fromWaitStatus: raw)
             finish(.success(JobResult(status: status, stdout: outBox.get(), stderr: errBox.get())))
         }
     }
 
+    // MARK: Pipes
+
+    private static let readChunkSize = 65536
+    /// poll() timeout, so readers and the writer notice an abandoned job promptly.
+    private static let pollIntervalMS: Int32 = 100
+
+    /// WEXITSTATUS for a normal exit, otherwise the terminating signal number (WTERMSIG).
+    private static func exitStatus(fromWaitStatus raw: Int32) -> Int32 {
+        let signal = raw & 0x7f
+        return signal == 0 ? (raw >> 8) & 0xff : signal
+    }
+
     private func readAll(_ fd: Int32) -> Data {
         var out = Data()
-        var buf = [UInt8](repeating: 0, count: 65536)
+        var buf = [UInt8](repeating: 0, count: Self.readChunkSize)
         while !isAbandoned {
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let r = poll(&pfd, 1, 100)
+            let r = poll(&pfd, 1, Self.pollIntervalMS)
             if r < 0 { if errno == EINTR { continue }; break }
             if r == 0 { continue }
             let n = read(fd, &buf, buf.count)
@@ -274,7 +301,7 @@ private nonisolated final class Job: @unchecked Sendable {
                 if n < 0 && errno == EINTR { continue }
                 if n < 0 && errno == EAGAIN {
                     var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                    _ = poll(&pfd, 1, 100)
+                    _ = poll(&pfd, 1, Self.pollIntervalMS)
                     continue
                 }
                 break  // EPIPE (child gone) or other error: benign
@@ -282,6 +309,8 @@ private nonisolated final class Job: @unchecked Sendable {
         }
         close(fd)
     }
+
+    // MARK: Spawning
 
     /// macOS has no pipe2(O_CLOEXEC), so there is a brief window before the fcntl where another thread's
     /// fork/exec could inherit these fds. Our own spawn is immune (POSIX_SPAWN_CLOEXEC_DEFAULT).
