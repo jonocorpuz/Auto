@@ -47,20 +47,25 @@ nonisolated enum ImportPlanner {
         // compare on-disk identity: any ancestor of the source that is a shoot copy means it is inside.
         let rootIDs = shootRoots.compactMap { identity(of: $0) }
         if !rootIDs.isEmpty {
-            for start in [resolvedSource, source] {
-                var probe = start
-                while true {
-                    if let id = identity(of: probe), rootIDs.contains(where: { $0.matches(id) }) { return .insideShoot(name) }
-                    let parent = probe.deletingLastPathComponent()
-                    if parent.path == probe.path || probe.path == "/" { break }
-                    probe = parent
-                }
+            for start in [resolvedSource, source] where hasAncestor(of: start, matchingAnyOf: rootIDs) {
+                return .insideShoot(name)
             }
         }
         let components = Set(ShootPlanner.lexicalComponents(source).map { $0.lowercased() })
             .union(ShootPlanner.lexicalComponents(resolvedSource).map { $0.lowercased() })
         if !components.isDisjoint(with: reserved) { return .inReservedFolder(name) }
         return nil
+    }
+
+    /// True when `start` or any folder above it is one of `identities`.
+    private static func hasAncestor(of start: URL, matchingAnyOf identities: [DiskIdentity]) -> Bool {
+        var probe = start
+        while true {
+            if let id = identity(of: probe), identities.contains(where: { $0.matches(id) }) { return true }
+            let parent = probe.deletingLastPathComponent()
+            if parent.path == probe.path || probe.path == "/" { return false }
+            probe = parent
+        }
     }
 
     private struct DiskIdentity {
@@ -77,30 +82,32 @@ nonisolated enum ImportPlanner {
 
     /// Camera folder names already in the shoot: "Video" / "Photo" -> folder names.
     static func existingFolders(in shoot: URL) -> [String: [String]] {
-        var out: [String: [String]] = [:]
+        var foldersBySection: [String: [String]] = [:]
         for section in [ShootPlanner.videoFolder, ShootPlanner.photoFolder] {
-            let dir = shoot.appendingPathComponent(section, isDirectory: true)
-            let urls = (try? FileManager.default.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
-            out[section] = urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-                .map(\.lastPathComponent).sorted()
+            let sectionFolder = shoot.appendingPathComponent(section, isDirectory: true)
+            let children = (try? FileManager.default.contentsOfDirectory(
+                at: sectionFolder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+            let folders = children.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            foldersBySection[section] = folders.map(\.lastPathComponent).sorted()
         }
-        return out
+        return foldersBySection
     }
 
     /// Points each camera at the folder spelling that already exists in the shoot (case-insensitive,
     /// Video before Photo). No match keeps the camera's own name; a lone "FX3" never adopts "FX3 A".
     static func mapCameras(detected: [Camera], existing: [String: [String]]) -> [Camera] {
-        var byLower: [String: String] = [:]
+        // Photo first so a Video spelling overwrites it: Video wins.
+        var spellingByLowercased: [String: String] = [:]
         for section in [ShootPlanner.photoFolder, ShootPlanner.videoFolder] {
-            for name in existing[section] ?? [] { byLower[name.lowercased()] = name }
+            for name in existing[section] ?? [] { spellingByLowercased[name.lowercased()] = name }
         }
         return detected.map { camera in
-            guard let name = byLower[camera.folderName.lowercased()], name != camera.folderName else { return camera }
-            var out = camera
-            out.folderName = name
-            out.defaultFolderName = name
-            return out
+            guard let existingName = spellingByLowercased[camera.folderName.lowercased()],
+                  existingName != camera.folderName else { return camera }
+            var renamed = camera
+            renamed.folderName = existingName
+            renamed.defaultFolderName = existingName
+            return renamed
         }
     }
 
@@ -115,18 +122,21 @@ nonisolated enum ImportPlanner {
 
     /// Everything flat into `folder` (inside `primary`), mirrored at the same relative path on each copy.
     static func exactJobs(files: [MediaFile], copies: [URL], primary: URL, folder: URL) throws -> [CopyJob] {
-        guard let rel = ShootPlanner.relativeComponents(folder, to: primary),
-              let resolvedRel = ShootPlanner.relativeComponents(ShootPlanner.resolvedPath(folder), to: ShootPlanner.resolvedPath(primary)),
-              !rel.contains(where: { reserved.contains($0.lowercased()) }),
-              !resolvedRel.contains(where: { reserved.contains($0.lowercased()) })
+        func isReserved(_ component: String) -> Bool { reserved.contains(component.lowercased()) }
+        guard let relative = ShootPlanner.relativeComponents(folder, to: primary),
+              let resolvedRelative = ShootPlanner.relativeComponents(ShootPlanner.resolvedPath(folder),
+                                                                     to: ShootPlanner.resolvedPath(primary)),
+              !relative.contains(where: isReserved),
+              !resolvedRelative.contains(where: isReserved)
         else { throw ImportRefusal.destinationNotInShoot }
-        let perCopy = copies.map { copy -> URL in
-            var dir = copy
-            for part in rel { dir.appendPathComponent(part, isDirectory: true) }
-            return dir
+
+        let folderPerCopy = copies.map { copy -> URL in
+            var folder = copy
+            for component in relative { folder.appendPathComponent(component, isDirectory: true) }
+            return folder
         }
         return files.flatMap { file in
-            zip(copies, perCopy).map { copy, dir in CopyJob(file: file, destDir: dir, root: copy) }
+            zip(copies, folderPerCopy).map { copy, folder in CopyJob(file: file, destDir: folder, root: copy) }
         }
     }
 }
