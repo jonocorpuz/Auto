@@ -19,6 +19,9 @@ nonisolated enum CullWorkspace {
     /// read-modify-write must not interleave.
     private static let prepareLock = NSLock()
 
+    // MARK: - Setup
+
+    /// Writes the workspace's Claude settings and CLAUDE.md, leaving a user-edited CLAUDE.md alone.
     @discardableResult
     static func prepare(at root: URL, claudeMD: String, version: Int) throws -> URL {
         prepareLock.lock()
@@ -46,10 +49,11 @@ nonisolated enum CullWorkspace {
         var shouldWrite = true
         var previous = recorded?.currentHash ?? recorded?.claudeMDSHA256
         if let existing {
-            let h = sha256(existing)
-            let known = [recorded?.currentHash, recorded?.previousHash, recorded?.claudeMDSHA256]
-            shouldWrite = known.contains(h)
-            previous = h
+            // Only replace a CLAUDE.md we wrote ourselves; a hash we don't know means the user edited it.
+            let existingHash = sha256(existing)
+            let knownHashes = [recorded?.currentHash, recorded?.previousHash, recorded?.claudeMDSHA256]
+            shouldWrite = knownHashes.contains(existingHash)
+            previous = existingHash
         }
         if shouldWrite {
             let meta = Meta(version: version, previousHash: previous, currentHash: sha256(newData), claudeMDSHA256: nil)
@@ -59,18 +63,25 @@ nonisolated enum CullWorkspace {
         return root
     }
 
+    // MARK: - Run folders
+
+    /// Creates (if needed) and returns the scratch folder for one run's previews.
     static func runDirectory(_ root: URL, runID: UUID) throws -> URL {
-        let dir = root.appendingPathComponent("runs", isDirectory: true)
-            .appendingPathComponent(runID.uuidString, isDirectory: true)
+        let dir = runFolder(root, runID: runID)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     static func removeRun(_ root: URL, runID: UUID) {
-        let dir = root.appendingPathComponent("runs", isDirectory: true)
-            .appendingPathComponent(runID.uuidString, isDirectory: true)
-        try? FileManager.default.removeItem(at: dir)
+        try? FileManager.default.removeItem(at: runFolder(root, runID: runID))
     }
+
+    private static func runFolder(_ root: URL, runID: UUID) -> URL {
+        root.appendingPathComponent("runs", isDirectory: true)
+            .appendingPathComponent(runID.uuidString, isDirectory: true)
+    }
+
+    // MARK: - Helpers
 
     private static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
