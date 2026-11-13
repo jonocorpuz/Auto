@@ -135,28 +135,31 @@ struct MediaView: View {
                     VStack(spacing: 0) {
                         ForEach(Array(model.drives.enumerated()), id: \.element.id) { index, drive in
                             if index > 0 { Divider().padding(.leading, 44) }
-                            HStack(spacing: 12) {
-                                Image(systemName: "externaldrive.fill")
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 22)
-                                Text(drive.name).font(.system(size: 13, weight: .medium))
-                                Spacer()
-                                if drive.url == model.workingVolume {
-                                    Text("Working drive")
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(Theme.accent)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(Theme.accent.opacity(0.12), in: Capsule())
-                                }
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 10)
+                            driveRow(drive)
                         }
                     }
                 }
             }
         }
+    }
+    private func driveRow(_ drive: DriveVolume) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "externaldrive.fill")
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+            Text(drive.name).font(.system(size: 13, weight: .medium))
+            Spacer()
+            if drive.url == model.workingVolume {
+                Text("Working drive")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Theme.accent.opacity(0.12), in: Capsule())
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
     }
 }
 
