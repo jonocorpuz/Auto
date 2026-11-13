@@ -401,10 +401,7 @@ extension AppModel {
             changed = true
         }
         guard changed else { return }
-        if let index = shoots.firstIndex(where: { $0.id == id }),
-           let updated = registry.records.first(where: { $0.id == id }) {
-            shoots[index].record = updated
-        }
+        republishRecord(of: id)
         await saveRegistry()
     }
 

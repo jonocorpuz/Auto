@@ -33,6 +33,13 @@ extension AppModel {
         }
     }
 
+    /// Copies the shoot's registry record onto its published item after an in-place registry edit.
+    func republishRecord(of shootID: UUID) {
+        guard let index = shoots.firstIndex(where: { $0.id == shootID }),
+              let updated = registry.records.first(where: { $0.id == shootID }) else { return }
+        shoots[index].record = updated
+    }
+
     /// The record's "yyyy-MM-dd" day as a date (`.distantPast` when it can't be parsed).
     private func day(of record: ShootRecord) -> Date {
         let parts = record.day.split(separator: "-").compactMap { Int($0) }

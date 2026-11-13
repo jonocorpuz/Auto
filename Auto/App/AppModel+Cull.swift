@@ -1,8 +1,8 @@
 import AppKit
 import Foundation
 
-// MARK: - Photo cull
-
+/// Photo cull: starting, stopping and undoing culls, and the app-wide apply lock that keeps cull moves,
+/// ingests and mirror syncs from touching a shoot at the same time.
 extension AppModel {
     // MARK: Locking
 
@@ -73,10 +73,10 @@ extension AppModel {
     }
 
     func cullRunPromptPreview(mode: CullMode) -> String {
-        var s = cullSettings
-        s.mode = mode
-        s.setCustomPrompt(nil, for: mode)
-        return CullPromptBuilder.runSection(settings: s)
+        var settings = cullSettings
+        settings.mode = mode
+        settings.setCustomPrompt(nil, for: mode)
+        return CullPromptBuilder.runSection(settings: settings)
     }
 
     func revealCullWorkspace() { NSWorkspace.shared.activateFileViewerSelecting([cullWorkspaceRoot]) }
@@ -85,9 +85,13 @@ extension AppModel {
 
     /// Reads the primary's journal (off main) and caches the run the UI should offer to undo, else the newest.
     func loadLastCullRun(shootID: UUID) async {
-        guard let primary = onlineCullCopies(shootID).first else { cullLastRuns[shootID] = nil; return }
+        guard let primary = onlineCullCopies(shootID).first else {
+            cullLastRuns[shootID] = nil
+            return
+        }
         let runs = await Self.readCullRuns(primary)
-        cullLastRuns[shootID] = runs.first(where: { !$0.undone }) ?? runs.first
+        let latestNotUndone = runs.first(where: { !$0.undone })
+        cullLastRuns[shootID] = latestNotUndone ?? runs.first
     }
 
     /// Photo count and cost estimate for the sheet, catalogued off main. Nil when the shoot is offline or unreadable.
@@ -119,10 +123,12 @@ extension AppModel {
     /// Starts a cull of the whole shoot on every online copy. False when refused (see `cullBlockReason`).
     @discardableResult
     func startCull(shootID: UUID) -> Bool {
-        guard cullBlockReason(shootID: shootID) == nil, let item = shoots.first(where: { $0.id == shootID }) else { return false }
+        guard cullBlockReason(shootID: shootID) == nil,
+              let item = shoots.first(where: { $0.id == shootID }) else { return false }
         let copies = onlineCullCopies(shootID)
         guard let primary = copies.first else { return false }
-        let shoot = Shoot(id: shootID, name: item.record.name, date: item.date, folder: primary, mirrors: Array(copies.dropFirst()))
+        let shoot = Shoot(id: shootID, name: item.record.name, date: item.date, folder: primary,
+                          mirrors: Array(copies.dropFirst()))
         let runner = CullRunner(analyzer: photoAnalyzer, claude: claude, applier: cullApplier, workspaceRoot: cullWorkspaceRoot)
         let settings = cullSettings.clamped()
         let volumes = cardVolumes()
@@ -132,36 +138,54 @@ extension AppModel {
         if let notice = cullBusyNotice() {
             cullStates[shootID] = .waiting(notice)
         } else {
-            cullStates[shootID] = .running(CullProgress(phase: .cataloging, fraction: 0, spentUSD: 0))
+            cullStates[shootID] = .running(Self.cullStartingProgress)
         }
         cullTasks[shootID] = Task { [weak self] in
-            // Starts when the running ingest or sync finishes (state stays `.waiting` until then).
-            await self?.cullGate()
-            if Task.isCancelled { await self?.finishCull(shootID, .stopped(nil)); return }
-            self?.cullStates[shootID] = .running(CullProgress(phase: .cataloging, fraction: 0, spentUSD: 0))
-            // Mirrors follow the main copy: bring any mirror that lacks the primary's earlier culls up to date first.
-            if copies.count > 1, let replayed = await self?.replayBeforeCull(primary: copies[0], mirrors: Array(copies.dropFirst()), volumes: volumes) {
-                if let note = replayed.note { self?.cullNotes[shootID] = note }
-                if replayed.failed { await self?.finishCull(shootID, .stopped(nil)); return }
-            }
-            let outcome = await runner.run(
-                shoot: shoot, copies: copies, cardVolumes: volumes, settings: settings,
-                gate: { [weak self] in await self?.cullGate() },
-                withApplyLock: { [weak self] body in
-                    guard let self else { throw CancellationError() }
-                    try await self.cullWithApplyLock(shootID: shootID, body)
-                },
-                onProgress: { [weak self] progress in
-                    guard let self, self.cullTasks[shootID] != nil else { return }
-                    if case .waiting(let note) = progress.phase { self.cullStates[shootID] = .waiting(note) } else { self.cullStates[shootID] = .running(progress) }
-                },
-                onRejects: { [weak self] batch in
-                    guard let self, self.cullTasks[shootID] != nil else { return }
-                    self.cullLiveRejects[shootID, default: []].append(contentsOf: batch)
-                })
-            await self?.finishCull(shootID, outcome)
+            await self?.runCull(shootID, shoot: shoot, copies: copies, runner: runner, settings: settings, volumes: volumes)
         }
         return true
+    }
+
+    private static let cullStartingProgress = CullProgress(phase: .cataloging, fraction: 0, spentUSD: 0)
+
+    private func runCull(_ shootID: UUID, shoot: Shoot, copies: [URL], runner: CullRunner,
+                         settings: CullSettings, volumes: [URL]) async {
+        // Starts when the running ingest or sync finishes (state stays `.waiting` until then).
+        await cullGate()
+        if Task.isCancelled {
+            await finishCull(shootID, .stopped(nil))
+            return
+        }
+        cullStates[shootID] = .running(Self.cullStartingProgress)
+        // Mirrors follow the main copy: bring any mirror that lacks the primary's earlier culls up to date first.
+        if copies.count > 1,
+           let replayed = await replayBeforeCull(primary: copies[0], mirrors: Array(copies.dropFirst()), volumes: volumes) {
+            if let note = replayed.note { cullNotes[shootID] = note }
+            if replayed.failed {
+                await finishCull(shootID, .stopped(nil))
+                return
+            }
+        }
+        let outcome = await runner.run(
+            shoot: shoot, copies: copies, cardVolumes: volumes, settings: settings,
+            gate: { [weak self] in await self?.cullGate() },
+            withApplyLock: { [weak self] body in
+                guard let self else { throw CancellationError() }
+                try await self.cullWithApplyLock(shootID: shootID, body)
+            },
+            onProgress: { [weak self] progress in
+                guard let self, self.cullTasks[shootID] != nil else { return }
+                if case .waiting(let note) = progress.phase {
+                    self.cullStates[shootID] = .waiting(note)
+                } else {
+                    self.cullStates[shootID] = .running(progress)
+                }
+            },
+            onRejects: { [weak self] batch in
+                guard let self, self.cullTasks[shootID] != nil else { return }
+                self.cullLiveRejects[shootID, default: []].append(contentsOf: batch)
+            })
+        await finishCull(shootID, outcome)
     }
 
     /// Cancels the run. During apply the runner rolls this run's moves back (outcome `.stopped`).
@@ -206,10 +230,8 @@ extension AppModel {
         let offline = item.copies.filter { $0.availability != .online }
         guard !offline.isEmpty else { return }
         for copy in offline { registry.setPendingSync(id: shootID, path: copy.path, true) }
-        if let i = shoots.firstIndex(where: { $0.id == shootID }), let updated = registry.records.first(where: { $0.id == shootID }) {
-            shoots[i].record = updated
-        }
-        do { try await ShootStore.save(registry, to: registryURL) } catch { NSLog("Auto: couldn't save shoots.json: \(error)") }
+        republishRecord(of: shootID)
+        await saveRegistry()
     }
 
     /// Undoes the latest cull that isn't undone, on every online copy, under the apply lock.
@@ -219,14 +241,17 @@ extension AppModel {
         guard !copies.isEmpty else { return false }
         cullNotes[shootID] = nil
         cullStates[shootID] = .waiting(cullBusyNotice() ?? "Waiting to undo…")
-        guard await acquireApplyLock(excludingIngest: true) else { cullStates[shootID] = nil; return false }
-        cullStates[shootID] = .running(CullProgress(phase: .undoing(done: 0, total: 0), fraction: 0, spentUSD: 0))
+        guard await acquireApplyLock(excludingIngest: true) else {
+            cullStates[shootID] = nil
+            return false
+        }
+        cullStates[shootID] = .running(Self.undoProgress(done: 0, total: 0))
         let volumes = cardVolumes()
-        let result = await Self.performUndo(runID: cullLastRuns[shootID]?.runID, copies: copies, cardVolumes: volumes) { [weak self] done, total in
+        let runID = cullLastRuns[shootID]?.runID
+        let result = await Self.performUndo(runID: runID, copies: copies, cardVolumes: volumes) { [weak self] done, total in
             Task { @MainActor [weak self] in
                 guard let self, case .running? = self.cullStates[shootID] else { return }
-                self.cullStates[shootID] = .running(CullProgress(
-                    phase: .undoing(done: done, total: total), fraction: total > 0 ? Double(done) / Double(total) : 1, spentUSD: 0))
+                self.cullStates[shootID] = .running(Self.undoProgress(done: done, total: total))
             }
         }
         releaseApplyLock()
@@ -245,13 +270,22 @@ extension AppModel {
         }
     }
 
+    nonisolated private static func undoProgress(done: Int, total: Int) -> CullProgress {
+        let fraction = total > 0 ? Double(done) / Double(total) : 1
+        return CullProgress(phase: .undoing(done: done, total: total), fraction: fraction, spentUSD: 0)
+    }
+
     // MARK: Off-main work
 
     @concurrent
     nonisolated private static func performUndo(runID: UUID?, copies: [URL], cardVolumes: [URL],
                                                 onProgress: @escaping @Sendable (Int, Int) -> Void) async -> Result<CullRunSummary, Error> {
-        do { return .success(try CullApplier.undo(runID: runID, copies: copies, cardVolumes: cardVolumes, onProgress: onProgress)) }
-        catch { return .failure(error) }
+        do {
+            let summary = try CullApplier.undo(runID: runID, copies: copies, cardVolumes: cardVolumes, onProgress: onProgress)
+            return .success(summary)
+        } catch {
+            return .failure(error)
+        }
     }
 
     @concurrent
@@ -267,23 +301,33 @@ extension AppModel {
     /// True when an online mirror's journal lacks a run the primary has.
     @concurrent
     nonisolated fileprivate static func mirrorsLag(primary: URL, mirrors: [URL]) async -> Bool {
-        let source = Set(((try? CullJournal.runs(in: primary)) ?? []).map(\.runID))
-        guard !source.isEmpty else { return false }
-        return mirrors.contains { !source.isSubset(of: Set(((try? CullJournal.runs(in: $0)) ?? []).map(\.runID))) }
+        func runIDs(in copy: URL) -> Set<UUID> {
+            let runs = (try? CullJournal.runs(in: copy)) ?? []
+            return Set(runs.map(\.runID))
+        }
+        let primaryRuns = runIDs(in: primary)
+        guard !primaryRuns.isEmpty else { return false }
+        return mirrors.contains { mirror in !primaryRuns.isSubset(of: runIDs(in: mirror)) }
     }
 
     /// Copies the primary's cull journal onto the mirrors (moves only; nothing is copied or deleted), so the
     /// sync planner sees matching paths. The primary is always the source. Returns a note when pairs couldn't be replayed.
     @concurrent
     nonisolated static func replayCullJournals(primary: URL, mirrors: [URL], cardVolumes: [URL]) async -> String? {
-        guard !mirrors.isEmpty, ((try? CullJournal.runs(in: primary).count) ?? 0) > 0 else { return nil }
+        let primaryRunCount = (try? CullJournal.runs(in: primary).count) ?? 0
+        guard !mirrors.isEmpty, primaryRunCount > 0 else { return nil }
         var skipped = 0
-        var failed: String?
+        var failure: String?
         for copy in mirrors {
-            do { skipped += try CullReplay.replay(from: primary, to: copy, cardVolumes: cardVolumes).skipped.count }
-            catch { failed = error.localizedDescription }
+            do {
+                skipped += try CullReplay.replay(from: primary, to: copy, cardVolumes: cardVolumes).skipped.count
+            } catch {
+                failure = error.localizedDescription
+            }
         }
-        if let failed { return "Cull replay: \(failed)" }
-        return skipped > 0 ? "\(Format.count(skipped, "culled photo", "culled photos")) couldn't be matched on every copy." : nil
+        // `replayBeforeCull` recognises a failure by this prefix.
+        if let failure { return "Cull replay: \(failure)" }
+        guard skipped > 0 else { return nil }
+        return "\(Format.count(skipped, "culled photo", "culled photos")) couldn't be matched on every copy."
     }
 }
