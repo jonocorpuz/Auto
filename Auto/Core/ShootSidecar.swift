@@ -50,9 +50,9 @@ nonisolated enum ShootError: LocalizedError, Equatable {
         case .alreadyRegistered:
             return "That folder is already part of a shoot in Auto."
         case .partialCreate(let created, let failed):
-            let made = created.isEmpty ? "No copies were created" : "Created on \(created.joined(separator: ", "))"
-            let bad = failed.map { "\($0.name): \($0.reason)" }.joined(separator: "; ")
-            return "\(made). Couldn't create on \(bad). Use Add Mirror\u{2026} to retry."
+            let createdText = created.isEmpty ? "No copies were created" : "Created on \(created.joined(separator: ", "))"
+            let failedText = failed.map { "\($0.name): \($0.reason)" }.joined(separator: "; ")
+            return "\(createdText). Couldn't create on \(failedText). Use Add Mirror\u{2026} to retry."
         case .lastCopy:
             return "This is the shoot's only copy. Use Remove from Auto instead."
         }
@@ -83,20 +83,20 @@ nonisolated struct ShootSidecar: Sendable, Equatable, Codable {
 
     // Hand-written: sidecars written before layout existed lack the key.
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        version = try c.decode(Int.self, forKey: .version)
-        id = try c.decode(UUID.self, forKey: .id)
-        name = try c.decode(String.self, forKey: .name)
-        day = try c.decode(String.self, forKey: .day)
-        createdAt = try c.decode(Date.self, forKey: .createdAt)
-        layout = try c.decodeIfPresent(ShootLayout.self, forKey: .layout) ?? .cameraFolders
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        day = try container.decode(String.self, forKey: .day)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        layout = try container.decodeIfPresent(ShootLayout.self, forKey: .layout) ?? .cameraFolders
     }
 
-    static func encode(_ s: ShootSidecar) throws -> Data {
+    static func encode(_ sidecar: ShootSidecar) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        return try encoder.encode(s)
+        return try encoder.encode(sidecar)
     }
 
     static func decode(_ data: Data) throws -> ShootSidecar {
@@ -114,13 +114,14 @@ nonisolated struct ShootSidecar: Sendable, Equatable, Codable {
         return sidecar
     }
 
+    /// "yyyy-MM-dd" in `calendar`'s time zone, always Gregorian digits.
     private static func formatter(_ calendar: Calendar) -> DateFormatter {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.calendar = Calendar(identifier: .gregorian)
-        f.timeZone = calendar.timeZone
-        f.dateFormat = "yyyy-MM-dd"
-        return f
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
     }
 
     static func dayString(_ date: Date, calendar: Calendar) -> String {

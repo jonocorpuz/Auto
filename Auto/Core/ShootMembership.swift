@@ -20,9 +20,9 @@ nonisolated enum ShootMembership {
     static func nested(in folder: URL, among folders: [URL]) -> [URL] {
         let root = folder.resolvingSymlinksInPath().standardizedFileURL.path
         let prefix = root.hasSuffix("/") ? root : root + "/"
-        return folders.filter {
-            let p = $0.resolvingSymlinksInPath().standardizedFileURL.path
-            return p != root && p.hasPrefix(prefix)
+        return folders.filter { other in
+            let path = other.resolvingSymlinksInPath().standardizedFileURL.path
+            return path != root && path.hasPrefix(prefix)
         }
     }
 
