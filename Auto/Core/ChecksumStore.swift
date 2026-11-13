@@ -129,7 +129,7 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
                 if map.count > before { dirty = true }
             }
         } else {
-            Self.quarantine(url)
+            CorruptFileQuarantine.quarantine(url, description: "checksums")
         }
     }
 
@@ -156,23 +156,6 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
             NSLog("Auto: could not save checksums: \(error)")
             lock.withLock { dirty = true }
         }
-    }
-
-    /// Renames an undecodable cache to `<name>.corrupt-<timestamp>` next to it. Never deletes.
-    private static func quarantine(_ url: URL) {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyyMMdd-HHmmss"
-        let stamp = f.string(from: Date())
-        let fm = FileManager.default
-        let dir = url.deletingLastPathComponent()
-        var target = dir.appendingPathComponent(url.lastPathComponent + ".corrupt-" + stamp)
-        var n = 1
-        while fm.fileExists(atPath: target.path) {
-            target = dir.appendingPathComponent(url.lastPathComponent + ".corrupt-" + stamp + "-\(n)")
-            n += 1
-        }
-        do { try fm.moveItem(at: url, to: target) } catch { NSLog("Auto: could not back up corrupt checksums: \(error)") }
     }
 
     private static func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }
