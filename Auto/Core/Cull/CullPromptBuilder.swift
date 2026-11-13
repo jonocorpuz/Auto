@@ -6,9 +6,10 @@ import Foundation
 /// grading guide goes in the appended run section. Each group
 /// gets one user message listing its metrics and frame paths.
 nonisolated enum CullPromptBuilder {
-
     /// Bump when any prompt text or the schema changes meaning.
     static let promptVersion = 3
+
+    // MARK: - First pass (one call per group)
 
     /// Written verbatim into `CullWorkspace/CLAUDE.md`. Mode-neutral: each
     /// cull's stance comes in the run section.
@@ -63,10 +64,10 @@ nonisolated enum CullPromptBuilder {
             groupKind = "Mixed singles: \(group.photos.count) unrelated frames. Judge each on its own; do not use \"keeper\"."
         }
 
-        let t0 = group.photos.first?.metrics?.captureTime
+        let firstCaptureTime = group.photos.first?.metrics?.captureTime
         let metricsLines = group.photos.compactMap { photo -> String? in
             guard let token = tokens[photo.id] else { return nil }
-            return metricsLine(photo, token: token, t0: t0)
+            return metricsLine(photo, token: token, t0: firstCaptureTime)
         }
         let frameLines = group.photos.compactMap { photo -> String? in
             guard let token = tokens[photo.id], let frame = frames[photo.id] else { return nil }
@@ -135,7 +136,7 @@ nonisolated enum CullPromptBuilder {
             + #","reason":{"type":"string","maxLength":90}}}}}}"#
     }()
 
-    // MARK: Final round (Selects)
+    // MARK: - Final round (Selects)
 
     /// `--system-prompt` for the Selects final round.
     static let finalRoundSystemPrompt = "You are the picture editor choosing the final gallery for a professional photographer. Read every candidate frame, compare them against each other, and output only JSON matching the schema."
@@ -163,8 +164,9 @@ nonisolated enum CullPromptBuilder {
         pick: Int,
         frames: [(token: String, path: String, score: Int, role: String?)]
     ) -> String {
-        let lines = frames.map { f in
-            "\(f.token): \(f.path) (score \(f.score)" + (f.role.map { ", \($0)" } ?? "") + ")"
+        let lines = frames.map { frame in
+            let role = frame.role.map { ", \($0)" } ?? ""
+            return "\(frame.token): \(frame.path) (score \(frame.score)\(role))"
         }
         return """
         Final round \(round), batch \(batch) of \(batchCount): \(frames.count) candidates. Pick exactly \(pick), best first.
@@ -179,6 +181,8 @@ nonisolated enum CullPromptBuilder {
     static let finalRoundSchema: String = #"""
         {"type":"object","additionalProperties":false,"required":["picks"],"properties":{"picks":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","reason"],"properties":{"id":{"type":"string","pattern":"^p[0-9]{2}$"},"reason":{"type":"string","maxLength":60}}}}}}
         """#
+
+    // MARK: - Helpers
 
     /// Seconds between the first and last frame, 1 dp. "?" unless both
     /// capture times are known.

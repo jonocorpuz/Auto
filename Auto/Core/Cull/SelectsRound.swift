@@ -56,11 +56,14 @@ nonisolated enum SelectsPlanner {
     /// Snake-deals by rank (0,1,2,2,1,0,0,1,...) so each batch gets a balanced score spread.
     static func batches(_ candidates: [Candidate], size: Int) -> [[Candidate]] {
         guard !candidates.isEmpty, size > 0 else { return [] }
-        let count = (candidates.count + size - 1) / size
-        var out = [[Candidate]](repeating: [], count: count)
-        for (i, c) in ranked(candidates).enumerated() {
-            let lap = i / count, pos = i % count
-            out[lap % 2 == 0 ? pos : count - 1 - pos].append(c)
+        let batchCount = (candidates.count + size - 1) / size
+        var out = [[Candidate]](repeating: [], count: batchCount)
+        for (rank, candidate) in ranked(candidates).enumerated() {
+            let lap = rank / batchCount
+            let positionInLap = rank % batchCount
+            let dealsForward = lap % 2 == 0
+            let batchIndex = dealsForward ? positionInLap : batchCount - 1 - positionInLap
+            out[batchIndex].append(candidate)
         }
         return out
     }
@@ -69,11 +72,14 @@ nonisolated enum SelectsPlanner {
     /// Uses a constant keep ratio (target/pool)^(1/rounds) with the minimal
     /// round count whose final round fits in one batch. When target >= batchSize
     /// that is impossible, so a single round straight to the target is used.
+    /// Safety cap on the round search; real pools need only a handful.
+    private static let maxRounds = 64
+
     static func roundPlan(poolCount: Int, target: Int, batchSize: Int) -> [Int] {
         guard target > 0, poolCount > target else { return [] }
         if target >= batchSize { return [target] }
         var rounds = 1
-        while rounds < 64 {
+        while rounds < maxRounds {
             let ratio = pow(Double(target) / Double(poolCount), 1 / Double(rounds))
             let beforeFinal = Int((Double(poolCount) * pow(ratio, Double(rounds - 1))).rounded(.up))
             if beforeFinal <= batchSize { break }
