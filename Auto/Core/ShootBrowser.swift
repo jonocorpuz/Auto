@@ -62,10 +62,10 @@ nonisolated enum ShootBrowser {
     /// `root` followed by one entry per folder between it and `folder`, in order. The first name is
     /// `root`'s own last path component. nil when `folder` is not equal to or inside `root`.
     static func breadcrumb(from root: URL, to folder: URL) -> [(name: String, url: URL)]? {
-        guard let rel = ShootPlanner.relativeComponents(folder, to: root) else { return nil }
+        guard let relative = ShootPlanner.relativeComponents(folder, to: root) else { return nil }
         var crumbs: [(name: String, url: URL)] = [(root.lastPathComponent, root)]
         var current = root
-        for part in rel {
+        for part in relative {
             current = current.appendingPathComponent(part, isDirectory: true)
             crumbs.append((part, current))
         }
@@ -75,9 +75,9 @@ nonisolated enum ShootBrowser {
     /// `folder` if it is equal to or inside `root`, otherwise `root`. `../` escapes are resolved
     /// lexically first, so the browser can never navigate above the shoot.
     static func clamp(_ folder: URL, root: URL) -> URL {
-        guard let rel = ShootPlanner.relativeComponents(folder, to: root) else { return root }
+        guard let relative = ShootPlanner.relativeComponents(folder, to: root) else { return root }
         var current = root
-        for part in rel { current = current.appendingPathComponent(part, isDirectory: true) }
+        for part in relative { current = current.appendingPathComponent(part, isDirectory: true) }
         return current
     }
 
@@ -85,8 +85,10 @@ nonisolated enum ShootBrowser {
     /// under `_Rejects` or `.auto-cull`, drops exactly there (the planner refuses reserved targets).
     /// A folder outside `root` is treated as the top level.
     static func dropTarget(for folder: URL, root: URL) -> DropTarget {
-        guard let rel = ShootPlanner.relativeComponents(folder, to: root) else { return .sorted }
-        if rel.isEmpty || (rel.count == 1 && (rel[0] == "Video" || rel[0] == "Photo")) { return .sorted }
+        guard let relative = ShootPlanner.relativeComponents(folder, to: root) else { return .sorted }
+        let isTopLevel = relative.isEmpty
+        let isSectionFolder = relative.count == 1 && (relative[0] == "Video" || relative[0] == "Photo")
+        if isTopLevel || isSectionFolder { return .sorted }
         return .exact(clamp(folder, root: root))
     }
 }

@@ -34,7 +34,7 @@ nonisolated enum CardBrowser {
     static func group(files: [MediaFile], backups: [URL: URL], missing: Set<URL>,
                       shoots: [ShootRef], memberships: [UUID: Set<URL>]) -> [Group] {
         // Deepest folder first so nested shoots win over their parents.
-        let ordered = shoots
+        let deepestFirst = shoots
             .map { (ref: $0, path: canonical($0.folder)) }
             .sorted { $0.path.count > $1.path.count }
 
@@ -42,16 +42,20 @@ nonisolated enum CardBrowser {
         var elsewhere: [MediaFile] = []
         var byShoot: [UUID: [MediaFile]] = [:]
         for file in files {
-            guard let copy = backups[file.url], !missing.contains(file.url) else { notBacked.append(file); continue }
+            guard let copy = backups[file.url], !missing.contains(file.url) else {
+                notBacked.append(file)
+                continue
+            }
             var placed = false
             for ref in shoots where memberships[ref.id]?.contains(file.url) == true {
                 byShoot[ref.id, default: []].append(file)
                 placed = true
             }
-            let path = canonical(copy)
-            if let match = ordered.first(where: { path.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") }),
-               memberships[match.ref.id] == nil {
-                byShoot[match.ref.id, default: []].append(file)
+            // Fallback for shoots whose membership hasn't been computed yet.
+            let copyPath = canonical(copy)
+            if let holder = deepestFirst.first(where: { isInside(copyPath, folder: $0.path) }),
+               memberships[holder.ref.id] == nil {
+                byShoot[holder.ref.id, default: []].append(file)
                 placed = true
             }
             if !placed { elsewhere.append(file) }
@@ -75,8 +79,13 @@ nonisolated enum CardBrowser {
 
     private static func sorted(_ files: [MediaFile]) -> [MediaFile] {
         files.sorted { a, b in
-            a.date != b.date ? a.date < b.date : a.name.localizedStandardCompare(b.name) == .orderedAscending
+            if a.date != b.date { return a.date < b.date }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
+    }
+
+    private static func isInside(_ path: String, folder: String) -> Bool {
+        path.hasPrefix(folder.hasSuffix("/") ? folder : folder + "/")
     }
 
     private static func canonical(_ url: URL) -> String {
