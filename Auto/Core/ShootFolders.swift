@@ -78,48 +78,58 @@ nonisolated enum ShootFolders {
     /// Writes the sidecar once, via the folder's file descriptor so nothing is resolved twice:
     /// open dir (no symlink) -> verify not on a card -> temp (exclusive create) -> F_FULLFSYNC ->
     /// exclusive rename -> sync dir. An existing sidecar is never replaced.
-    static func writeSidecar(_ s: ShootSidecar, in folder: URL, cardVolumes: [URL] = []) throws {
-        let data = try ShootSidecar.encode(s)
-        let dfd = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard dfd >= 0 else {
+    static func writeSidecar(_ sidecar: ShootSidecar, in folder: URL, cardVolumes: [URL] = []) throws {
+        let data = try ShootSidecar.encode(sidecar)
+        let folderFD = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard folderFD >= 0 else {
             let code = errno
             if code == ELOOP || code == ENOTDIR { throw ShootError.notAFolder(folder.lastPathComponent) }
             throw posix(code)
         }
-        defer { close(dfd) }
+        defer { close(folderFD) }
 
         var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        guard fcntl(dfd, F_GETPATH, &buf) == 0 else { throw posix(errno) }
-        let real = URL(fileURLWithPath: String(cString: buf), isDirectory: true)
-        if VolumeClassifier.isOnCard(real, cards: cardVolumes) { throw ShootError.onCard }
+        guard fcntl(folderFD, F_GETPATH, &buf) == 0 else { throw posix(errno) }
+        let resolvedFolder = URL(fileURLWithPath: String(cString: buf), isDirectory: true)
+        if VolumeClassifier.isOnCard(resolvedFolder, cards: cardVolumes) { throw ShootError.onCard }
 
         let tmpName = ".auto-shoot-\(UUID().uuidString).tmp"
-        let fd = openat(dfd, tmpName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
+        let fd = openat(folderFD, tmpName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
         guard fd >= 0 else { throw posix(errno) }
-        var failure: Int32 = 0
-        data.withUnsafeBytes { raw in
-            var offset = 0
-            while offset < raw.count {
-                let n = write(fd, raw.baseAddress! + offset, raw.count - offset)
-                if n < 0 { if errno == EINTR { continue }; failure = errno; break }
-                offset += n
-            }
-        }
+        var failure = writeAll(data, to: fd)
         if failure == 0, fcntl(fd, F_FULLFSYNC) != 0, fsync(fd) != 0 { failure = errno }
         close(fd)
         guard failure == 0 else {
-            unlinkat(dfd, tmpName, 0)
+            unlinkat(folderFD, tmpName, 0)
             throw posix(failure)
         }
 
-        if renameatx_np(dfd, tmpName, dfd, ShootSidecar.fileName, UInt32(RENAME_EXCL)) != 0 {
+        if renameatx_np(folderFD, tmpName, folderFD, ShootSidecar.fileName, UInt32(RENAME_EXCL)) != 0 {
             let code = errno
-            unlinkat(dfd, tmpName, 0)
+            unlinkat(folderFD, tmpName, 0)
             if code == EEXIST, let existing = try readSidecar(in: folder) { throw ShootError.alreadyAShoot(existing.id) }
             throw posix(code)
         }
         // Best effort: the sidecar is already in place, so a failed directory sync isn't an error.
-        if fcntl(dfd, F_FULLFSYNC) != 0 { _ = fsync(dfd) }
+        if fcntl(folderFD, F_FULLFSYNC) != 0 { _ = fsync(folderFD) }
+    }
+
+    /// Writes every byte of `data`, retrying on EINTR. Returns 0, or the errno that stopped it.
+    private static func writeAll(_ data: Data, to fd: Int32) -> Int32 {
+        var failure: Int32 = 0
+        data.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let written = write(fd, raw.baseAddress! + offset, raw.count - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    failure = errno
+                    break
+                }
+                offset += written
+            }
+        }
+        return failure
     }
 
     private static func makeSidecar(name: String, date: Date, calendar: Calendar, now: Date, layout: ShootLayout) -> ShootSidecar {
@@ -138,7 +148,7 @@ nonisolated enum ShootFolders {
         } catch let error as ShootPlanner.PathError {
             switch error {
             case .onCard: throw ShootError.onCard
-            case .notAFolder(let n): throw ShootError.notAFolder(n)
+            case .notAFolder(let folderName): throw ShootError.notAFolder(folderName)
             // A symlink (dangling or leading elsewhere) at the name: same answer classify gives.
             case .outsideWorkFolder: throw ShootError.notAFolder(name)
             case .workFolderMissing: throw ShootError.parentMissing
@@ -184,10 +194,10 @@ nonisolated enum ShootFolders {
     static func classifyCopy(parent: URL, sidecar: ShootSidecar) -> CopyCollision {
         switch classify(parent: parent, name: sidecar.name) {
         case .free: return .free
-        case .existingShoot(let s): return s.id == sidecar.id ? .sameShoot : .otherShoot(s.id)
+        case .existingShoot(let existing): return existing.id == sidecar.id ? .sameShoot : .otherShoot(existing.id)
         case .plainFolder: return .plainFolder
         case .notAFolder: return .notAFolder
-        case .unreadableShoot(let e): return .unreadable(e)
+        case .unreadableShoot(let error): return .unreadable(error)
         case .invalidName: return .unreadable(.invalidName)
         }
     }
@@ -198,10 +208,10 @@ nonisolated enum ShootFolders {
         guard isExistingDirectory(folder) else { throw ShootError.notAFolder(folder.lastPathComponent) }
         try checkSafe(folder, root: folder, cardVolumes: cardVolumes, name: folder.lastPathComponent)
         switch classify(folder: folder) {
-        case .existingShoot(let s):
-            if s.id == sidecar.id { return }
-            throw ShootError.alreadyAShoot(s.id)
-        case .unreadableShoot(let e): throw e
+        case .existingShoot(let existing):
+            if existing.id == sidecar.id { return }
+            throw ShootError.alreadyAShoot(existing.id)
+        case .unreadableShoot(let error): throw error
         case .notAFolder, .free: throw ShootError.notAFolder(folder.lastPathComponent)
         case .invalidName: throw ShootError.invalidName
         case .plainFolder: break
@@ -222,10 +232,10 @@ nonisolated enum ShootFolders {
             let code = errno
             guard code == EEXIST else { throw posix(code) }
             switch classify(folder: folder) {
-            case .existingShoot(let s): throw ShootError.alreadyAShoot(s.id)
+            case .existingShoot(let existing): throw ShootError.alreadyAShoot(existing.id)
             case .plainFolder: throw ShootError.folderExistsWithoutSidecar(component)
             case .notAFolder: throw ShootError.notAFolder(component)
-            case .unreadableShoot(let e): throw e
+            case .unreadableShoot(let error): throw error
             case .invalidName: throw ShootError.invalidName
             case .free: throw posix(code)
             }
@@ -242,12 +252,12 @@ nonisolated enum ShootFolders {
     /// Turns an existing plain folder into a shoot by adding the sidecar. Nothing else is touched.
     static func adopt(folder: URL, name: String, date: Date, cardVolumes: [URL], calendar: Calendar, now: Date = Date(),
                        layout: ShootLayout = .cameraFolders) throws -> Shoot {
-        guard isExistingDirectory(folder)else { throw ShootError.notAFolder(folder.lastPathComponent) }
+        guard isExistingDirectory(folder) else { throw ShootError.notAFolder(folder.lastPathComponent) }
         try checkSafe(folder, root: folder, cardVolumes: cardVolumes, name: folder.lastPathComponent)
         guard let clean = ShootPlanner.safeComponent(name) else { throw ShootError.invalidName }
         switch classify(folder: folder) {
-        case .existingShoot(let s): throw ShootError.alreadyAShoot(s.id)
-        case .unreadableShoot(let e): throw e
+        case .existingShoot(let existing): throw ShootError.alreadyAShoot(existing.id)
+        case .unreadableShoot(let error): throw error
         case .notAFolder, .free: throw ShootError.notAFolder(folder.lastPathComponent)
         case .invalidName: throw ShootError.invalidName
         case .plainFolder: break
