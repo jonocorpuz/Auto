@@ -1,6 +1,35 @@
 import AppKit
 import Foundation
 
+/// One copy folder an import writes into, with the jobs that land in it.
+nonisolated private struct ImportFolderCheck: Sendable {
+    let root: URL
+    let jobs: [CopyJob]
+}
+
+/// Everything the off-main import preflight reads.
+nonisolated private struct ImportPreflightInput: Sendable {
+    let folderChecks: [ImportFolderCheck]
+    let shootID: UUID
+    let staged: [MediaFile]
+    /// Duplicates the user chose to copy anyway: not re-checked.
+    let keptDuplicates: Set<URL>
+    let primaryFolder: URL
+    let cardVolumes: [URL]
+    let cache: VerificationCache
+    let freeSpaceOf: @Sendable (URL) -> Int64?
+}
+
+/// What the import preflight found, before a byte is written.
+nonisolated private struct ImportPreflight: Sendable {
+    /// Each copy folder and why it can't take the files (nil: it can).
+    let folderResults: [(root: URL, error: String?)]
+    /// Sources that changed since staging; they are dropped.
+    let changed: Set<URL>
+    /// Sources already in the shoot (landed since staging); they are skipped.
+    let duplicates: Set<URL>
+}
+
 /// Add Files: copies loose files and folders into a shoot through the same engine, queue and bookkeeping as a
 /// card ingest. Sources are only ever read (by `CopyEngine`); nothing here deletes, moves or renames them.
 extension AppModel {
@@ -41,11 +70,12 @@ extension AppModel {
     }
 
     private func onlineShoot(_ id: UUID) -> Shoot? {
-        if case .online(let shoot)? = shoots.first(where: { $0.id == id })?.availability { return shoot }
-        return nil
+        guard case .online(let shoot)? = shoots.first(where: { $0.id == id })?.availability else { return nil }
+        return shoot
     }
 
     private func runStaging(_ staging: ImportStaging, generation: Int) async {
+        // A newer scan (sources added) or a cancel supersedes this one.
         func current() -> Bool { !Task.isCancelled && staging.generation == generation }
         guard let shoot = onlineShoot(staging.shootID) else {
             staging.phase = .failed(ImportRefusal.shootOffline.localizedDescription)
@@ -107,7 +137,8 @@ extension AppModel {
         }
         let selected = staging.selected
         guard !selected.isEmpty else {
-            throw staging.items.isEmpty || staging.skippedDuplicateCount == 0 ? ImportRefusal.nothingToAdd : ImportRefusal.allDuplicates
+            let onlyDuplicatesLeft = !staging.items.isEmpty && staging.skippedDuplicateCount > 0
+            throw onlyDuplicatesLeft ? ImportRefusal.allDuplicates : ImportRefusal.nothingToAdd
         }
         if shoot.copies.contains(where: { isOnCard($0) }) { throw ImportRefusal.destinationOnCard }
         let files = selected.map(\.file)
@@ -178,12 +209,15 @@ extension AppModel {
 
     private func importBlocker(_ job: ImportJob) -> String? {
         let roots = job.plan.copyRoots
-        if cards.contains(where: { card in
-            card.engine != nil && (card.plan?.copyRoots.contains { theirs in roots.contains { Self.overlap($0, theirs) } } ?? false)
-        }) { return "Waiting for a card copy to finish" }
-        if imports.contains(where: { $0 !== job && $0.engine != nil && $0.plan.copyRoots.contains { theirs in roots.contains { Self.overlap($0, theirs) } } }) {
-            return "Waiting for another Add Files to finish"
+        func overlapsMine(_ theirRoots: [URL]) -> Bool {
+            theirRoots.contains { theirs in roots.contains { Self.overlap($0, theirs) } }
         }
+        let cardIsWriting = cards.contains { card in card.engine != nil && overlapsMine(card.plan?.copyRoots ?? []) }
+        if cardIsWriting { return "Waiting for a card copy to finish" }
+        let otherImportIsWriting = imports.contains { other in
+            other !== job && other.engine != nil && overlapsMine(other.plan.copyRoots)
+        }
+        if otherImportIsWriting { return "Waiting for another Add Files to finish" }
         if syncBusyOverlapping(roots) { return "Waiting for Sync Now to finish" }
         if cullApplying { return "Waiting for a photo cull to finish" }
         return nil
@@ -196,8 +230,6 @@ extension AppModel {
             return
         }
         let plan = job.plan
-        let myRoots = plan.copyRoots
-        let cardVolumes = cards.map(\.volume)
         let usable = currentRoots(of: plan)
         guard !usable.isEmpty else {
             job.phase = .failed("No copy folder is available.")
@@ -207,116 +239,167 @@ extension AppModel {
             job.phase = .failed(ImportRefusal.destinationOnCard.localizedDescription)
             return
         }
-        let rootChecks: [(root: URL, jobs: [CopyJob])] = usable.map { root in
-            (root, plan.jobs.filter { $0.root.map { VolumeClassifier.normalizedPath($0) == VolumeClassifier.normalizedPath(root) } ?? false })
+        let folderChecks: [ImportFolderCheck] = usable.map { root in
+            ImportFolderCheck(root: root, jobs: plan.jobs.filter { Self.writes($0, into: root) })
         }
-        let freeSpaceOf = freeSpaceProvider()
-        let shootID = job.shootID
-        let staged = job.files
-        let kept = job.keptDuplicates
-        let cache = verifications
-        let primaryFolder = plan.copyRoots[0]
+        let freeSpaceOf: @Sendable (URL) -> Int64? = freeSpaceProvider()
+        let input = ImportPreflightInput(folderChecks: folderChecks, shootID: job.shootID, staged: job.files,
+                                         keptDuplicates: job.keptDuplicates, primaryFolder: plan.copyRoots[0],
+                                         cardVolumes: cards.map(\.volume), cache: verifications,
+                                         freeSpaceOf: freeSpaceOf)
         let engine = CopyEngine()
         job.engine = engine
         job.phase = .preparing
-        noteIngestStarting(roots: myRoots)
+        noteIngestStarting(roots: plan.copyRoots)
         #if DEBUG
         _testEngineHook?(engine)
         #endif
-        let initial = rootChecks.flatMap(\.jobs)
-        job.progress = CopyProgress(filesTotal: initial.count, bytesTotal: initial.reduce(0) { $0 + $1.file.size })
+        let initialJobs = folderChecks.flatMap(\.jobs)
+        job.progress = CopyProgress(filesTotal: initialJobs.count, bytesTotal: Self.totalBytes(initialJobs))
 
         job.task = Task {
-            // Off main, before a byte is written: every copy folder exists and carries this shoot's id, has room,
-            // and its directories are safe; sources that changed size since staging are dropped.
-            let (checks, changed, duplicates): ([(root: URL, error: String?)], Set<URL>, Set<URL>) = await Task.detached {
-                let checks = rootChecks.map { entry -> (root: URL, error: String?) in
-                    do {
-                        let dirs = ShootPlanner.directories(for: entry.jobs)
-                        let resolvedRoot = ShootPlanner.resolvedPath(entry.root)
-                        for dir in dirs {
-                            // A directory that resolves into _Rejects or .auto-cull (e.g. through a symlink) is off limits.
-                            let rel = ShootPlanner.relativeComponents(ShootPlanner.resolvedPath(dir), to: resolvedRoot) ?? []
-                            if rel.contains(where: { ImportPlanner.reserved.contains($0.lowercased()) }) {
-                                throw ImportRefusal.destinationNotInShoot
-                            }
-                            try ShootPlanner.checkDestination(dir, root: entry.root, cardVolumes: cardVolumes)
-                        }
-                        let needed = entry.jobs.reduce(Int64(0)) { $0 + $1.file.size }
-                        if let free = freeSpaceOf(entry.root), free < needed {
-                            throw NotEnoughSpaceError(needed: needed, free: free)
-                        }
-                        try Self.preflight(workRoot: entry.root, shootID: shootID)
-                        try ShootPlanner.createDirectories(dirs, root: entry.root, cardVolumes: cardVolumes)
-                        return (entry.root, nil)
-                    } catch { return (entry.root, error.localizedDescription) }
-                }
-                var changed = Set<URL>()
-                for file in staged {
-                    let attributes = try? FileManager.default.attributesOfItem(atPath: file.url.resolvingSymlinksInPath().path)
-                    let size = (attributes?[.size] as? NSNumber)?.int64Value
-                    let modified = attributes?[.modificationDate] as? Date
-                    if size != file.size || modified.map({ abs($0.timeIntervalSince(file.date)) > 1 }) == true { changed.insert(file.url) }
-                }
-                // Another copy (a card ingest that ran first) may have landed the same bytes since staging.
-                var duplicates = Set<URL>()
-                let toCheck = staged.filter { !kept.contains($0.url) && !changed.contains($0.url) }
-                if !toCheck.isEmpty,
-                   let found = try? await ImportDuplicateFinder.find(toCheck, shootFolder: primaryFolder, cache: cache,
-                                                                     cardVolumes: cardVolumes, progress: { _ in }) {
-                    duplicates = found
-                }
-                return (checks, changed, duplicates)
-            }.value
-            guard job.engine === engine else {
-                job.phase = .failed("This import was interrupted. Add the files again.")
-                releaseQueuedCopies()
-                return
-            }
-
-            let stillCopies = Set(currentRoots(of: plan).map(VolumeClassifier.normalizedPath))
-            let primaryKey = VolumeClassifier.normalizedPath(plan.copyRoots[0])
-            let primaryOK = checks.first { VolumeClassifier.normalizedPath($0.root) == primaryKey }.map { $0.error == nil } ?? false
-            let runRoots = checks.filter { $0.error == nil && stillCopies.contains(VolumeClassifier.normalizedPath($0.root)) }.map(\.root)
-            let runJobs = plan.jobs.filter { copyJob in
-                !changed.contains(copyJob.file.url) && !duplicates.contains(copyJob.file.url) && (copyJob.root.map { root in runRoots.contains { VolumeClassifier.normalizedPath($0) == VolumeClassifier.normalizedPath(root) } } ?? false)
-            }
-            @MainActor func fail(_ reason: String) {
-                job.engine = nil
-                job.phase = .failed(reason)
-                releaseQueuedCopies()
-            }
-            if job.stopRequested { job.engine = nil; job.phase = .stopped; releaseQueuedCopies(); return }
-            guard primaryOK, !runRoots.isEmpty else {
-                fail(checks.first(where: { $0.error != nil })?.error ?? "No copy folder is available.")
-                return
-            }
-            guard !runJobs.isEmpty else {
-                if changed.isEmpty && !duplicates.isEmpty {
-                    // Everything turned out to be in the shoot already.
-                    job.engine = nil
-                    job.phase = .done(ImportSummary(copied: 0, bytes: 0, skippedDuplicates: job.skippedDuplicates + duplicates.count, note: nil))
-                    releaseQueuedCopies()
-                    return
-                }
-                fail("The files changed since they were added; add them again.")
-                return
-            }
-            // A cull may have taken the lock while the preflight ran: wait for it like a card does.
-            if cullApplying {
-                job.engine = nil
-                job.phase = .queued("Waiting for a photo cull to finish")
-                return
-            }
-            job.progress = CopyProgress(filesTotal: runJobs.count, bytesTotal: runJobs.reduce(0) { $0 + $1.file.size })
-            job.phase = .copying
-            ingestRunCount += 1
-            let outcome = await engine.run(runJobs) { progress in job.progress = progress }
-            job.engine = nil
-            ingestRunCount -= 1
-            await finishImport(job, plan: plan, runRoots: runRoots, outcome: outcome, dropped: changed.count, duplicates: duplicates.count)
+            let preflight = await Task.detached { await Self.preflightImport(input) }.value
+            await runImport(job, engine: engine, plan: plan, preflight: preflight)
         }
     }
+
+    private static func totalBytes(_ jobs: [CopyJob]) -> Int64 {
+        jobs.reduce(0) { $0 + $1.file.size }
+    }
+
+    /// Whether `job` writes below the copy folder `root`.
+    nonisolated private static func writes(_ job: CopyJob, into root: URL) -> Bool {
+        guard let jobRoot = job.root else { return false }
+        return VolumeClassifier.normalizedPath(jobRoot) == VolumeClassifier.normalizedPath(root)
+    }
+
+    /// After the preflight: copies what is still wanted into the copy folders that passed, or says why not.
+    private func runImport(_ job: ImportJob, engine: CopyEngine, plan: CopyPlan, preflight: ImportPreflight) async {
+        guard job.engine === engine else {
+            job.phase = .failed("This import was interrupted. Add the files again.")
+            releaseQueuedCopies()
+            return
+        }
+
+        // A copy folder may have been removed from the shoot while the preflight ran.
+        let stillCopies = Set(currentRoots(of: plan).map(VolumeClassifier.normalizedPath))
+        let primaryKey = VolumeClassifier.normalizedPath(plan.copyRoots[0])
+        let primaryCheck = preflight.folderResults.first { VolumeClassifier.normalizedPath($0.root) == primaryKey }
+        let primaryOK = primaryCheck.map { $0.error == nil } ?? false
+        let runRoots = preflight.folderResults
+            .filter { $0.error == nil && stillCopies.contains(VolumeClassifier.normalizedPath($0.root)) }
+            .map(\.root)
+        let runJobs = plan.jobs.filter { copyJob in
+            let url = copyJob.file.url
+            if preflight.changed.contains(url) || preflight.duplicates.contains(url) { return false }
+            return runRoots.contains { Self.writes(copyJob, into: $0) }
+        }
+
+        if job.stopRequested {
+            endImport(job, phase: .stopped)
+            return
+        }
+        guard primaryOK, !runRoots.isEmpty else {
+            let firstError = preflight.folderResults.first(where: { $0.error != nil })?.error
+            endImport(job, phase: .failed(firstError ?? "No copy folder is available."))
+            return
+        }
+        guard !runJobs.isEmpty else {
+            if preflight.changed.isEmpty && !preflight.duplicates.isEmpty {
+                // Everything turned out to be in the shoot already.
+                let skipped = job.skippedDuplicates + preflight.duplicates.count
+                endImport(job, phase: .done(ImportSummary(copied: 0, bytes: 0, skippedDuplicates: skipped, note: nil)))
+                return
+            }
+            endImport(job, phase: .failed("The files changed since they were added; add them again."))
+            return
+        }
+        // A cull may have taken the lock while the preflight ran: wait for it like a card does.
+        if cullApplying {
+            job.engine = nil
+            job.phase = .queued("Waiting for a photo cull to finish")
+            return
+        }
+
+        job.progress = CopyProgress(filesTotal: runJobs.count, bytesTotal: Self.totalBytes(runJobs))
+        job.phase = .copying
+        ingestRunCount += 1
+        let outcome = await engine.run(runJobs) { progress in job.progress = progress }
+        job.engine = nil
+        ingestRunCount -= 1
+        await finishImport(job, plan: plan, runRoots: runRoots, outcome: outcome,
+                           dropped: preflight.changed.count, duplicates: preflight.duplicates.count)
+    }
+
+    /// Ends an import that copied nothing.
+    private func endImport(_ job: ImportJob, phase: ImportPhase) {
+        job.engine = nil
+        job.phase = phase
+        releaseQueuedCopies()
+    }
+
+    // MARK: Preflight (off main)
+
+    /// Off main, before a byte is written: every copy folder exists and carries this shoot's id, has room,
+    /// and its directories are safe; sources that changed since staging are dropped.
+    nonisolated private static func preflightImport(_ input: ImportPreflightInput) async -> ImportPreflight {
+        let folderResults = input.folderChecks.map { check -> (root: URL, error: String?) in
+            do {
+                try prepareCopyFolder(check, shootID: input.shootID, cardVolumes: input.cardVolumes,
+                                      freeSpaceOf: input.freeSpaceOf)
+                return (check.root, nil)
+            } catch {
+                return (check.root, error.localizedDescription)
+            }
+        }
+        let changed = changedSources(input.staged)
+        // Another copy (a card ingest that ran first) may have landed the same bytes since staging.
+        var duplicates = Set<URL>()
+        let toCheck = input.staged.filter { !input.keptDuplicates.contains($0.url) && !changed.contains($0.url) }
+        if !toCheck.isEmpty,
+           let found = try? await ImportDuplicateFinder.find(toCheck, shootFolder: input.primaryFolder, cache: input.cache,
+                                                             cardVolumes: input.cardVolumes, progress: { _ in }) {
+            duplicates = found
+        }
+        return ImportPreflight(folderResults: folderResults, changed: changed, duplicates: duplicates)
+    }
+
+    /// Checks one copy folder can take its jobs, then creates their directories.
+    nonisolated private static func prepareCopyFolder(_ check: ImportFolderCheck, shootID: UUID, cardVolumes: [URL],
+                                                      freeSpaceOf: @Sendable (URL) -> Int64?) throws {
+        let directories = ShootPlanner.directories(for: check.jobs)
+        let resolvedRoot = ShootPlanner.resolvedPath(check.root)
+        for directory in directories {
+            // A directory that resolves into _Rejects or .auto-cull (e.g. through a symlink) is off limits.
+            let components = ShootPlanner.relativeComponents(ShootPlanner.resolvedPath(directory), to: resolvedRoot) ?? []
+            if components.contains(where: { ImportPlanner.reserved.contains($0.lowercased()) }) {
+                throw ImportRefusal.destinationNotInShoot
+            }
+            try ShootPlanner.checkDestination(directory, root: check.root, cardVolumes: cardVolumes)
+        }
+        let needed = check.jobs.reduce(Int64(0)) { $0 + $1.file.size }
+        if let free = freeSpaceOf(check.root), free < needed {
+            throw NotEnoughSpaceError(needed: needed, free: free)
+        }
+        try preflight(workRoot: check.root, shootID: shootID)
+        try ShootPlanner.createDirectories(directories, root: check.root, cardVolumes: cardVolumes)
+    }
+
+    /// Staged sources whose size, or modification date (beyond a second), no longer match the scan.
+    nonisolated private static func changedSources(_ staged: [MediaFile]) -> Set<URL> {
+        var changed = Set<URL>()
+        for file in staged {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: file.url.resolvingSymlinksInPath().path)
+            let size = (attributes?[.size] as? NSNumber)?.int64Value
+            let modified = attributes?[.modificationDate] as? Date
+            let sizeChanged = size != file.size
+            let dateChanged = modified.map { abs($0.timeIntervalSince(file.date)) > 1 } == true
+            if sizeChanged || dateChanged { changed.insert(file.url) }
+        }
+        return changed
+    }
+
+    // MARK: Finish
 
     private func finishImport(_ job: ImportJob, plan: CopyPlan, runRoots: [URL], outcome: CopyOutcome, dropped: Int, duplicates: Int) async {
         let blocked = Self.integrityBlocked(outcome)
@@ -333,27 +416,36 @@ extension AppModel {
         let marks = pendingSync(shootID: plan.shootID, runRoots: runRoots, outcome: outcome, done: done, blocked: blocked)
         var blocking = outcome.failures.filter { !done.contains($0.file) }
         for url in blocked where !blocking.contains(where: { $0.file == url }) {
-            blocking.append(.init(name: url.lastPathComponent, reason: "Its copies didn't match each other", file: url, root: nil, kind: .integrity))
+            blocking.append(.init(name: url.lastPathComponent, reason: "Its copies didn't match each other",
+                                  file: url, root: nil, kind: .integrity))
         }
         let doneFiles = job.files.filter { done.contains($0.url) }
         var notes: [String] = []
         if let note = marks?.note { notes.append(note) }
-        if dropped > 0 { notes.append("\(dropped) file\(dropped == 1 ? "" : "s") changed since they were added and \(dropped == 1 ? "was" : "were") skipped.") }
+        if dropped > 0 {
+            let verb = dropped == 1 ? "was" : "were"
+            notes.append("\(Format.count(dropped, "file", "files")) changed since they were added and \(verb) skipped.")
+        }
         if let first = blocking.first {
             let more = blocking.count > 1 ? " (+\(blocking.count - 1) more)" : ""
             job.phase = .failed("\(first.name): \(first.reason)\(more)")
         } else if outcome.cancelled || job.stopRequested {
             job.phase = .stopped
         } else {
+            let note = notes.isEmpty ? nil : notes.joined(separator: " ")
             job.phase = .done(ImportSummary(copied: doneFiles.count, bytes: doneFiles.reduce(0) { $0 + $1.size },
-                                            skippedDuplicates: job.skippedDuplicates + duplicates,
-                                            note: notes.isEmpty ? nil : notes.joined(separator: " ")))
+                                            skippedDuplicates: job.skippedDuplicates + duplicates, note: note))
         }
 
         // Cards' duplicate verdicts see the landed files.
         let copiedKeys = Set(outcome.copied.map(\.file.key))
-        for other in cards where other.engine == nil && !copyQueue.contains(other.id) && needsRecompute(other, afterCopyOf: copiedKeys) {
-            if addInFlight.contains(other.id) { recomputeAfterAdd.insert(other.id) } else { recompute(other) }
+        for other in cards where other.engine == nil && !copyQueue.contains(other.id) {
+            guard needsRecompute(other, afterCopyOf: copiedKeys) else { continue }
+            if addInFlight.contains(other.id) {
+                recomputeAfterAdd.insert(other.id)
+            } else {
+                recompute(other)
+            }
         }
         releaseQueuedCopies()
         for card in cards where coverage[CoverageKey(shootID: job.shootID, cardID: card.id)] != nil {
