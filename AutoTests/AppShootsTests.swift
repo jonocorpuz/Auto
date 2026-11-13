@@ -32,7 +32,7 @@ struct AppShootsTests {
         let env = try makeEnv()
         defer { try? FileManager.default.removeItem(at: env.dir) }
         let p = try parent(in: env)
-        let shoot = try await env.model.createShoot(name: "Wedding", date: Date(), parent: p)
+        let shoot = try await env.model.createShoot(name: "Wedding", date: Date(), parents: [p])
 
         #expect(FileManager.default.fileExists(atPath: shoot.folder.appendingPathComponent(ShootSidecar.fileName).path))
         #expect(env.model.shoots.map(\.id) == [shoot.id])
@@ -59,7 +59,7 @@ struct AppShootsTests {
     @Test func forgetNeverDeletesFolder() async throws {
         let env = try makeEnv()
         defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "Keep", date: Date(), parent: try parent(in: env))
+        let shoot = try await env.model.createShoot(name: "Keep", date: Date(), parents: [try parent(in: env)])
         await env.model.forgetShoot(id: shoot.id)
 
         #expect(env.model.shoots.isEmpty)
@@ -72,8 +72,8 @@ struct AppShootsTests {
         let env = try makeEnv()
         defer { try? FileManager.default.removeItem(at: env.dir) }
         let p = try parent(in: env)
-        let a = try await env.model.createShoot(name: "A", date: Date(), parent: p)
-        let b = try await env.model.createShoot(name: "B", date: Date(), parent: p)
+        let a = try await env.model.createShoot(name: "A", date: Date(), parents: [p])
+        let b = try await env.model.createShoot(name: "B", date: Date(), parents: [p])
 
         await #expect(throws: ShootError.sidecarMismatch) {
             try await env.model.relocateShoot(id: a.id, to: b.folder)
@@ -84,7 +84,7 @@ struct AppShootsTests {
     @Test func locateAcceptsMovedFolder() async throws {
         let env = try makeEnv()
         defer { try? FileManager.default.removeItem(at: env.dir) }
-        let a = try await env.model.createShoot(name: "Moved", date: Date(), parent: try parent(in: env))
+        let a = try await env.model.createShoot(name: "Moved", date: Date(), parents: [try parent(in: env)])
         let moved = env.dir.appendingPathComponent("elsewhere", isDirectory: true)
         try FileManager.default.moveItem(at: a.folder, to: moved)
 

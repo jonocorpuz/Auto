@@ -115,7 +115,7 @@ struct ImportJobFlowTests {
 
     @Test func duplicatesAreSkippedUnlessIncluded() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         let dup = try write("a.mp4", count: 800, seed: 3, in: env.source)
         try write("b.mp4", count: 900, seed: 4, in: env.source)
         let existing = shoot.folder.appendingPathComponent("Video/Old")
@@ -135,7 +135,7 @@ struct ImportJobFlowTests {
 
     @Test func allDuplicatesRefusedBeforeAnyWrite() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         let dup = try write("a.mp4", count: 800, seed: 3, in: env.source)
         try FileManager.default.copyItem(at: dup, to: shoot.folder.appendingPathComponent("a.mp4"))
         let before = files(under: shoot.folder)
@@ -147,7 +147,7 @@ struct ImportJobFlowTests {
 
     @Test func sourceInsideShootIsRefusedAtScan() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         let inside = try write("in.mp4", count: 300, seed: 5, in: shoot.folder)
         let before = files(under: shoot.folder)
         let staging = await stage(env, shoot: shoot, urls: [inside])
@@ -159,7 +159,7 @@ struct ImportJobFlowTests {
 
     @Test func exactTargetOutsideShootIsRefused() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 300, seed: 6, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source], target: .exact(env.volB))
         #expect(throws: ImportRefusal.destinationNotInShoot) { try env.model.commitImport(staging) }
@@ -183,7 +183,7 @@ struct ImportJobFlowTests {
 
     @Test func queuesBehindCardCopyIntoSameShoot() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 300, seed: 7, in: env.source)
         let card = Card(volume: env.dir.appendingPathComponent("CARD"), name: "CARD", identity: "card-\(UUID().uuidString)")
         card.plan = ShootPlanner.plan(jobs: [], shoot: shoot.folder, workRoot: shoot.folder, roots: [shoot.folder], shootID: shoot.id)
@@ -205,7 +205,7 @@ struct ImportJobFlowTests {
 
     @Test func cardCopyQueuesBehindRunningImport() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 300, seed: 7, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
         let job = try env.model.commitImport(staging)
@@ -226,7 +226,7 @@ struct ImportJobFlowTests {
 
     @Test func waitsWhileCullApplying() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 300, seed: 8, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
         env.model.cullApplying = true
@@ -244,7 +244,7 @@ struct ImportJobFlowTests {
 
     @Test func nameClashWithDifferentBytesGetsUniqueName() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 500, seed: 1, in: env.source)
         let staging0 = await stage(env, shoot: shoot, urls: [env.source])
         let first = try env.model.commitImport(staging0)
@@ -262,7 +262,7 @@ struct ImportJobFlowTests {
 
     @Test func destinationOnCardIsRefused() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 300, seed: 8, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
         env.model._testInsert(card: Card(volume: env.volA, name: "CARD", identity: "card-x"))
@@ -272,7 +272,7 @@ struct ImportJobFlowTests {
 
     @Test func stoppingAQueuedImportCancelsIt() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 300, seed: 8, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
         env.model.cullApplying = true
@@ -298,7 +298,7 @@ struct ImportJobFlowTests {
 
     @Test func duplicateLandedWhileQueuedIsSkipped() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         let landed = try write("a.mp4", count: 800, seed: 3, in: env.source)
         try write("b.mp4", count: 900, seed: 4, in: env.source)
         let card = queuedCard(env, shoot: shoot)
@@ -322,7 +322,7 @@ struct ImportJobFlowTests {
 
     @Test func everythingLandedWhileQueuedFinishesWithoutCopying() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         let landed = try write("a.mp4", count: 800, seed: 3, in: env.source)
         let card = queuedCard(env, shoot: shoot)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
@@ -338,7 +338,7 @@ struct ImportJobFlowTests {
 
     @Test func copyAnywayKeepsDuplicatesThroughRecheck() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         let dup = try write("a.mp4", count: 800, seed: 3, in: env.source)
         try FileManager.default.copyItem(at: dup, to: shoot.folder.appendingPathComponent("a.mp4"))
         let staging = await stage(env, shoot: shoot, urls: [env.source])
@@ -351,7 +351,7 @@ struct ImportJobFlowTests {
 
     @Test func fileGrownBeforePreflightIsDroppedAndNoted() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         let grown = try write("a.mp4", count: 800, seed: 3, in: env.source)
         try write("b.mp4", count: 900, seed: 4, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
@@ -367,7 +367,7 @@ struct ImportJobFlowTests {
 
     @Test func fileTouchedBeforePreflightIsDropped() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         let touched = try write("a.mp4", count: 800, seed: 3, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
         let job = try env.model.commitImport(staging)
@@ -425,7 +425,7 @@ struct ImportJobFlowTests {
 
     @Test func cullTakingTheLockDuringPreflightRequeues() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 300, seed: 8, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
         let job = try env.model.commitImport(staging)
@@ -445,7 +445,7 @@ struct ImportJobFlowTests {
 
     @Test func stopDuringPreparingStopsAndReleasesQueuedCard() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 300, seed: 8, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
         let job = try env.model.commitImport(staging)
@@ -463,7 +463,7 @@ struct ImportJobFlowTests {
 
     @Test func stopDuringCopyingStops() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         try write("a.mp4", count: 64_000_000, seed: 8, in: env.source)
         let staging = await stage(env, shoot: shoot, urls: [env.source])
         let job = try env.model.commitImport(staging)

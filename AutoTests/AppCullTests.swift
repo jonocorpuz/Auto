@@ -39,7 +39,7 @@ struct AppCullTests {
     private func makeShoot(_ env: Env, name: String, photos: Int = 3) async throws -> Shoot {
         let parent = env.dir.appendingPathComponent("parent-\(name)", isDirectory: true)
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-        let shoot = try await env.model.createShoot(name: name, date: Date(), parent: parent)
+        let shoot = try await env.model.createShoot(name: name, date: Date(), parents: [parent])
         let cam = shoot.folder.appendingPathComponent("Photo/CamA", isDirectory: true)
         try FileManager.default.createDirectory(at: cam, withIntermediateDirectories: true)
         for i in 0..<photos { try Data("x\(i)".utf8).write(to: cam.appendingPathComponent(String(format: "IMG_%04d.JPG", i))) }

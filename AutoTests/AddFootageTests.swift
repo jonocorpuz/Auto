@@ -38,7 +38,7 @@ struct AddFootageTests {
 
     @Test func defaultSelectionIsShootDayOnly() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let other = day.addingTimeInterval(3 * 86_400)
         let a = file(URL(fileURLWithPath: "/card/A.MP4"), size: 1, date: shoot.date)
         let b = file(URL(fileURLWithPath: "/card/B.MP4"), size: 2, date: other)
@@ -81,7 +81,7 @@ struct AddFootageTests {
 
     @Test func refusesWhenSidecarIdMismatches() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let f = file(URL(fileURLWithPath: "/card/A.MP4"), size: 1, date: shoot.date)
         let card = insertCard(env, files: [f])
         // Swap the sidecar for another shoot's id behind the model's back.
@@ -98,7 +98,7 @@ struct AddFootageTests {
 
     @Test func refusesWhenShootMissingOrUnknown() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let card = insertCard(env, files: [file(URL(fileURLWithPath: "/card/A.MP4"), size: 1, date: shoot.date)])
         let selection = env.model.shootSheetDefaults(shootID: shoot.id, cardID: card.id)
 
@@ -116,7 +116,7 @@ struct AddFootageTests {
 
     @Test func plansIntoShootFolderSkippingVerifiedFiles() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let cardDir = env.dir.appendingPathComponent("cardfiles", isDirectory: true)
         try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
         let data = Data(repeating: 3, count: 200)
@@ -140,7 +140,7 @@ struct AddFootageTests {
 
     @Test func onlyFilesRestrictsPlanToChosenFiles() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let cardDir = env.dir.appendingPathComponent("cardfiles", isDirectory: true)
         try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
         try Data(repeating: 1, count: 100).write(to: cardDir.appendingPathComponent("A.MP4"))
@@ -163,7 +163,7 @@ struct AddFootageTests {
 
     @Test func onlyFilesAlreadyInShootIsEmptySelection() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let cardDir = env.dir.appendingPathComponent("cardfiles", isDirectory: true)
         try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
         let data = Data(repeating: 5, count: 120)
@@ -185,7 +185,7 @@ struct AddFootageTests {
 
     @Test func addFilesWithUnknownFilesIsRefused() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let card = insertCard(env, files: [file(URL(fileURLWithPath: "/card/A.MP4"), size: 1, date: shoot.date)])
         await #expect(throws: (any Error).self) {
             try await env.model.addFiles([URL(fileURLWithPath: "/card/Z.MP4")], from: card.id, toShoot: shoot.id)
@@ -196,7 +196,7 @@ struct AddFootageTests {
 
     @Test func addFilesCopiesChosenFilesIntoShoot() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let cardDir = env.dir.appendingPathComponent("cardfiles", isDirectory: true)
         try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
         try Data(repeating: 1, count: 100).write(to: cardDir.appendingPathComponent("A.MP4"))
@@ -218,8 +218,8 @@ struct AddFootageTests {
 
     @Test func addFilesRefusesWhenAPlanIsPending() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
-        let other = try await env.model.createShoot(name: "T", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
+        let other = try await env.model.createShoot(name: "T", date: day, parents: [env.parent])
         let cardDir = env.dir.appendingPathComponent("cardfiles", isDirectory: true)
         try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
         try Data(repeating: 1, count: 100).write(to: cardDir.appendingPathComponent("A.MP4"))
@@ -248,7 +248,7 @@ struct AddFootageTests {
 
     @Test func backedCardCanAddToAnotherShoot() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let cardDir = env.dir.appendingPathComponent("cardfiles", isDirectory: true)
         try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
         try Data(repeating: 5, count: 120).write(to: cardDir.appendingPathComponent("A.MP4"))
@@ -264,7 +264,7 @@ struct AddFootageTests {
 
     @Test func busyOrScanningCardIsRefused() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let card = insertCard(env, files: [file(URL(fileURLWithPath: "/card/A.MP4"), size: 1, date: shoot.date)])
         card.phase = .scanning
         let selection = env.model.shootSheetDefaults(shootID: shoot.id, cardID: card.id)
@@ -284,7 +284,7 @@ struct AddFootageTests {
 
     @Test func forgettingShootClearsCoverage() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let key = CoverageKey(shootID: shoot.id, cardID: "c")
         let task = env.model.startCoverage(key: key, files: [], folder: shoot.folder, day: day)
         await env.model.forgetShoot(id: shoot.id)
@@ -294,7 +294,7 @@ struct AddFootageTests {
 
     @Test func cardInsideShootFolderNeverCountsAsOwnBackup() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let cardDir = shoot.folder.appendingPathComponent("CARD", isDirectory: true)
         try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
         try Data(repeating: 8, count: 90).write(to: cardDir.appendingPathComponent("A.MP4"))

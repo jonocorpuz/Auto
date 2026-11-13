@@ -40,18 +40,18 @@ struct FlatLayoutAppTests {
 
     @Test func createFlatShootWritesLayoutToSidecarAndRegistry() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "F", date: day, parent: env.parent, layout: .flat)
+        let shoot = try await env.model.createShoot(name: "F", date: day, parents: [env.parent], layout: .flat)
         #expect(shoot.layout == .flat)
         #expect(try ShootFolders.readSidecar(in: shoot.folder)?.layout == .flat)
         #expect(env.model.registry.records.first { $0.id == shoot.id }?.layout == .flat)
-        let normal = try await env.model.createShoot(name: "N", date: day, parent: env.parent)
+        let normal = try await env.model.createShoot(name: "N", date: day, parents: [env.parent])
         #expect(normal.layout == .cameraFolders)
         #expect(env.model.registry.records.first { $0.id == normal.id }?.layout == .cameraFolders)
     }
 
     @Test func manualImportIntoFlatShootLandsDirectlyUnderSections() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "F", date: day, parent: env.parent, layout: .flat)
+        let shoot = try await env.model.createShoot(name: "F", date: day, parents: [env.parent], layout: .flat)
         let drop = env.dir.appendingPathComponent("drop", isDirectory: true)
         try FileManager.default.createDirectory(at: drop, withIntermediateDirectories: true)
         try Data(repeating: 1, count: 600).write(to: drop.appendingPathComponent("clip.mp4"))
@@ -70,7 +70,7 @@ struct FlatLayoutAppTests {
 
     @Test func cardIngestRenamesWholeSetWhenAFileCollidesOnDisk() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "F", date: day, parent: env.parent, layout: .flat)
+        let shoot = try await env.model.createShoot(name: "F", date: day, parents: [env.parent], layout: .flat)
         let photo = shoot.folder.appendingPathComponent("Photo")
         try FileManager.default.createDirectory(at: photo, withIntermediateDirectories: true)
         try Data(repeating: 9, count: 50).write(to: photo.appendingPathComponent("IMG_1.CR3"))
@@ -90,7 +90,7 @@ struct FlatLayoutAppTests {
 
     @Test func cameraFolderShootStillSortsIntoCameraFolders() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "N", date: day, parent: env.parent)
+        let shoot = try await env.model.createShoot(name: "N", date: day, parents: [env.parent])
         let cardDir = env.dir.appendingPathComponent("cardfiles", isDirectory: true)
         try FileManager.default.createDirectory(at: cardDir, withIntermediateDirectories: true)
         let a = try media(cardDir.appendingPathComponent("A.MP4"), size: 60, kind: .video, date: shoot.date)

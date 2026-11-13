@@ -55,8 +55,8 @@ struct BrowserMembershipTests {
 
     @Test func browsedSettledCardGroupsFileUnderBothShoots() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
-        let s2 = try await env.model.createShoot(name: "Two", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
+        let s2 = try await env.model.createShoot(name: "Two", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1, s2])
         let card = insertCard(env, files: [a], backups: [a.url: s1.folder.appendingPathComponent("Video/A.MP4")])
 
@@ -79,7 +79,7 @@ struct BrowserMembershipTests {
 
     @Test func closingBrowserCancelsAndClears() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let card = insertCard(env, files: [a])
         env.model.browsingCardID = card.id
@@ -99,7 +99,7 @@ struct BrowserMembershipTests {
 
     @Test func disappearClearsOnlyMatchingCard() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let card = insertCard(env, files: [a])
         env.model.browsingCardID = card.id
@@ -111,7 +111,7 @@ struct BrowserMembershipTests {
 
     @Test func notStartedWhileVerifyingOrCopying() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let card = insertCard(env, files: [a], phase: .verifying)
         env.model.browsingCardID = card.id
@@ -132,7 +132,7 @@ struct BrowserMembershipTests {
 
     @Test func switchingCardDropsStaleResults() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let b = try makeFile(env, "B.MP4", byte: 5, copiedTo: [])
         let first = insertCard(env, files: [a])
@@ -173,7 +173,7 @@ struct BrowserMembershipTests {
 
     @Test func browserRunDoesNotDisturbAddFootageCoverage() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let card = insertCard(env, files: [a])
         let key = CoverageKey(shootID: s1.id, cardID: card.id)
@@ -220,7 +220,7 @@ struct BrowserMembershipTests {
 
     @Test func supersededRunDeliveringLateIsIgnored() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let b = try makeFile(env, "B.MP4", byte: 5, copiedTo: [])
         let first = insertCard(env, files: [a])
@@ -243,7 +243,7 @@ struct BrowserMembershipTests {
 
     @Test func closedBrowserRunDeliveringLateIsIgnored() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let card = insertCard(env, files: [a])
         let gate = Gate()
@@ -261,7 +261,7 @@ struct BrowserMembershipTests {
 
     @Test func recomputeInvalidatesAndFinishRestarts() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let card = insertCard(env, files: [a], backups: [a.url: s1.folder.appendingPathComponent("Video/A.MP4")])
         env.model.browsingCardID = card.id
@@ -282,7 +282,7 @@ struct BrowserMembershipTests {
 
     @Test func addFootageSettlingLeavesCheckingState() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [])
         let card = insertCard(env, files: [a], phase: .verifying)
         card.verifier = BackupVerifier()
@@ -299,7 +299,7 @@ struct BrowserMembershipTests {
 
     @Test func copyEarlyFailureLeavesCheckingState() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let card = insertCard(env, files: [a], phase: .ready)
         card.verifier = BackupVerifier()
@@ -316,7 +316,7 @@ struct BrowserMembershipTests {
 
     @Test func hiddenWindowStopsMembershipAndShowingRestarts() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s1 = try await env.model.createShoot(name: "One", date: day, parent: env.parent)
+        let s1 = try await env.model.createShoot(name: "One", date: day, parents: [env.parent])
         let a = try makeFile(env, "A.MP4", byte: 3, copiedTo: [s1])
         let card = insertCard(env, files: [a])
         env.model.browsingCardID = card.id

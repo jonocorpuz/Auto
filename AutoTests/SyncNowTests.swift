@@ -113,7 +113,7 @@ struct SyncNowTests {
 
     @Test func singleCopyIsNone() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "Solo", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "Solo", date: day, parents: [env.volA])
         env.model.scheduleSyncCheck([shoot.id], force: true)
         await env.model._testSyncIdle()
         #expect(env.model.syncStates[shoot.id] == .single)
@@ -123,7 +123,7 @@ struct SyncNowTests {
 
     @Test func offlineCopyIsUnknownAndNoCheckRuns() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let shoot = try await env.model.createShoot(name: "S", date: day, parent: env.volA)
+        let shoot = try await env.model.createShoot(name: "S", date: day, parents: [env.volA])
         var reg = env.model.registry
         try reg.addMirror(id: shoot.id, path: "/Volumes/NoSuch/S")
         try await ShootStore.save(reg, to: env.model.registryURL)

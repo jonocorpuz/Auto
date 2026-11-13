@@ -73,8 +73,8 @@ struct DuplicateIngestTests {
 
     private func makeScenario(extraOnCard2: [(String, UInt8)] = [], card2Verifying: Bool = false) async throws -> Scenario {
         let env = try makeEnv()
-        let s = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
-        let t = try await env.model.createShoot(name: "T", date: day, parent: env.parent)
+        let s = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
+        let t = try await env.model.createShoot(name: "T", date: day, parents: [env.parent])
         let content: [(String, UInt8)] = [("A.MP4", 1), ("B.MP4", 2)]
         let files1 = try makeFiles(env.dir.appendingPathComponent("c1"), content, camera: "camA")
         let files2 = try makeFiles(env.dir.appendingPathComponent("c2"), content + extraOnCard2, camera: "camB")
@@ -146,7 +146,7 @@ struct DuplicateIngestTests {
 
     @Test func backedCardIsNotRecomputedAndUnrelatedCardIsLeftAlone() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let s = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let files1 = try makeFiles(env.dir.appendingPathComponent("c1"), [("A.MP4", 1)], camera: "camA")
         let unrelated = try makeFiles(env.dir.appendingPathComponent("c2"), [("Z.MP4", 5)], camera: "camB")
         let card1 = insertCard(env, files: files1, name: "CARD1")
@@ -163,8 +163,8 @@ struct DuplicateIngestTests {
 
     @Test func pendingAddPlanSurvivesAnotherCardsCopyAndIsPrunedAtCopyTime() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
-        let t = try await env.model.createShoot(name: "T", date: day, parent: env.parent)
+        let s = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
+        let t = try await env.model.createShoot(name: "T", date: day, parents: [env.parent])
         let files1 = try makeFiles(env.dir.appendingPathComponent("c1"), [("A.MP4", 1)], camera: "camA")
         let files2 = try makeFiles(env.dir.appendingPathComponent("c2"), [("A.MP4", 1), ("C.MP4", 3)], camera: "camB")
         let card1 = insertCard(env, files: files1, name: "CARD1")
@@ -199,7 +199,7 @@ struct DuplicateIngestTests {
 
     @Test func copyRefusedWhileAnotherCardCopiesIntoOverlappingFolder() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let s = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let files1 = try makeFiles(env.dir.appendingPathComponent("c1"), [("A.MP4", 1)], camera: "camA")
         let files2 = try makeFiles(env.dir.appendingPathComponent("c2"), [("B.MP4", 2)], camera: "camB")
         let card1 = insertCard(env, files: files1, name: "CARD1")
@@ -293,7 +293,7 @@ struct DuplicateIngestTests {
 
     @Test func planningWhileAnotherCardCopiesQueuesAndPrunesTwinsAtCopyTime() async throws {
         let env = try makeEnv(); defer { try? FileManager.default.removeItem(at: env.dir) }
-        let s = try await env.model.createShoot(name: "S", date: day, parent: env.parent)
+        let s = try await env.model.createShoot(name: "S", date: day, parents: [env.parent])
         let files1 = try makeFiles(env.dir.appendingPathComponent("c1"), [("A.MP4", 1)], camera: "camA")
         let files2 = try makeFiles(env.dir.appendingPathComponent("c2"), [("A.MP4", 1), ("B.MP4", 2)], camera: "camB")
         let card1 = insertCard(env, files: files1, name: "CARD1")
