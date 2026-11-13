@@ -86,7 +86,6 @@ struct ShootSelectionTests {
         var sel = ShootSelection(missing: files, cameras: cams, calendar: c)
         sel.setCamera("A", included: false, days: [])
         sel.setCamera("B", included: false, days: [])
-        #expect(sel.isEmpty)
         #expect(sel.filter(files).isEmpty)
     }
 
@@ -109,7 +108,7 @@ extension ShootSelectionTests {
     @Test func onlyDayWithNoMatchSelectsNothing() {
         let c = cal(), files = sample(c)
         let sel = ShootSelection(files: files, cameras: cams, calendar: c, onlyDay: date(25, calendar: c))
-        #expect(sel.isEmpty)
+        #expect(sel.filter(files).isEmpty)
     }
 
     @Test func onlyDayRespectsInjectedTimeZone() {
@@ -117,6 +116,6 @@ extension ShootSelectionTests {
         let f = file("f", camera: "A", date(22, hour: 20, calendar: utc))  // 23rd in +10
         let day22 = date(22, hour: 12, calendar: utc)
         #expect(ShootSelection(files: [f], cameras: cams, calendar: utc, onlyDay: day22).filter([f]) == [f])
-        #expect(ShootSelection(files: [f], cameras: cams, calendar: plus10, onlyDay: day22).isEmpty)
+        #expect(ShootSelection(files: [f], cameras: cams, calendar: plus10, onlyDay: day22).filter([f]).isEmpty)
     }
 }

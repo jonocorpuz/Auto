@@ -20,7 +20,7 @@ nonisolated struct ShootSelection: Sendable, Equatable {
         self.calendar = calendar
         self.knownCameraIDs = Set(cameras.map(\.id))
         self.included = []
-        for f in missing { included.insert(pair(f)) }
+        for file in missing { included.insert(pair(file)) }
     }
 
     /// Only the pairs (every camera) whose day is `onlyDay`'s day; all other days stay unchecked.
@@ -29,21 +29,21 @@ nonisolated struct ShootSelection: Sendable, Equatable {
         self.knownCameraIDs = Set(cameras.map(\.id))
         self.included = []
         let day = calendar.startOfDay(for: onlyDay)
-        for f in files {
-            let p = pair(f)
-            if p.day == day { included.insert(p) }
+        for file in files {
+            let filePair = pair(file)
+            if filePair.day == day { included.insert(filePair) }
         }
     }
 
-    func groupID(_ f: MediaFile) -> String {
-        knownCameraIDs.contains(f.cameraID) ? f.cameraID : Self.otherID
+    func groupID(_ file: MediaFile) -> String {
+        knownCameraIDs.contains(file.cameraID) ? file.cameraID : Self.otherID
     }
 
-    func pair(_ f: MediaFile) -> Pair {
-        Pair(cameraID: groupID(f), day: calendar.startOfDay(for: f.date))
+    func pair(_ file: MediaFile) -> Pair {
+        Pair(cameraID: groupID(file), day: calendar.startOfDay(for: file.date))
     }
 
-    func contains(_ f: MediaFile) -> Bool { included.contains(pair(f)) }
+    func contains(_ file: MediaFile) -> Bool { included.contains(pair(file)) }
 
     func filter(_ files: [MediaFile]) -> [MediaFile] { files.filter(contains) }
 
@@ -56,26 +56,24 @@ nonisolated struct ShootSelection: Sendable, Equatable {
     /// Checking re-checks all given days; unchecking removes every day of the camera.
     mutating func setCamera(_ id: String, included on: Bool, days: [Date]) {
         if on {
-            for d in days { included.insert(Pair(cameraID: id, day: calendar.startOfDay(for: d))) }
+            for day in days { included.insert(Pair(cameraID: id, day: calendar.startOfDay(for: day))) }
         } else {
             included = included.filter { $0.cameraID != id }
         }
     }
 
     mutating func set(camera: String, day: Date, included on: Bool) {
-        let p = Pair(cameraID: camera, day: calendar.startOfDay(for: day))
-        if on { included.insert(p) } else { included.remove(p) }
+        let changed = Pair(cameraID: camera, day: calendar.startOfDay(for: day))
+        if on { included.insert(changed) } else { included.remove(changed) }
     }
-
-    var isEmpty: Bool { included.isEmpty }
 
     /// Recording days grouped by `groupID` (unknown cameras under `otherID`), ascending.
     static func days(missing: [MediaFile], cameras: [Camera], calendar: Calendar) -> [String: [ShootDay]] {
         let known = Set(cameras.map(\.id))
-        let regrouped = missing.map { f -> MediaFile in
-            guard !known.contains(f.cameraID) else { return f }
-            return MediaFile(url: f.url, size: f.size, date: f.date, kind: f.kind,
-                             cameraID: otherID, cardID: f.cardID)
+        let regrouped = missing.map { file -> MediaFile in
+            guard !known.contains(file.cameraID) else { return file }
+            return MediaFile(url: file.url, size: file.size, date: file.date, kind: file.kind,
+                             cameraID: otherID, cardID: file.cardID)
         }
         return ShootDays.byCamera(regrouped, calendar: calendar)
     }
