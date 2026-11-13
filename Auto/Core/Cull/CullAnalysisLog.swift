@@ -36,7 +36,7 @@ nonisolated struct CullAnalysisReport: Sendable, Codable, Equatable {
 /// Writes `CullAnalysisReport`s to `<copy>/.auto-cull/analysis/<ISO-date>_<runID>.json`.
 /// Kept out of the move journal: the journal drives undo and sync, this file never does.
 nonisolated enum CullAnalysisLog {
-    static let directoryName = "analysis"
+    private static let directoryName = "analysis"
 
     static func directory(in copy: URL) -> URL {
         CullJournal.directory(in: copy).appendingPathComponent(directoryName, isDirectory: true)
@@ -47,15 +47,12 @@ nonisolated enum CullAnalysisLog {
     static func write(_ report: CullAnalysisReport, in copy: URL) throws -> URL {
         let dir = directory(in: copy)
         try ShootPlanner.createDirectories([CullJournal.directory(in: copy), dir], root: copy, cardVolumes: [])
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd'T'HHmmss'Z'"
-        let url = dir.appendingPathComponent("\(f.string(from: report.date))_\(report.runID.uuidString).json")
-        let e = JSONEncoder()
-        e.dateEncodingStrategy = .iso8601
-        e.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        try e.encode(report).write(to: url, options: [.withoutOverwriting])
+        let fileName = "\(CullJournal.fileNameDateStamp(for: report.date))_\(report.runID.uuidString).json"
+        let url = dir.appendingPathComponent(fileName)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(report).write(to: url, options: [.withoutOverwriting])
         return url
     }
 }
@@ -63,28 +60,26 @@ nonisolated enum CullAnalysisLog {
 /// Thread-safe collector of call records during a run.
 nonisolated final class CullCallLog: @unchecked Sendable {
     private let lock = NSLock()
-    private var _records: [CullCallRecord] = []
+    private var collected: [CullCallRecord] = []
 
-    var records: [CullCallRecord] { lock.withLock { _records } }
-
-    func add(_ r: CullCallRecord) { lock.withLock { _records.append(r) } }
+    var records: [CullCallRecord] { lock.withLock { collected } }
 
     /// Builds and records one call. `response` nil means the call threw `error`.
     func record(kind: String, label: String, photoIDs: [String], response: ClaudeResponse?,
                 decoded: Bool, error: Error?, durationMS: Int) {
-        var r = CullCallRecord(kind: kind, label: label, photoIDs: photoIDs, outcome: "ok")
-        r.durationMS = durationMS
+        var record = CullCallRecord(kind: kind, label: label, photoIDs: photoIDs, outcome: "ok")
+        record.durationMS = durationMS
         if let response {
-            r.costUSD = response.costUSD
-            r.inputTokens = response.inputTokens
-            r.outputTokens = response.outputTokens
-            r.cacheReadTokens = response.cacheReadTokens
-            r.cacheWriteTokens = response.cacheWriteTokens
-            r.durationMS = response.durationMS ?? durationMS
-            if !decoded { r.outcome = "unreadable" }
+            record.costUSD = response.costUSD
+            record.inputTokens = response.inputTokens
+            record.outputTokens = response.outputTokens
+            record.cacheReadTokens = response.cacheReadTokens
+            record.cacheWriteTokens = response.cacheWriteTokens
+            record.durationMS = response.durationMS ?? durationMS
+            if !decoded { record.outcome = "unreadable" }
         } else {
-            r.outcome = "error: " + (error?.localizedDescription ?? "unknown")
+            record.outcome = "error: " + (error?.localizedDescription ?? "unknown")
         }
-        add(r)
+        lock.withLock { collected.append(record) }
     }
 }

@@ -17,11 +17,16 @@ nonisolated enum CullJournal {
            let existing = names.first(where: { $0.hasSuffix(suffix) }) {
             return dir.appendingPathComponent(existing)
         }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd'T'HHmmss'Z'"
-        return dir.appendingPathComponent(f.string(from: Date()) + suffix)
+        return dir.appendingPathComponent(fileNameDateStamp(for: Date()) + suffix)
+    }
+
+    /// UTC timestamp used as the leading part of journal and analysis file names, e.g. `2026-01-31T142501Z`.
+    static func fileNameDateStamp(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd'T'HHmmss'Z'"
+        return formatter.string(from: date)
     }
 
     private static func encoder() -> JSONEncoder {
@@ -37,39 +42,57 @@ nonisolated enum CullJournal {
         return d
     }
 
+    // MARK: - Writing
+
     static func append(_ event: CullJournalEvent, runID: UUID, in copy: URL) throws {
         let dir = directory(in: copy)
         try ShootPlanner.createDirectories([dir], root: copy, cardVolumes: [])
         var line = try encoder().encode(event)
-        line.append(0x0A)
+        line.append(newline)
         let path = url(runID: runID, in: copy).path
         var existing = stat()
-        let isNew = lstat(path, &existing) != 0
+        let isNewFile = lstat(path, &existing) != 0
         let fd = open(path, O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
         guard fd >= 0 else { throw posixError(path) }
         defer { close(fd) }
         // A crash can leave a torn last line; start a fresh line so the new event stays decodable.
-        var st = stat()
-        if fstat(fd, &st) == 0, st.st_size > 0 {
-            var last: UInt8 = 0x0A
-            if pread(fd, &last, 1, st.st_size - 1) == 1, last != 0x0A { line.insert(0x0A, at: 0) }
-        }
+        if lastByteIsNotNewline(fd) { line.insert(newline, at: 0) }
+        try writeFully(line, to: fd, path: path)
+        guard fullSync(fd) else { throw posixError(path) }
+        if isNewFile { syncDirectory(dir) }
+    }
+
+    private static let newline: UInt8 = 0x0A
+
+    /// True when the file is non-empty and doesn't end in a newline.
+    private static func lastByteIsNotNewline(_ fd: Int32) -> Bool {
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_size > 0 else { return false }
+        var last: UInt8 = newline
+        return pread(fd, &last, 1, info.st_size - 1) == 1 && last != newline
+    }
+
+    /// Writes every byte, retrying on EINTR.
+    private static func writeFully(_ data: Data, to fd: Int32, path: String) throws {
         var offset = 0
-        try line.withUnsafeBytes { raw in
+        try data.withUnsafeBytes { raw in
             while offset < raw.count {
-                let n = write(fd, raw.baseAddress! + offset, raw.count - offset)
-                if n < 0 {
+                let written = write(fd, raw.baseAddress! + offset, raw.count - offset)
+                if written < 0 {
                     if errno == EINTR { continue }
                     throw posixError(path)
                 }
-                offset += n
+                offset += written
             }
         }
-        guard fullSync(fd) else { throw posixError(path) }
-        if isNew {
-            let dfd = open(dir.path, O_RDONLY | O_CLOEXEC)
-            if dfd >= 0 { _ = fullSync(dfd); close(dfd) }
-        }
+    }
+
+    /// Makes a newly created file's directory entry durable too. Best effort.
+    private static func syncDirectory(_ dir: URL) {
+        let dirFD = open(dir.path, O_RDONLY | O_CLOEXEC)
+        guard dirFD >= 0 else { return }
+        _ = fullSync(dirFD)
+        close(dirFD)
     }
 
     /// F_FULLFSYNC flushes the drive cache; plain fsync is the fallback where unsupported.
@@ -81,17 +104,20 @@ nonisolated enum CullJournal {
         NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: path])
     }
 
+    // MARK: - Reading
+
     /// Every decodable event in the copy's journal, in file order (files sorted by name).
     static func events(in copy: URL) throws -> [CullJournalEvent] {
         let dir = directory(in: copy)
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
-        let dec = decoder()
+        let jsonDecoder = decoder()
+        let journalNames = names.filter { $0.hasSuffix(".jsonl") }.sorted()
         var result: [CullJournalEvent] = []
-        for name in names.filter({ $0.hasSuffix(".jsonl") }).sorted() {
+        for name in journalNames {
             let data = try Data(contentsOf: dir.appendingPathComponent(name))
-            for line in data.split(separator: 0x0A) {
+            for line in data.split(separator: newline) {
                 // A line cut short by a crash simply fails to decode.
-                if let e = try? dec.decode(CullJournalEvent.self, from: Data(line)) { result.append(e) }
+                if let event = try? jsonDecoder.decode(CullJournalEvent.self, from: Data(line)) { result.append(event) }
             }
         }
         return result
@@ -99,46 +125,54 @@ nonisolated enum CullJournal {
 
     /// One summary per run, newest first. Unfinished runs get a partial summary from their moves.
     static func runs(in copy: URL) throws -> [CullRunSummary] {
-        struct Acc {
-            var run: (date: Date, model: CullModel)?
-            var moved = Set<String>()
-            var finished: CullRunSummary?
-            var undone = false
+        var runOrder: [UUID] = []
+        var runsByID: [UUID: RunEvents] = [:]
+        func track(_ id: UUID) {
+            guard runsByID[id] == nil else { return }
+            runsByID[id] = RunEvents()
+            runOrder.append(id)
         }
-        var order: [UUID] = []
-        var acc: [UUID: Acc] = [:]
-        func touch(_ id: UUID) { if acc[id] == nil { acc[id] = Acc(); order.append(id) } }
-        for e in try events(in: copy) {
-            switch e {
+        for event in try events(in: copy) {
+            switch event {
             case .run(let id, let date, let model, _):
-                touch(id); acc[id]?.run = (date, model)
+                track(id); runsByID[id]?.start = (date, model)
             case .moved(let id, _, _, _, _, _, let photoID):
-                touch(id); acc[id]?.moved.insert(photoID)
+                track(id); runsByID[id]?.movedPhotoIDs.insert(photoID)
             case .movedPair(let id, _, _, _, _, let photoID):
-                touch(id); acc[id]?.moved.insert(photoID)
+                track(id); runsByID[id]?.movedPhotoIDs.insert(photoID)
             case .intent(let id, _, _, _, _):
-                touch(id)
+                track(id)
             case .finished(let id, let summary):
-                touch(id); acc[id]?.finished = summary
+                track(id); runsByID[id]?.finished = summary
             case .undone(let id, _):
-                touch(id); acc[id]?.undone = true
+                track(id); runsByID[id]?.undone = true
             case .restored, .restoreSkipped:
                 break
             }
         }
-        var out: [CullRunSummary] = []
-        for id in order {
-            guard let a = acc[id] else { continue }
-            if var s = a.finished {
-                s.undone = a.undone
-                out.append(s)
-            } else if let r = a.run {
-                out.append(CullRunSummary(runID: id, date: r.date, model: r.model, photos: a.moved.count,
-                                          rejected: a.moved.count, groupsDone: 0, groupsTotal: 0,
-                                          spentUSD: 0, undone: a.undone, status: "failed"))
+        let summaries = runOrder.compactMap { id in runsByID[id]?.summary(runID: id) }
+        return summaries.sorted { $0.date > $1.date }
+    }
+
+    /// What the journal says about one run, gathered while reading it.
+    private struct RunEvents {
+        var start: (date: Date, model: CullModel)?
+        var movedPhotoIDs = Set<String>()
+        var finished: CullRunSummary?
+        var undone = false
+
+        /// The finished summary, or a partial "failed" one built from the moves of a run that never finished.
+        /// nil when even the run's start line is missing.
+        func summary(runID: UUID) -> CullRunSummary? {
+            if var finished {
+                finished.undone = undone
+                return finished
             }
+            guard let start else { return nil }
+            return CullRunSummary(runID: runID, date: start.date, model: start.model, photos: movedPhotoIDs.count,
+                                  rejected: movedPhotoIDs.count, groupsDone: 0, groupsTotal: 0,
+                                  spentUSD: 0, undone: undone, status: "failed")
         }
-        return out.sorted { $0.date > $1.date }
     }
 
     struct MoveEntry: Equatable {
@@ -155,8 +189,8 @@ nonisolated enum CullJournal {
     /// matching movedPair or restored are included as recovery candidates.
     static func moveEntries(runID: UUID, in copy: URL) throws -> [MoveEntry] {
         var out: [MoveEntry] = []
-        for e in try events(in: copy) {
-            switch e {
+        for event in try events(in: copy) {
+            switch event {
             case .moved(let id, let from, let to, _, _, _, let photoID) where id == runID:
                 out.append(MoveEntry(from: from, to: to, intentOnly: false, size: nil, photoID: photoID))
             case .intent(let id, let from, let to, let photoID, let size) where id == runID:
