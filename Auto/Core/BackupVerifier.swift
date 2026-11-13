@@ -34,8 +34,8 @@ nonisolated final class VerificationCache: @unchecked Sendable {
 
     /// Records files CopyEngine just copied and checksum-verified, against their exact destination.
     func record(_ copied: [CopiedFile]) {
-        for c in copied {
-            if let mtime = c.destinationModified { record(c.file, candidate: c.destination, mtime: mtime) }
+        for copy in copied {
+            if let mtime = copy.destinationModified { record(copy.file, candidate: copy.destination, mtime: mtime) }
         }
     }
 
@@ -60,6 +60,16 @@ nonisolated struct VerifyOutcome: Sendable {
 nonisolated final class BackupVerifier: @unchecked Sendable {
     init() {}
 
+    /// Bytes read per step.
+    private static let chunk = 8 << 20
+    /// Progress is reported at most this often (plus at each file boundary).
+    private static let progressInterval: TimeInterval = 0.1
+
+    /// Test hook, called synchronously on the verify thread after each chunk. Set before `run`.
+    var onChunkHashed: (@Sendable (Int64) -> Void)?
+
+    // MARK: Cancellation
+
     private let lock = NSLock()
     private var _cancelled = false
     private var isCancelled: Bool {
@@ -71,10 +81,9 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
         lock.lock(); _cancelled = true; lock.unlock()
     }
 
-    /// Test hook, called synchronously on the verify thread after each chunk. Set before `run`.
-    var onChunkHashed: (@Sendable (Int64) -> Void)?
+    enum VerifyError: Error, Sendable { case cancelled }
 
-    private static let chunk = 8 << 20
+    // MARK: Triage (no hashing)
 
     /// Splits card files before any hashing: files with no candidate are missing, cached ones are
     /// verified, the rest need a checksum pass. There is no name+size shortcut: a file only counts
@@ -101,7 +110,7 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
     }
 
     /// Same-name candidates first, then renamed copies of that name ("IMG_1 2.CR3"), without repeats.
-    static func candidateList(for file: MediaFile, candidates: [String: [URL]], aliases: [String: [URL]]) -> [URL] {
+    private static func candidateList(for file: MediaFile, candidates: [String: [URL]], aliases: [String: [URL]]) -> [URL] {
         let direct = candidates[file.key] ?? []
         guard let renamed = aliases[file.key], !renamed.isEmpty else { return direct }
         var seen = Set(direct.map(\.standardizedFileURL.path))
@@ -117,6 +126,8 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
         triage(files: files, candidates: candidates, cache: cache)
     }
 
+    // MARK: Checksum pass
+
     /// Hashes each card file once, then candidates in order until one matches. Runs off the main
     /// thread; progress arrives on the main actor and nothing is delivered after this returns.
     func run(
@@ -127,7 +138,7 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
     ) async -> VerifyOutcome {
         let (stream, yield) = AsyncStream<CopyProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let consumer = Task { @MainActor in
-            for await p in stream { onProgress(p) }
+            for await update in stream { onProgress(update) }
         }
         let outcome: VerifyOutcome = await withCheckedContinuation { continuation in
             Thread.detachNewThread {
@@ -150,7 +161,7 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
         var lastReport = Date.distantPast
         let report: (Bool) -> Void = { force in
             let now = Date()
-            if force || now.timeIntervalSince(lastReport) > 0.1 {
+            if force || now.timeIntervalSince(lastReport) > Self.progressInterval {
                 lastReport = now
                 onProgress(progress)
             }
@@ -183,8 +194,6 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
         return outcome
     }
 
-    enum VerifyError: Error, Sendable { case cancelled }
-
     private func verify(_ file: MediaFile, candidates: [URL], cache: VerificationCache?, onBytes: (Int64) -> Void) throws -> VerifyResult {
         if candidates.isEmpty { return .missing }
         let cardHash = try hash(file.url, onBytes: onBytes)
@@ -194,7 +203,13 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
             let size = (try? FileManager.default.attributesOfItem(atPath: candidate.path)[.size] as? Int64) ?? nil
             guard size == file.size else { continue }
             let candidateHash: Data
-            do { candidateHash = try hash(candidate, onBytes: { _ in }) } catch VerifyError.cancelled { throw VerifyError.cancelled } catch { continue }
+            do {
+                candidateHash = try hash(candidate, onBytes: { _ in })
+            } catch VerifyError.cancelled {
+                throw VerifyError.cancelled
+            } catch {
+                continue  // an unreadable candidate just isn't a match
+            }
             if candidateHash == cardHash {
                 if let mtime { cache?.record(file, candidate: candidate, mtime: mtime) }
                 return .verified(candidate)
@@ -209,27 +224,30 @@ nonisolated final class BackupVerifier: @unchecked Sendable {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         _ = fcntl(handle.fileDescriptor, F_NOCACHE, 1)
-        var read: Int64 = 0
+        var bytesRead: Int64 = 0
         while true {
             if isCancelled { throw VerifyError.cancelled }
             let data: Data? = try autoreleasepool { try handle.read(upToCount: Self.chunk) }
             guard let data, !data.isEmpty else { break }
             md5.update(data: data)
-            read += Int64(data.count)
-            onBytes(read)
-            onChunkHashed?(read)
+            bytesRead += Int64(data.count)
+            onBytes(bytesRead)
+            onChunkHashed?(bytesRead)
         }
         return Data(md5.finalize())
     }
+
+    // MARK: Candidate index and results
 
     /// Adds copy destinations to a name+size candidate index (no duplicates). They are still only
     /// candidates; the cache or a checksum pass decides whether they count.
     static func addingCandidates(_ copied: [CopiedFile], to candidates: [String: [URL]]) -> [String: [URL]] {
         var result = candidates
-        for c in copied {
+        for copy in copied {
             // The card file's key, not the destination name: a renamed copy ("A001 2.ARW") still counts.
-            let key = c.file.key
-            if !(result[key] ?? []).contains(c.destination) { result[key, default: []].append(c.destination) }
+            let key = copy.file.key
+            let alreadyListed = (result[key] ?? []).contains(copy.destination)
+            if !alreadyListed { result[key, default: []].append(copy.destination) }
         }
         return result
     }
