@@ -48,23 +48,29 @@ final class ImportStaging: Identifiable {
 
     /// Items grouped by kind, then destination camera folder.
     var groups: [Group] {
-        let live = items.filter { !removed.contains($0.id) }
-        let byKey = Dictionary(grouping: live) { "\($0.file.kind)|\($0.cameraFolder)" }
-        return byKey.values.map { staged in
-            Group(kind: staged[0].file.kind, folder: staged[0].cameraFolder, count: staged.count,
-                  bytes: staged.reduce(0) { $0 + $1.file.size }, urls: staged.map(\.id).sorted { $0.path < $1.path })
-        }.sorted { ($0.kind.order, $0.folder) < ($1.kind.order, $1.folder) }
+        let kept = items.filter { !removed.contains($0.id) }
+        let byKindAndFolder = Dictionary(grouping: kept) { "\($0.file.kind)|\($0.cameraFolder)" }
+        let groups = byKindAndFolder.values.map { staged in
+            Group(kind: staged[0].file.kind,
+                  folder: staged[0].cameraFolder,
+                  count: staged.count,
+                  bytes: staged.reduce(0) { $0 + $1.file.size },
+                  urls: staged.map(\.id).sorted { $0.path < $1.path })
+        }
+        return groups.sorted { ($0.kind.order, $0.folder) < ($1.kind.order, $1.folder) }
     }
 
     /// Items minus removals minus duplicates the user hasn't re-included.
     var selected: [StagedFile] {
-        items.filter { item in
-            !removed.contains(item.id) && (!duplicates.contains(item.id) || includeDuplicates.contains(item.id))
-        }
+        items.filter { !removed.contains($0.id) && !isSkippedDuplicate($0) }
     }
 
     var skippedDuplicateCount: Int {
-        items.filter { !removed.contains($0.id) && duplicates.contains($0.id) && !includeDuplicates.contains($0.id) }.count
+        items.filter { !removed.contains($0.id) && isSkippedDuplicate($0) }.count
+    }
+
+    private func isSkippedDuplicate(_ item: StagedFile) -> Bool {
+        duplicates.contains(item.id) && !includeDuplicates.contains(item.id)
     }
 
     func cancel() {

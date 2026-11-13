@@ -42,7 +42,10 @@ nonisolated enum SyncMetaStore {
         decoder.dateDecodingStrategy = .iso8601
         guard let file = try? decoder.decode(File.self, from: data) else { return [:] }
         var result: [UUID: Date] = [:]
-        for (key, date) in file.deepVerified { if let id = UUID(uuidString: key) { result[id] = date } }
+        for (key, date) in file.deepVerified {
+            guard let id = UUID(uuidString: key) else { continue }
+            result[id] = date
+        }
         return result
     }
 

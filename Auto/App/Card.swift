@@ -4,8 +4,6 @@ import Observation
 /// One connected camera card and its backup state.
 @Observable
 final class Card: Identifiable {
-    typealias Phase = CardPhase
-
     let volume: URL
     let name: String
     /// Volume UUID + path (path alone for fixture folders). A different card mounted at the
@@ -13,7 +11,7 @@ final class Card: Identifiable {
     let identity: String
     var id: String { identity }
 
-    var phase: Phase = .scanning
+    var phase: CardPhase = .scanning
     var files: [MediaFile] = []
     var missing: [MediaFile] = []
     /// Card file URL -> its verified copy, from the last backup check.

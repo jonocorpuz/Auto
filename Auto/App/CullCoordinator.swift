@@ -19,9 +19,12 @@ final class CullWaiters {
     func wait() async throws {
         let key = UUID()
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                if Task.isCancelled { c.resume(throwing: CancellationError()); return }
-                waiters[key] = c
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                waiters[key] = continuation
             }
         } onCancel: {
             Task { @MainActor in self.cancel(key) }
@@ -29,9 +32,9 @@ final class CullWaiters {
     }
 
     func wake() {
-        let all = waiters
+        let woken = waiters
         waiters = [:]
-        for c in all.values { c.resume() }
+        for continuation in woken.values { continuation.resume() }
     }
 
     private func cancel(_ key: UUID) {
