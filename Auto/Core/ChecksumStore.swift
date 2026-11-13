@@ -14,18 +14,22 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
         var ctime: Int64 = 0
 
         init(volume: String, relPath: String, size: Int64, mtime: Int64, inode: UInt64, ctime: Int64 = 0) {
-            self.volume = volume; self.relPath = relPath; self.size = size
-            self.mtime = mtime; self.inode = inode; self.ctime = ctime
+            self.volume = volume
+            self.relPath = relPath
+            self.size = size
+            self.mtime = mtime
+            self.inode = inode
+            self.ctime = ctime
         }
 
         init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            volume = try c.decode(String.self, forKey: .volume)
-            relPath = try c.decode(String.self, forKey: .relPath)
-            size = try c.decode(Int64.self, forKey: .size)
-            mtime = try c.decode(Int64.self, forKey: .mtime)
-            inode = try c.decode(UInt64.self, forKey: .inode)
-            ctime = try c.decodeIfPresent(Int64.self, forKey: .ctime) ?? 0
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            volume = try container.decode(String.self, forKey: .volume)
+            relPath = try container.decode(String.self, forKey: .relPath)
+            size = try container.decode(Int64.self, forKey: .size)
+            mtime = try container.decode(Int64.self, forKey: .mtime)
+            inode = try container.decode(UInt64.self, forKey: .inode)
+            ctime = try container.decodeIfPresent(Int64.self, forKey: .ctime) ?? 0
         }
     }
 
@@ -52,17 +56,21 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
 
     /// lstat-based stamp; nil if the path is not a regular file.
     static func stamp(_ url: URL, volumeID: String, volumeRoot: URL) -> FileStamp? {
-        var st = stat()
-        guard lstat(url.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return nil }
-        let rel = relativePath(of: url, under: volumeRoot)
-        let mtime = Int64(st.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(st.st_mtimespec.tv_nsec)
-        let ctime = Int64(st.st_ctimespec.tv_sec) * 1_000_000_000 + Int64(st.st_ctimespec.tv_nsec)
-        return FileStamp(volume: volumeID, relPath: rel, size: Int64(st.st_size), mtime: mtime, inode: UInt64(st.st_ino), ctime: ctime)
+        var info = stat()
+        guard lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+        let relPath = relativePath(of: url, under: volumeRoot)
+        return FileStamp(volume: volumeID, relPath: relPath, size: Int64(info.st_size),
+                         mtime: nanoseconds(info.st_mtimespec), inode: UInt64(info.st_ino),
+                         ctime: nanoseconds(info.st_ctimespec))
+    }
+
+    private static func nanoseconds(_ time: timespec) -> Int64 {
+        Int64(time.tv_sec) * 1_000_000_000 + Int64(time.tv_nsec)
     }
 
     /// Stamp using the file's volume UUID, falling back to `"path@" + absolute path` when it has none.
     static func stamp(_ url: URL) -> FileStamp? {
-        if let v = volumeID(of: url) { return stamp(url, volumeID: v.id, volumeRoot: v.root) }
+        if let volume = volumeID(of: url) { return stamp(url, volumeID: volume.id, volumeRoot: volume.root) }
         return stamp(url, volumeID: "path@", volumeRoot: URL(fileURLWithPath: "/"))
     }
 
@@ -118,8 +126,8 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
         guard let data = try? Data(contentsOf: url) else { return } // missing = empty cache
         if let payload = try? JSONDecoder().decode(Payload.self, from: data) {
             var loaded: [FileStamp: Data] = [:]
-            for e in payload.entries {
-                if let d = Self.data(fromHex: e.md5) { loaded[e.stamp] = d }
+            for entry in payload.entries {
+                if let checksum = Self.data(fromHex: entry.md5) { loaded[entry.stamp] = checksum }
             }
             // Anything recorded before load finishes wins.
             // Dirty when the merge added entries: a save that ran before the load must not leave the file short.
@@ -158,18 +166,20 @@ nonisolated final class ChecksumStore: @unchecked Sendable {
         }
     }
 
-    private static func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }
+    // MARK: Hex
 
-    private static func data(fromHex s: String) -> Data? {
-        guard s.count % 2 == 0, !s.isEmpty else { return nil }
-        var out = Data()
-        var idx = s.startIndex
-        while idx < s.endIndex {
-            let next = s.index(idx, offsetBy: 2)
-            guard let b = UInt8(s[idx..<next], radix: 16) else { return nil }
-            out.append(b)
-            idx = next
+    private static func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
+    private static func data(fromHex hex: String) -> Data? {
+        guard hex.count % 2 == 0, !hex.isEmpty else { return nil }
+        var data = Data()
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            data.append(byte)
+            index = next
         }
-        return out
+        return data
     }
 }
