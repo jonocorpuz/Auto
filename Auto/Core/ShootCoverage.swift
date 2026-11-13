@@ -59,27 +59,8 @@ nonisolated enum ShootCoverageChecker {
             if VolumeClassifier.isOnCard(shootFolder, cards: cardVolumes) {
                 return Result(verified: [], cancelled: false, failure: "The shoot folder is on a camera card.")
             }
-            // Canonicalize excluded folders once; each candidate is canonicalized once below.
-            let excludedRoots = excluding.map { canonical($0) }.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
-            func isExcluded(_ url: URL) -> Bool {
-                guard !excludedRoots.isEmpty else { return false }
-                let path = canonical(url)
-                return excludedRoots.contains { path.hasPrefix($0) }
-            }
-            // A card's own files never count as their own backup, even if a shoot folder contains the card.
-            var candidates = await DriveIndex.build(shootFolder).compactMapValues { urls -> [URL]? in
-                let kept = urls.filter { url in
-                    !VolumeClassifier.isInside(url, anyOf: cardVolumes) && !isExcluded(url)
-                }
-                return kept.isEmpty ? nil : kept
-            }
-            let known = Set(candidates.values.joined().map(canonical))
-            let inside = sessionCopies.filter { copy in
-                isInside(copy.destination, folder: shootFolder) && !known.contains(canonical(copy.destination))
-                    && !VolumeClassifier.isInside(copy.destination, anyOf: cardVolumes)
-                    && !isExcluded(copy.destination)
-            }
-            candidates = BackupVerifier.addingCandidates(inside, to: candidates)
+            let candidates = await candidates(in: shootFolder, sessionCopies: sessionCopies,
+                                              cardVolumes: cardVolumes, excluding: excluding)
 
             let triage = await BackupVerifier.triageOffMain(files: files, candidates: candidates, cache: cache)
             var results = triage.settled
@@ -90,11 +71,42 @@ nonisolated enum ShootCoverageChecker {
                 cancelled = outcome.cancelled || Task.isCancelled
             }
             var copies: [URL: URL] = [:]
-            for (url, result) in results { if case .verified(let copy) = result { copies[url] = copy } }
+            for (url, result) in results {
+                if case .verified(let copy) = result { copies[url] = copy }
+            }
             return Result(verified: Set(copies.keys), cancelled: cancelled, copies: copies)
         } onCancel: {
             verifier.cancel()
         }
+    }
+
+    /// Name+size candidate index of everything inside `shootFolder`, plus this session's copies that
+    /// landed there and aren't indexed yet. Never a card file or anything under `excluding`.
+    private static func candidates(in shootFolder: URL, sessionCopies: [CopiedFile], cardVolumes: [URL],
+                                   excluding: [URL]) async -> [String: [URL]] {
+        // Canonicalize excluded folders once; each candidate is canonicalized once below.
+        let excludedRoots = excluding.map { canonical($0) }.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        func isExcluded(_ url: URL) -> Bool {
+            guard !excludedRoots.isEmpty else { return false }
+            let path = canonical(url)
+            return excludedRoots.contains { path.hasPrefix($0) }
+        }
+        // A card's own files never count as their own backup, even if a shoot folder contains the card.
+        func isUsable(_ url: URL) -> Bool {
+            !VolumeClassifier.isInside(url, anyOf: cardVolumes) && !isExcluded(url)
+        }
+
+        let indexed = await DriveIndex.build(shootFolder).compactMapValues { urls -> [URL]? in
+            let kept = urls.filter(isUsable)
+            return kept.isEmpty ? nil : kept
+        }
+        let indexedPaths = Set(indexed.values.joined().map(canonical))
+        let unindexedSessionCopies = sessionCopies.filter { copy in
+            isInside(copy.destination, folder: shootFolder)
+                && !indexedPaths.contains(canonical(copy.destination))
+                && isUsable(copy.destination)
+        }
+        return BackupVerifier.addingCandidates(unindexedSessionCopies, to: indexed)
     }
 
     private static func canonical(_ url: URL) -> String {
