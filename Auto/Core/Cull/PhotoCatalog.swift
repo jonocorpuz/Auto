@@ -2,6 +2,11 @@ import Foundation
 
 /// Walks a shoot's `Photo/` folder and groups files into photo records (RAW+JPEG pairs share one).
 nonisolated enum PhotoCatalog {
+    /// One photo file found by the walk, shoot-relative.
+    private struct Entry { let rel: String; let stamp: FileStamp }
+    /// Files that may belong to one photo: same folder and stem.
+    private typealias Bucket = (camera: String, entries: [Entry])
+
     private static let previewable: Set<String> = ["jpg", "jpeg", "heic"]
     /// Max mtime spread for same-stem files directly in Photo/ to count as one RAW+JPEG photo.
     static let pairWindow: TimeInterval = 5
@@ -20,8 +25,7 @@ nonisolated enum PhotoCatalog {
             return []
         }
 
-        struct Entry { let rel: String; let stamp: FileStamp }
-        var buckets: [String: (camera: String, entries: [Entry])] = [:]
+        var buckets: [String: Bucket] = [:]
 
         for case let url as URL in walker {
             guard let v = try? url.resourceValues(forKeys: Set(keys)) else { continue }
@@ -44,8 +48,16 @@ nonisolated enum PhotoCatalog {
             buckets[key, default: (camera, [])].entries.append(Entry(rel: "Photo/" + inner, stamp: stamp))
         }
 
-        var groups: [(camera: String, entries: [Entry])] = []
-        for (_, bucket) in buckets {
+        return splitFlatBuckets(Array(buckets.values))
+            .map(record(for:))
+            .sorted { ($0.camera, $0.id) < ($1.camera, $1.id) }
+    }
+
+    // MARK: - Steps
+
+    private static func splitFlatBuckets(_ buckets: [Bucket]) -> [Bucket] {
+        var groups: [Bucket] = []
+        for bucket in buckets {
             // Directly in Photo/ (flat layout) different cameras can share a stem, so only files written
             // within `pairWindow` of each other pair up; camera folders keep pairing on stem alone.
             guard bucket.camera.isEmpty, bucket.entries.count > 1 else { groups.append(bucket); continue }
@@ -54,17 +66,17 @@ nonisolated enum PhotoCatalog {
                 groups.append((bucket.camera, cluster.compactMap { byRel[$0] }))
             }
         }
+        return groups
+    }
 
-        var records: [PhotoRecord] = []
-        for bucket in groups {
-            let sorted = bucket.entries.sorted { $0.rel < $1.rel }
-            let rep = sorted.first { previewable.contains(($0.rel as NSString).pathExtension.lowercased()) } ?? sorted[0]
-            var stamps: [String: FileStamp] = [:]
-            for e in sorted { stamps[e.rel] = e.stamp }
-            records.append(PhotoRecord(id: rep.rel, camera: bucket.camera, members: sorted.map(\.rel),
-                                       representative: rep.rel, stamps: stamps, metrics: nil, preview: nil, faceStrip: nil))
-        }
-        return records.sorted { ($0.camera, $0.id) < ($1.camera, $1.id) }
+    /// One photo from its files. The first previewable file (by path) represents it and is its ID.
+    private static func record(for bucket: Bucket) -> PhotoRecord {
+        let sorted = bucket.entries.sorted { $0.rel < $1.rel }
+        let rep = sorted.first { previewable.contains(($0.rel as NSString).pathExtension.lowercased()) } ?? sorted[0]
+        var stamps: [String: FileStamp] = [:]
+        for e in sorted { stamps[e.rel] = e.stamp }
+        return PhotoRecord(id: rep.rel, camera: bucket.camera, members: sorted.map(\.rel),
+                           representative: rep.rel, stamps: stamps, metrics: nil, preview: nil, faceStrip: nil)
     }
 
     /// Same-stem files directly in Photo/, split into photos: sorted by mtime, a file joins the current
