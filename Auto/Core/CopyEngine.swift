@@ -73,6 +73,20 @@ nonisolated struct CopyOutcome: Sendable {
 nonisolated final class CopyEngine: @unchecked Sendable {
     init() {}
 
+    /// Bytes read and written per step.
+    private static let chunk = 8 << 20
+    /// Progress is reported at most this often (plus at each file boundary).
+    private static let progressInterval: TimeInterval = 0.1
+    /// Unique-name retries when other files keep appearing at the destination name.
+    private static let maxRenameAttempts = 100
+    private static let log = Logger(subsystem: "Auto", category: "CopyEngine")
+
+    /// Test hooks, called synchronously on the copy thread. Set before `run`.
+    var onChunkWritten: (@Sendable (Int64) -> Void)?
+    var onVerifyChunk: (@Sendable (Int64) -> Void)?
+
+    // MARK: Cancellation
+
     private let lock = NSLock()
     private var _cancelled = false
     private var isCancelled: Bool {
@@ -84,19 +98,14 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         lock.lock(); _cancelled = true; lock.unlock()
     }
 
-    /// Test hooks, called synchronously on the copy thread. Set before `run`.
-    var onChunkWritten: (@Sendable (Int64) -> Void)?
-    var onVerifyChunk: (@Sendable (Int64) -> Void)?
-
-    private static let chunk = 8 << 20
-    private static let log = Logger(subsystem: "Auto", category: "CopyEngine")
+    // MARK: Running jobs
 
     func run(_ jobs: [CopyJob], onProgress: @escaping @MainActor @Sendable (CopyProgress) -> Void) async -> CopyOutcome {
         // Progress flows through a stream consumed on the main actor; `run` awaits the
         // consumer after finishing it, so no callback is delivered after `run` returns.
         let (stream, yield) = AsyncStream<CopyProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let consumer = Task { @MainActor in
-            for await p in stream { onProgress(p) }
+            for await update in stream { onProgress(update) }
         }
         let outcome: CopyOutcome = await withCheckedContinuation { continuation in
             Thread.detachNewThread {
@@ -115,7 +124,7 @@ nonisolated final class CopyEngine: @unchecked Sendable {
 
         let report: (Bool) -> Void = { force in
             let now = Date()
-            if force || now.timeIntervalSince(lastReport) > 0.1 {
+            if force || now.timeIntervalSince(lastReport) > Self.progressInterval {
                 lastReport = now
                 onProgress(progress)
             }
@@ -137,19 +146,21 @@ nonisolated final class CopyEngine: @unchecked Sendable {
                 outcome.cancelled = true
                 break
             } catch {
-                let kind: CopyOutcome.Failure.Kind
-                switch error as? CopyError {
-                case .mismatch, .sizeMismatch, .sourceChanged: kind = .integrity
-                default: kind = .destination
-                }
                 outcome.failures.append(.init(name: job.file.name, reason: error.localizedDescription, file: job.file.url,
-                                              root: job.root, kind: kind))
+                                              root: job.root, kind: Self.failureKind(of: error)))
             }
             progress.bytesDone = startBytes + job.file.size
             progress.filesDone += 1
             report(true)
         }
         return outcome
+    }
+
+    private static func failureKind(of error: Error) -> CopyOutcome.Failure.Kind {
+        switch error as? CopyError {
+        case .mismatch, .sizeMismatch, .sourceChanged: .integrity
+        default: .destination
+        }
     }
 
     enum CopyError: LocalizedError, Sendable {
@@ -173,6 +184,8 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             }
         }
     }
+
+    // MARK: One file
 
     /// Creates `destDir`. With a `root`, it must exist as a directory and only components below it are
     /// created, each without intermediates, so a vanished drive can never be recreated elsewhere.
@@ -258,12 +271,8 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             guard written == job.file.size else { throw CopyError.sizeMismatch }
             guard try hash(partial, bypassCache: true) == sourceDigest else { throw CopyError.mismatch }
 
-            let attrs = try? fm.attributesOfItem(atPath: source.path)
-            var keep: [FileAttributeKey: Any] = [:]
-            if let created = attrs?[.creationDate] { keep[.creationDate] = created }
-            if let modified = attrs?[.modificationDate] { keep[.modificationDate] = modified }
             // Not fatal (the bytes are verified), but flat-layout photo pairing relies on mtimes.
-            do { try fm.setAttributes(keep, ofItemAtPath: partial.path) } catch {
+            do { try fm.setAttributes(Self.datesToKeep(of: source), ofItemAtPath: partial.path) } catch {
                 Self.log.error("Could not keep dates on \(dest.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
             let final: URL
@@ -281,6 +290,15 @@ nonisolated final class CopyEngine: @unchecked Sendable {
             try? fm.removeItem(at: partial)
             throw error
         }
+    }
+
+    /// The source's creation and modification dates, for the copy.
+    private static func datesToKeep(of source: URL) -> [FileAttributeKey: Any] {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: source.path)
+        var dates: [FileAttributeKey: Any] = [:]
+        if let created = attributes?[.creationDate] { dates[.creationDate] = created }
+        if let modified = attributes?[.modificationDate] { dates[.modificationDate] = modified }
+        return dates
     }
 
     /// `bypassCache` reads with F_NOCACHE so verification checks what is on disk.
@@ -301,12 +319,14 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         return Data(md5.finalize())
     }
 
+    // MARK: Naming
+
     /// Atomically renames `src` to `dest` only if `dest` doesn't exist (RENAME_EXCL).
     /// On collision picks the next free name and retries (bounded), or with `renameOnCollision: false`
     /// throws `.destinationExists` without touching anything. Returns the final URL.
-    static func moveWithoutOverwriting(_ src: URL, to dest: URL, maxAttempts: Int = 100, renameOnCollision: Bool = true) throws -> URL {
+    static func moveWithoutOverwriting(_ src: URL, to dest: URL, renameOnCollision: Bool = true) throws -> URL {
         var target = dest
-        for _ in 0..<maxAttempts {
+        for _ in 0..<maxRenameAttempts {
             if renamex_np(src.path, target.path, UInt32(RENAME_EXCL)) == 0 { return target }
             let err = errno
             guard err == EEXIST else {
@@ -318,7 +338,8 @@ nonisolated final class CopyEngine: @unchecked Sendable {
         throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: dest.path])
     }
 
-    static func uniqueURL(for url: URL) -> URL {
+    /// "name 2.ext", "name 3.ext", ... : the first that doesn't exist.
+    private static func uniqueURL(for url: URL) -> URL {
         let base = url.deletingPathExtension().lastPathComponent
         let ext = url.pathExtension
         let dir = url.deletingLastPathComponent()
