@@ -245,7 +245,9 @@ extension AppModel {
             cullStates[shootID] = nil
             return false
         }
-        cullStates[shootID] = .running(Self.undoProgress(done: 0, total: 0))
+        // The bar starts empty; it only reads as full once a callback reports nothing left to move.
+        let undoStarting = CullProgress(phase: .undoing(done: 0, total: 0), fraction: 0, spentUSD: 0)
+        cullStates[shootID] = .running(undoStarting)
         let volumes = cardVolumes()
         let runID = cullLastRuns[shootID]?.runID
         let result = await Self.performUndo(runID: runID, copies: copies, cardVolumes: volumes) { [weak self] done, total in
@@ -314,8 +316,9 @@ extension AppModel {
     /// sync planner sees matching paths. The primary is always the source. Returns a note when pairs couldn't be replayed.
     @concurrent
     nonisolated static func replayCullJournals(primary: URL, mirrors: [URL], cardVolumes: [URL]) async -> String? {
+        guard !mirrors.isEmpty else { return nil }
         let primaryRunCount = (try? CullJournal.runs(in: primary).count) ?? 0
-        guard !mirrors.isEmpty, primaryRunCount > 0 else { return nil }
+        guard primaryRunCount > 0 else { return nil }
         var skipped = 0
         var failure: String?
         for copy in mirrors {
