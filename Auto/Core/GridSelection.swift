@@ -24,7 +24,9 @@ nonisolated struct GridLayout<ID: Hashable> {
 
     /// Every on-screen slot in reading order, duplicates included.
     var positions: [Position] {
-        sections.enumerated().flatMap { s, items in items.indices.map { (section: s, index: $0) } }
+        sections.enumerated().flatMap { section, items in
+            items.indices.map { (section: section, index: $0) }
+        }
     }
 
     func id(at position: Position) -> ID { sections[position.section][position.index] }
@@ -37,16 +39,16 @@ nonisolated struct GridLayout<ID: Hashable> {
 
     /// First occurrence of `id`.
     func position(of id: ID) -> Position? {
-        for (s, items) in sections.enumerated() {
-            if let i = items.firstIndex(of: id) { return (s, i) }
+        for (section, items) in sections.enumerated() {
+            if let index = items.firstIndex(of: id) { return (section, index) }
         }
         return nil
     }
 
     /// `id` within `section` if it is there, otherwise its first occurrence.
     func position(of id: ID, preferring section: Int?) -> Position? {
-        if let section, sections.indices.contains(section), let i = sections[section].firstIndex(of: id) {
-            return (section, i)
+        if let section, sections.indices.contains(section), let index = sections[section].firstIndex(of: id) {
+            return (section, index)
         }
         return position(of: id)
     }
@@ -54,18 +56,22 @@ nonisolated struct GridLayout<ID: Hashable> {
     /// The slot one row up or down in the same column, crossing sections and clamping to the last
     /// item of a short row. nil at the top or bottom edge.
     func vertical(from position: Position, down: Bool) -> Position? {
-        let (s, i) = position
-        let row = i / columns, col = i % columns
-        let count = sections[s].count
+        let (section, index) = position
+        let row = index / columns
+        let column = index % columns
+        let count = sections[section].count
         if down {
-            if (row + 1) * columns < count { return (s, min((row + 1) * columns + col, count - 1)) }
-            guard let next = (s + 1..<sections.count).first(where: { !sections[$0].isEmpty }) else { return nil }
-            return (next, min(col, sections[next].count - 1))
+            let nextRowStart = (row + 1) * columns
+            if nextRowStart < count { return (section, min(nextRowStart + column, count - 1)) }
+            let laterSections = section + 1..<sections.count
+            guard let next = laterSections.first(where: { !sections[$0].isEmpty }) else { return nil }
+            return (next, min(column, sections[next].count - 1))
         } else {
-            if row > 0 { return (s, (row - 1) * columns + col) }
-            guard let prev = (0..<s).last(where: { !sections[$0].isEmpty }) else { return nil }
-            let n = sections[prev].count
-            return (prev, min(((n - 1) / columns) * columns + col, n - 1))
+            if row > 0 { return (section, (row - 1) * columns + column) }
+            guard let previous = (0..<section).last(where: { !sections[$0].isEmpty }) else { return nil }
+            let previousCount = sections[previous].count
+            let lastRowStart = ((previousCount - 1) / columns) * columns
+            return (previous, min(lastRowStart + column, previousCount - 1))
         }
     }
 }
@@ -140,12 +146,12 @@ nonisolated struct GridSelection<ID: Hashable> {
         case .end: target = last
         case .left, .right:
             // Skip slots showing the same file as the cursor, so the highlight always moves.
-            let k = all.firstIndex { $0 == current } ?? 0
-            let here = layout.id(at: current)
+            let currentIndex = all.firstIndex { $0 == current } ?? 0
+            let currentID = layout.id(at: current)
             let step = direction == .left ? -1 : 1
-            var j = k + step
-            while all.indices.contains(j), layout.id(at: all[j]) == here { j += step }
-            target = all.indices.contains(j) ? all[j] : current
+            var candidate = currentIndex + step
+            while all.indices.contains(candidate), layout.id(at: all[candidate]) == currentID { candidate += step }
+            target = all.indices.contains(candidate) ? all[candidate] : current
         case .up, .down:
             target = layout.vertical(from: current, down: direction == .down) ?? current
         }
@@ -163,8 +169,8 @@ nonisolated struct GridSelection<ID: Hashable> {
     /// Drops IDs that are no longer present (and a stale anchor/cursor).
     mutating func prune(keeping present: Set<ID>) {
         selected = selected.filter(present.contains)
-        if let a = anchor, !present.contains(a) { anchor = nil; anchorSection = nil }
-        if let c = cursor, !present.contains(c) { cursor = nil; cursorSection = nil }
+        if let anchor, !present.contains(anchor) { self.anchor = nil; anchorSection = nil }
+        if let cursor, !present.contains(cursor) { self.cursor = nil; cursorSection = nil }
     }
 
     // MARK: Private
@@ -179,10 +185,12 @@ nonisolated struct GridSelection<ID: Hashable> {
     }
 
     /// Selects every file between two slots (inclusive) in on-screen order.
-    private mutating func selectRange(from a: GridLayout<ID>.Position, to b: GridLayout<ID>.Position,
+    private mutating func selectRange(from start: GridLayout<ID>.Position, to end: GridLayout<ID>.Position,
                                       in layout: GridLayout<ID>) {
         let all = layout.positions
-        guard let i = all.firstIndex(where: { $0 == a }), let j = all.firstIndex(where: { $0 == b }) else { return }
-        selected = Set(all[min(i, j)...max(i, j)].map(layout.id(at:)))
+        guard let startIndex = all.firstIndex(where: { $0 == start }),
+              let endIndex = all.firstIndex(where: { $0 == end }) else { return }
+        let range = min(startIndex, endIndex)...max(startIndex, endIndex)
+        selected = Set(all[range].map(layout.id(at:)))
     }
 }
