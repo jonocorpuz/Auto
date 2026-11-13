@@ -60,31 +60,39 @@ nonisolated struct Camera: Identifiable, Hashable, Sendable {
             taken.insert(cam.label.lowercased())
             taken.insert(cam.folderName.lowercased())
         }
-        var suffix: [String: String] = [:]
+        var suffixByID: [String: String] = [:]
         for model in groups.keys.sorted() {
             guard let group = groups[model], group.count > 1 else { continue }
-            var n = 0
+            var suffixNumber = 0
             for cam in group.sorted(by: { $0.id < $1.id }) {
                 while true {
-                    let s = n < 26 ? String(UnicodeScalar(UInt8(65 + n))) : String(n - 25)
-                    n += 1
-                    let l = "\(cam.label) \(s)".lowercased()
-                    let f = "\(cam.folderName) \(s)".lowercased()
-                    if taken.contains(l) || taken.contains(f) { continue }
-                    taken.insert(l)
-                    taken.insert(f)
-                    suffix[cam.id] = s
+                    let suffix = suffixText(suffixNumber)
+                    suffixNumber += 1
+                    let label = "\(cam.label) \(suffix)".lowercased()
+                    let folder = "\(cam.folderName) \(suffix)".lowercased()
+                    if taken.contains(label) || taken.contains(folder) { continue }
+                    taken.insert(label)
+                    taken.insert(folder)
+                    suffixByID[cam.id] = suffix
                     break
                 }
             }
         }
         return cameras.map { cam in
-            guard let s = suffix[cam.id] else { return cam }
-            var out = cam
-            out.label = "\(cam.label) \(s)"
-            out.folderName = "\(cam.folderName) \(s)"
-            out.defaultFolderName = out.folderName
-            return out
+            guard let suffix = suffixByID[cam.id] else { return cam }
+            var renamed = cam
+            renamed.label = "\(cam.label) \(suffix)"
+            renamed.folderName = "\(cam.folderName) \(suffix)"
+            renamed.defaultFolderName = renamed.folderName
+            return renamed
         }
+    }
+
+    /// 0 -> "A" ... 25 -> "Z", then 26 -> "1", 27 -> "2", ...
+    private static func suffixText(_ number: Int) -> String {
+        let letterCount = 26
+        guard number < letterCount else { return String(number - letterCount + 1) }
+        let letterA: UInt8 = 65
+        return String(UnicodeScalar(letterA + UInt8(number)))
     }
 }
