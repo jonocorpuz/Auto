@@ -12,20 +12,11 @@ struct AddFilesSheet: View {
 
     private var shootName: String { model.shoots.first { $0.id == staging.shootID }?.record.name ?? "this shoot" }
     private var addCount: Int { staging.selected.count }
-    private var isBusy: Bool {
-        switch staging.phase {
-        case .scanning, .checking: true
-        case .ready, .failed: false
-        }
-    }
     private var sizes: [URL: Int64] { Dictionary(staging.items.map { ($0.id, $0.file.size) }, uniquingKeysWith: { a, _ in a }) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Add Files").font(.system(size: 20, weight: .semibold))
-                Text(shootName).font(.callout).foregroundStyle(.secondary)
-            }
+            SheetHeader(title: "Add Files", subtitle: shootName)
 
             dropZone
             status
@@ -44,7 +35,7 @@ struct AddFilesSheet: View {
             notes
 
             if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
+                ErrorLabel(error)
             }
 
             HStack {
@@ -110,7 +101,7 @@ struct AddFilesSheet: View {
                 Text("Checking what's already in the shoot…").font(.callout).foregroundStyle(.secondary)
             }
         case .failed(let reason):
-            Label(reason, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
+            ErrorLabel(reason)
         case .ready:
             if staging.items.isEmpty && staging.sources.isEmpty == false && staging.refused.isEmpty {
                 Text("No photos, videos or audio found.").font(.callout).foregroundStyle(.secondary)

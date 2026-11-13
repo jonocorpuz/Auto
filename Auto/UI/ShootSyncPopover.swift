@@ -24,10 +24,6 @@ struct ShootSyncPopover: View {
         }
     }
 
-    private var allOnline: Bool {
-        !item.copies.isEmpty && item.copies.allSatisfy { $0.availability == .online }
-    }
-
     private var canSync: Bool { model.canSyncNow(shootID: item.id) }
 
     var body: some View {

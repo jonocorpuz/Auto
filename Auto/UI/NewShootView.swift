@@ -110,11 +110,7 @@ private struct CreateShootSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("New Shoot").font(.system(size: 20, weight: .semibold))
-                Text("Name it and pick the day it was shot. You can add footage next.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
+            SheetHeader(title: "New Shoot", subtitle: "Name it and pick the day it was shot. You can add footage next.")
 
             SurfaceCard {
                 VStack(alignment: .leading, spacing: 12) {

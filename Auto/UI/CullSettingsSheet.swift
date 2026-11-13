@@ -48,10 +48,7 @@ struct CullSettingsSheet: View {
     // MARK: Sections
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Cull \(shootName)").font(.system(size: 20, weight: .semibold))
-            Text(summary).font(.callout).foregroundStyle(.secondary)
-        }
+        SheetHeader(title: "Cull \(shootName)", subtitle: summary)
     }
 
     private var summary: String {

@@ -108,7 +108,7 @@ struct ImportProgressRow: View {
                 }
             }
         case .failed(let reason):
-            Label(reason, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
+            ErrorLabel(reason)
         case .stopped:
             Label("Stopped. Files already copied are kept.", systemImage: "stop.circle").font(.callout).foregroundStyle(.secondary)
         }
