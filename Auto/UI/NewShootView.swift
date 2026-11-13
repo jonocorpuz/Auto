@@ -43,6 +43,9 @@ private struct CreateShootSheet: View {
     @State private var separateCameras = true
     @FocusState private var nameFocused: Bool
 
+    /// The form is read-only while creating and once a (partial) create has finished.
+    private var isLocked: Bool { working || finished }
+
     private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
 
     /// The folder check for one row, made off main by the `.task` below and reused across renders.
@@ -111,66 +114,9 @@ private struct CreateShootSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             SheetHeader(title: "New Shoot", subtitle: "Name it and pick the day it was shot. You can add footage next.")
-
-            SurfaceCard {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Shoot name").font(.system(size: 13, weight: .medium))
-                    TextField("Shoot name", text: $name, prompt: Text("e.g. Brand film"))
-                        .labelsHidden()
-                        .textFieldStyle(.plain)
-                        .inputStyle(focused: nameFocused)
-                        .focused($nameFocused)
-                        .onSubmit { if canCreate { create() } }
-
-                    HStack {
-                        Text("Date").font(.system(size: 13, weight: .medium))
-                        Spacer()
-                        DatePicker("Date", selection: $date, displayedComponents: .date)
-                            .labelsHidden()
-                            .datePickerStyle(.field)
-                    }
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Toggle("Separate folders per camera", isOn: $separateCameras)
-                            .disabled(working || finished)
-                        Text("Off: files go straight into Video/ and Photo/.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-
-                    HStack {
-                        Text("Destinations").font(.system(size: 13, weight: .medium))
-                        Spacer()
-                        Button {
-                            destinations.append(Destination())
-                        } label: {
-                            Label("Add Mirror Drive", systemImage: "plus")
-                        }
-                        .buttonStyle(.bordered).controlSize(.small)
-                        .disabled(working || finished)
-                    }
-
-                    ForEach(Array(destinations.enumerated()), id: \.element.id) { index, dest in
-                        destinationRow(index, dest)
-                    }
-                }
-            }
-
-            if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(finished ? .orange : .red).font(.callout)
-            }
-
-            HStack {
-                Spacer()
-                Button(finished ? "Close" : "Cancel") { model.shootSheet = nil }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut(.cancelAction)
-                Button("Create Shoot") { create() }
-                    .buttonStyle(PrimaryPillButtonStyle())
-                    .frame(width: 160)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canCreate)
-            }
+            formCard
+            errorLine
+            buttons
         }
         .padding(24)
         .frame(width: 480)
@@ -181,6 +127,76 @@ private struct CreateShootSheet: View {
             nameFocused = true
         }
     }
+
+    // MARK: Sections
+
+    private var formCard: some View {
+        SurfaceCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Shoot name").font(.system(size: 13, weight: .medium))
+                TextField("Shoot name", text: $name, prompt: Text("e.g. Brand film"))
+                    .labelsHidden()
+                    .textFieldStyle(.plain)
+                    .inputStyle(focused: nameFocused)
+                    .focused($nameFocused)
+                    .onSubmit { if canCreate { create() } }
+
+                HStack {
+                    Text("Date").font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    DatePicker("Date", selection: $date, displayedComponents: .date)
+                        .labelsHidden()
+                        .datePickerStyle(.field)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Separate folders per camera", isOn: $separateCameras)
+                        .disabled(isLocked)
+                    Text("Off: files go straight into Video/ and Photo/.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Text("Destinations").font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    Button {
+                        destinations.append(Destination())
+                    } label: {
+                        Label("Add Mirror Drive", systemImage: "plus")
+                    }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .disabled(isLocked)
+                }
+
+                ForEach(Array(destinations.enumerated()), id: \.element.id) { index, dest in
+                    destinationRow(index, dest)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var errorLine: some View {
+        if let error {
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(finished ? .orange : .red).font(.callout)
+        }
+    }
+
+    private var buttons: some View {
+        HStack {
+            Spacer()
+            Button(finished ? "Close" : "Cancel") { model.shootSheet = nil }
+                .buttonStyle(.bordered)
+                .keyboardShortcut(.cancelAction)
+            Button("Create Shoot") { create() }
+                .buttonStyle(PrimaryPillButtonStyle())
+                .frame(width: 160)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canCreate)
+        }
+    }
+
+    // MARK: Destinations
 
     private func destinationRow(_ index: Int, _ dest: Destination) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -197,7 +213,7 @@ private struct CreateShootSheet: View {
                     if let url { setURL(url, at: dest.id) }
                 }
                 .buttonStyle(.bordered).controlSize(.small)
-                .disabled(working || finished)
+                .disabled(isLocked)
                 if index > 0 {
                     Button {
                         destinations.removeAll { $0.id == dest.id }
@@ -206,7 +222,7 @@ private struct CreateShootSheet: View {
                     }
                     .buttonStyle(.borderless)
                     .help("Remove this drive")
-                    .disabled(working || finished)
+                    .disabled(isLocked)
                 }
             }
             collisionLine(index, dest)
@@ -246,7 +262,7 @@ private struct CreateShootSheet: View {
                         if index == 0 {
                             Button("Use this folder") { adopt(url) }
                                 .buttonStyle(.bordered).controlSize(.small)
-                                .disabled(working || finished || !model.isValidShootName(name))
+                                .disabled(isLocked || !model.isValidShootName(name))
                         }
                     }
                 case .existingShoot:

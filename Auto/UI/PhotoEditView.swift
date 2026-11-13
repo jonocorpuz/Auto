@@ -248,16 +248,34 @@ private struct CullProgressRow: View {
     @Environment(AppModel.self) private var model
     let shootID: UUID
 
+    private var shootName: String {
+        model.shoots.first { $0.id == shootID }?.record.name ?? "Shoot"
+    }
+
+    private var runningProgress: CullProgress? {
+        if case .running(let progress)? = model.cullStates[shootID] { return progress }
+        return nil
+    }
+
+    private var waitingReason: String? {
+        if case .waiting(let reason)? = model.cullStates[shootID] { return reason }
+        return nil
+    }
+
+    private func statusText(progress: CullProgress?, waiting: String?) -> String {
+        if let waiting { return "Waiting: \(waiting)" }
+        if let progress { return Self.text(progress.phase) }
+        return ""
+    }
+
     var body: some View {
-        let name = model.shoots.first { $0.id == shootID }?.record.name ?? "Shoot"
-        let progress: CullProgress? = { if case .running(let p)? = model.cullStates[shootID] { p } else { nil } }()
-        let waiting: String? = { if case .waiting(let r)? = model.cullStates[shootID] { r } else { nil } }()
+        let progress = runningProgress
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Text(shootName).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     Spacer()
-                    Text(waiting.map { "Waiting: \($0)" } ?? progress.map { Self.text($0.phase) } ?? "")
+                    Text(statusText(progress: progress, waiting: waitingReason))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 if let progress { ProgressView(value: min(max(progress.fraction, 0), 1)) }
