@@ -26,7 +26,6 @@ import Foundation
 ///   deliberately wide because the grouping and the model's own output length
 ///   vary.
 nonisolated enum CullEstimator {
-
     static let photosPerCall = 8
     static let imageTokensPerPhoto = 1000.0
     static let faceStripTokens = 300.0
@@ -63,9 +62,8 @@ nonisolated enum CullEstimator {
         var calls = (photoCount + photosPerCall - 1) / photosPerCall
         let mode = settings.mode
 
-        let stripShare = (settings.criteria.contains("eyes") || settings.criteria.contains("cropped"))
-            ? faceStripShare
-            : 0
+        let wantsFaceStrips = settings.criteria.contains(CullCriterion.eyes.id) || settings.criteria.contains(CullCriterion.cropped.id)
+        let stripShare = wantsFaceStrips ? faceStripShare : 0
         var photoInput = photos * (imageTokensPerPhoto + stripShare * faceStripTokens)
         let effectiveSystemTokens = systemTokensPerCall
             * (cachedShare * cacheReadMultiplier + (1 - cachedShare))

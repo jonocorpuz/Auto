@@ -2,6 +2,10 @@ import Foundation
 
 /// Cheap, certain rejections made without asking Claude.
 nonisolated enum LocalTriage {
+    /// A frame this dark and this flat is a lens-cap or black frame.
+    private static let blackFrameMaxMeanLuma = 0.02
+    private static let blackFrameMaxLumaStdDev = 0.01
+
     /// Clip threshold: 0.92 at level 1 down to 0.80 at level 5.
     static func clipThreshold(level: Int) -> Double {
         let l = Double(min(max(level, 1), 5))
@@ -26,7 +30,7 @@ nonisolated enum LocalTriage {
         }
 
         let unusable = settings.criteria.contains(CullCriterion.unusable.id)
-        if unusable, m.meanLuma < 0.02, m.lumaStdDev < 0.01 {
+        if unusable, m.meanLuma < blackFrameMaxMeanLuma, m.lumaStdDev < blackFrameMaxLumaStdDev {
             return reject("black frame / lens cap", .unusable)
         }
         if settings.criteria.contains(CullCriterion.exposure.id) {
