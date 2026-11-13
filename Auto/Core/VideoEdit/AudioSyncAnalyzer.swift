@@ -25,7 +25,26 @@ nonisolated enum AudioSyncAnalyzer {
         let sources = try VideoCatalog.scan(shoot: shoot, cardVolumes: cardVolumes)
         guard sources.contains(where: { $0.kind == .video }) else { throw VideoEditError.noVideo }
 
-        // Read, a few at a time.
+        let (audio, unreadable) = try await readAll(sources, in: shoot, reader: reader, progress: progress)
+
+        let probes: [AudioSyncProbe] = sources.compactMap { s in
+            audio[s.id].map { AudioSyncProbe(source: s, duration: $0.duration, fps: $0.fps, hasAudio: $0.envelope != nil) }
+        }
+        let matches = try matchAll(sources, audio: audio, progress: progress)
+
+        let plan = AudioSyncPlanner.plan(probes: probes, matches: matches, thresholds: thresholds)
+        return Result(plan: plan, probes: probes, unreadable: unreadable.sorted())
+    }
+
+    // MARK: - Steps
+
+    /// Reads every source, `maxConcurrentReads` at a time. Files that fail to read are returned as unreadable.
+    private static func readAll(
+        _ sources: [AudioSyncSource],
+        in shoot: URL,
+        reader: any ClipAudioReading,
+        progress: (@Sendable (AudioSyncProgress) -> Void)?
+    ) async throws -> (audio: [String: ClipAudio], unreadable: [String]) {
         var audio: [String: ClipAudio] = [:]
         var unreadable: [String] = []
         try await withThrowingTaskGroup(of: (String, ClipAudio?).self) { group in
@@ -49,12 +68,15 @@ nonisolated enum AudioSyncAnalyzer {
                 launch()
             }
         }
+        return (audio, unreadable)
+    }
 
-        let probes: [AudioSyncProbe] = sources.compactMap { s in
-            audio[s.id].map { AudioSyncProbe(source: s, duration: $0.duration, fps: $0.fps, hasAudio: $0.envelope != nil) }
-        }
-
-        // Match everything with sound against every recording.
+    /// Matches everything with sound against every recording: `[anchorID][sourceID]`.
+    private static func matchAll(
+        _ sources: [AudioSyncSource],
+        audio: [String: ClipAudio],
+        progress: (@Sendable (AudioSyncProgress) -> Void)?
+    ) throws -> [String: [String: AudioSyncMatch]] {
         let anchors = sources.filter { $0.kind == .audio && audio[$0.id]?.envelope != nil }
         let others = sources.filter { audio[$0.id]?.envelope != nil }
         var matches: [String: [String: AudioSyncMatch]] = [:]
@@ -69,8 +91,6 @@ nonisolated enum AudioSyncAnalyzer {
             }
             progress?(AudioSyncProgress(phase: .matching, done: i + 1, total: total))
         }
-
-        let plan = AudioSyncPlanner.plan(probes: probes, matches: matches, thresholds: thresholds)
-        return Result(plan: plan, probes: probes, unreadable: unreadable.sorted())
+        return matches
     }
 }
