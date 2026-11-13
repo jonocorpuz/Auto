@@ -61,7 +61,7 @@ nonisolated enum IngestDuplicates {
             placements[file.url] = place(of: copy, in: shoots)
             files.append(file)
         }
-        return report(files: files, placements: placements, backups: backups)
+        return report(files: files, placements: placements)
     }
 
     /// Off main: keeps only duplicates whose copy is still recorded identical in `cache` (stat + lookup).
@@ -76,34 +76,39 @@ nonisolated enum IngestDuplicates {
             kept.append(file)
             placements[file.url] = report.placements[file.url]
         }
-        return Self.report(files: kept, placements: placements, backups: backups)
+        return Self.report(files: kept, placements: placements)
     }
 
     /// "/Volumes/<name>" lexically, else "This Mac".
     static func driveName(_ url: URL) -> String {
-        let parts = url.standardizedFileURL.pathComponents
-        if parts.count > 2, parts[0] == "/", parts[1] == "Volumes" { return parts[2] }
+        let components = url.standardizedFileURL.pathComponents
+        if components.count > 2, components[0] == "/", components[1] == "Volumes" { return components[2] }
         return "This Mac"
     }
 
     // MARK: - Private
 
-    private static func report(files: [MediaFile], placements: [URL: Place], backups: [URL: URL]) -> Report {
+    private static func report(files: [MediaFile], placements: [URL: Place]) -> Report {
         var placeCounts: [Place: Int] = [:]
         var driveCounts: [String: (count: Int, bytes: Int64)] = [:]
         for file in files {
             guard let place = placements[file.url] else { continue }
             placeCounts[place, default: 0] += 1
-            let drive = place.drive
-            let old = driveCounts[drive] ?? (0, 0)
-            driveCounts[drive] = (old.count + 1, old.bytes + file.size)
+            let soFar = driveCounts[place.drive] ?? (0, 0)
+            driveCounts[place.drive] = (soFar.count + 1, soFar.bytes + file.size)
         }
         let byPlace = placeCounts
             .map { PlaceCount(place: $0.key, count: $0.value) }
-            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.place.title < $1.place.title }
+            .sorted { a, b in
+                if a.count != b.count { return a.count > b.count }
+                return a.place.title < b.place.title
+            }
         let byDrive = driveCounts
             .map { DriveCount(drive: $0.key, count: $0.value.count, bytes: $0.value.bytes) }
-            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.drive < $1.drive }
+            .sorted { a, b in
+                if a.count != b.count { return a.count > b.count }
+                return a.drive < b.drive
+            }
         return Report(files: files, bytes: files.reduce(0) { $0 + $1.size },
                       byPlace: byPlace, byDrive: byDrive, placements: placements)
     }
@@ -111,13 +116,15 @@ nonisolated enum IngestDuplicates {
     private static func place(of copy: URL, in shoots: [ShootRoots]) -> Place {
         let path = canonical(copy)
         let drive = driveName(copy)
-        var best: (shoot: ShootRoots, depth: Int)?
+        // Deepest = longest root path containing the copy.
+        var deepest: (shoot: ShootRoots, rootLength: Int)?
         for shoot in shoots {
             for root in shoot.roots.map(canonical) where contains(root, path) {
-                if best == nil || root.count > best!.depth { best = (shoot, root.count) }
+                let isDeeper = root.count > (deepest?.rootLength ?? -1)
+                if isDeeper { deepest = (shoot, root.count) }
             }
         }
-        if let best { return Place(title: best.shoot.name, drive: drive, shootID: best.shoot.id) }
+        if let deepest { return Place(title: deepest.shoot.name, drive: drive, shootID: deepest.shoot.id) }
         let parent = copy.standardizedFileURL.deletingLastPathComponent().lastPathComponent
         return Place(title: "\(drive) › \(parent)", drive: drive, shootID: nil)
     }
