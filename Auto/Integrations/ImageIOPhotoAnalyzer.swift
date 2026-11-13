@@ -13,6 +13,18 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
     static let eyeClosedThreshold = 0.18
     static let metricsLongEdge = 512
 
+    /// Luma at or above this counts as blown highlights, at or below `clipLowLevel` as crushed shadows.
+    private static let clipHighLevel: UInt8 = 250
+    private static let clipLowLevel: UInt8 = 5
+    /// Each face crop in the strip is padded by this share of the face box on every side.
+    private static let faceCropPadding = 0.2
+    /// Max centre distance (normalized, Manhattan) for a capture-quality result to belong to a face.
+    private static let faceQualityMatchDistance = 0.1
+    /// A face box within this normalized margin of the frame edge counts as cut off.
+    private static let edgeCutMargin = 0.01
+
+    // MARK: - Analyze
+
     func analyze(_ url: URL, workName: String, workDir: URL, spec: PreviewSpec) async throws
         -> (PhotoMetrics, preview: URL, faceStrip: URL?)
     {
@@ -35,7 +47,6 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
         let previewURL = workDir.appendingPathComponent("\(workName).jpg")
         try Self.writeJPEG(image, to: previewURL, quality: spec.quality)
 
-        // Gray metrics image.
         let gray = Self.grayImage(image, longEdge: Self.metricsLongEdge)
         let stats = Self.lumaStats(gray)
         let sharp = Self.laplacianVariance(gray, region: nil)
@@ -44,12 +55,10 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
         try Task.checkCancellation()
         let vision = Self.runVision(image)
         var faces = vision.faces
-        // Largest face sharpness on the gray image.
-        var faceSharp: Double?
-        if let big = faces.max(by: { $0.box.width * $0.box.height < $1.box.width * $1.box.height }) {
-            faceSharp = Self.laplacianVariance(gray, region: big.box)
-        }
-        faces.sort { $0.box.minX < $1.box.minX }
+        // Face sharpness is measured on the largest face only.
+        let largestFace = faces.max { $0.box.width * $0.box.height < $1.box.width * $1.box.height }
+        let faceSharp = largestFace.map { Self.laplacianVariance(gray, region: $0.box) }
+        faces.sort { $0.box.minX < $1.box.minX }   // left to right, matching the face strip numbering
 
         var stripURL: URL?
         if spec.faceStrips, !faces.isEmpty {
@@ -64,7 +73,7 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
         return (metrics, previewURL, stripURL)
     }
 
-    // MARK: EXIF
+    // MARK: - EXIF
 
     static func captureTime(_ source: CGImageSource) -> Date? {
         guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -91,7 +100,7 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
         return TimeZone(secondsFromGMT: (sign == "-" ? -1 : 1) * (h * 3600 + m * 60))
     }
 
-    // MARK: Writing
+    // MARK: - Writing
 
     static func writeJPEG(_ image: CGImage, to url: URL, quality: Double) throws {
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
@@ -102,34 +111,39 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
     }
 
     static func writeFaceStrip(_ image: CGImage, faces: [FaceInfo], spec: PreviewSpec, to url: URL) throws -> URL? {
-        let w = Double(image.width), h = Double(image.height)
-        var crops: [CGImage] = []
-        for face in faces.prefix(spec.maxFaces) {
-            var r = CGRect(x: face.box.minX * w, y: face.box.minY * h,
-                           width: face.box.width * w, height: face.box.height * h)
-            r = r.insetBy(dx: -r.width * 0.2, dy: -r.height * 0.2)
-                .intersection(CGRect(x: 0, y: 0, width: w, height: h)).integral
-            if r.width >= 1, r.height >= 1, let c = image.cropping(to: r) { crops.append(c) }
-        }
+        let crops = faces.prefix(spec.maxFaces).compactMap { faceCrop(of: image, box: $0.box) }
         guard !crops.isEmpty else { return nil }
-        let fh = spec.faceHeight
-        let widths = crops.map { max(1, Int((Double($0.width) * Double(fh) / Double($0.height)).rounded())) }
-        let total = widths.reduce(0, +)
-        guard let ctx = CGContext(data: nil, width: total, height: fh, bitsPerComponent: 8, bytesPerRow: 0,
+        // Every crop is scaled to the strip height and laid out left to right.
+        let stripHeight = spec.faceHeight
+        let widths = crops.map { crop in
+            max(1, Int((Double(crop.width) * Double(stripHeight) / Double(crop.height)).rounded()))
+        }
+        let totalWidth = widths.reduce(0, +)
+        guard let ctx = CGContext(data: nil, width: totalWidth, height: stripHeight, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { throw PhotoAnalyzerError.writeFailed }
         ctx.interpolationQuality = .high
         var x = 0
-        for (c, cw) in zip(crops, widths) {
-            ctx.draw(c, in: CGRect(x: x, y: 0, width: cw, height: fh))
-            x += cw
+        for (crop, cropWidth) in zip(crops, widths) {
+            ctx.draw(crop, in: CGRect(x: x, y: 0, width: cropWidth, height: stripHeight))
+            x += cropWidth
         }
         guard let strip = ctx.makeImage() else { throw PhotoAnalyzerError.writeFailed }
         try writeJPEG(strip, to: url, quality: spec.quality)
         return url
     }
 
-    // MARK: Gray metrics
+    /// The face box (normalized, top-left origin) in pixels, padded and clipped to the image; nil if empty.
+    private static func faceCrop(of image: CGImage, box: CGRect) -> CGImage? {
+        let w = Double(image.width), h = Double(image.height)
+        let faceRect = CGRect(x: box.minX * w, y: box.minY * h, width: box.width * w, height: box.height * h)
+        let padded = faceRect.insetBy(dx: -faceRect.width * faceCropPadding, dy: -faceRect.height * faceCropPadding)
+        let rect = padded.intersection(CGRect(x: 0, y: 0, width: w, height: h)).integral
+        guard rect.width >= 1, rect.height >= 1 else { return nil }
+        return image.cropping(to: rect)
+    }
+
+    // MARK: - Gray metrics
 
     struct Gray { var width: Int; var height: Int; var pixels: [UInt8] }
 
@@ -159,8 +173,8 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
         for p in g.pixels {
             let v = Double(p)
             sum += v; sumSq += v * v
-            if p >= 250 { hi += 1 }
-            if p <= 5 { lo += 1 }
+            if p >= clipHighLevel { hi += 1 }
+            if p <= clipLowLevel { lo += 1 }
         }
         let mean = sum / n
         let variance = max(0, sumSq / n - mean * mean)
@@ -205,7 +219,7 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
         return hash
     }
 
-    // MARK: Vision
+    // MARK: - Vision
 
     struct VisionResult { var faces: [FaceInfo]; var horizonDeg: Double? }
 
@@ -219,18 +233,27 @@ nonisolated struct ImageIOPhotoAnalyzer: PhotoAnalyzer {
         try? handler.perform([rects, landmarks, quality, horizon])
 
         let size = CGSize(width: image.width, height: image.height)
-        let qualities = (quality.results ?? [])
+        let qualities = quality.results ?? []
+        // Landmark observations carry eye points; fall back to plain rectangles when there are none.
+        let observations: [VNFaceObservation]
+        if let withLandmarks = landmarks.results, !withLandmarks.isEmpty {
+            observations = withLandmarks
+        } else {
+            observations = rects.results ?? []
+        }
         var faces: [FaceInfo] = []
-        let observations = (landmarks.results?.isEmpty == false ? landmarks.results : rects.results) ?? []
         for obs in observations {
-            let b = obs.boundingBox
-            let box = CGRect(x: b.minX, y: 1 - b.maxY, width: b.width, height: b.height)
-            let q = qualities.min(by: { dist($0.boundingBox, b) < dist($1.boundingBox, b) })
-                .flatMap { dist($0.boundingBox, b) < 0.1 ? $0.faceCaptureQuality : nil }
-            let edge = 0.01
-            let cut = box.minX < edge || box.minY < edge || box.maxX > 1 - edge || box.maxY > 1 - edge
+            let visionBox = obs.boundingBox
+            // Vision boxes have a bottom-left origin; FaceInfo uses top-left.
+            let box = CGRect(x: visionBox.minX, y: 1 - visionBox.maxY, width: visionBox.width, height: visionBox.height)
+            let nearestQuality = qualities.min { dist($0.boundingBox, visionBox) < dist($1.boundingBox, visionBox) }
+            let matchedQuality = nearestQuality.flatMap {
+                dist($0.boundingBox, visionBox) < faceQualityMatchDistance ? $0.faceCaptureQuality : nil
+            }
+            let cut = box.minX < edgeCutMargin || box.minY < edgeCutMargin
+                || box.maxX > 1 - edgeCutMargin || box.maxY > 1 - edgeCutMargin
             faces.append(FaceInfo(box: box, eyesClosed: eyesClosed(obs, size: size),
-                                  edgeCut: cut, quality: q.map(Double.init)))
+                                  edgeCut: cut, quality: matchedQuality.map(Double.init)))
         }
         let tilt = (horizon.results?.first).map { Double($0.angle) * 180 / .pi }
         return VisionResult(faces: faces, horizonDeg: tilt)
